@@ -1,0 +1,16 @@
+/target
+
+# Derived research artifacts — kept locally, not tracked, because they are
+# byte-identical to or mechanically reproducible from material that IS tracked.
+# See research/README.md for how to regenerate each one.
+
+# Byte-identical to the .exe inside the two tracked software/*.zip archives.
+/research/software/installers/
+
+# Plain `unzip` output of the tracked firmware/*.zip archives.
+/research/firmware/extracted/
+
+# Output of firmware/work/unpack.py; curated copies are tracked under
+# research/software/client-3.0.5.583/ and research/software/webui-3.0.5.583/.
+/research/firmware/work/out_client/
+/research/firmware/work/out_config/

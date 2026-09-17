@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/b070-proto",
+    "crates/b070-mgmt",
+    "crates/b070-cli",
+    "crates/b070-capture",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/doridian/B070-008-19-IP"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+quick-xml = "0.37"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "fs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "charset", "http2"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
