@@ -17,14 +17,14 @@
 //! to be injected out of band, so it has its own message
 //! ([`b070_session::Input::CtrlAltDel`]) and its own menu entry.
 
-use winit::keyboard::KeyCode;
+use crate::key::PhysicalKey;
 
 /// One named key sequence.
 pub struct KeyMacro {
     /// What the menu shows.
     pub label: &'static str,
     /// Physical keys, pressed in order and released in reverse.
-    pub keys: &'static [KeyCode],
+    pub keys: &'static [PhysicalKey],
 }
 
 /// A titled run of macros; the menu draws a separator between groups.
@@ -40,19 +40,27 @@ pub const GROUPS: &[Group] = &[
         macros: &[
             KeyMacro {
                 label: "Alt+Tab",
-                keys: &[KeyCode::AltLeft, KeyCode::Tab],
+                keys: &[PhysicalKey::AltLeft, PhysicalKey::Tab],
             },
             KeyMacro {
                 label: "Alt+Shift+Tab",
-                keys: &[KeyCode::AltLeft, KeyCode::ShiftLeft, KeyCode::Tab],
+                keys: &[
+                    PhysicalKey::AltLeft,
+                    PhysicalKey::ShiftLeft,
+                    PhysicalKey::Tab,
+                ],
             },
             KeyMacro {
                 label: "Ctrl+Shift+Esc  (Task Manager)",
-                keys: &[KeyCode::ControlLeft, KeyCode::ShiftLeft, KeyCode::Escape],
+                keys: &[
+                    PhysicalKey::ControlLeft,
+                    PhysicalKey::ShiftLeft,
+                    PhysicalKey::Escape,
+                ],
             },
             KeyMacro {
                 label: "Ctrl+Esc  (Start menu)",
-                keys: &[KeyCode::ControlLeft, KeyCode::Escape],
+                keys: &[PhysicalKey::ControlLeft, PhysicalKey::Escape],
             },
         ],
     },
@@ -61,23 +69,23 @@ pub const GROUPS: &[Group] = &[
         macros: &[
             KeyMacro {
                 label: "Super",
-                keys: &[KeyCode::SuperLeft],
+                keys: &[PhysicalKey::MetaLeft],
             },
             KeyMacro {
                 label: "Super+D  (show desktop)",
-                keys: &[KeyCode::SuperLeft, KeyCode::KeyD],
+                keys: &[PhysicalKey::MetaLeft, PhysicalKey::KeyD],
             },
             KeyMacro {
                 label: "Super+E  (file manager)",
-                keys: &[KeyCode::SuperLeft, KeyCode::KeyE],
+                keys: &[PhysicalKey::MetaLeft, PhysicalKey::KeyE],
             },
             KeyMacro {
                 label: "Super+L  (lock)",
-                keys: &[KeyCode::SuperLeft, KeyCode::KeyL],
+                keys: &[PhysicalKey::MetaLeft, PhysicalKey::KeyL],
             },
             KeyMacro {
                 label: "Super+R  (run)",
-                keys: &[KeyCode::SuperLeft, KeyCode::KeyR],
+                keys: &[PhysicalKey::MetaLeft, PhysicalKey::KeyR],
             },
         ],
     },
@@ -86,15 +94,15 @@ pub const GROUPS: &[Group] = &[
         macros: &[
             KeyMacro {
                 label: "Alt+F4  (close)",
-                keys: &[KeyCode::AltLeft, KeyCode::F4],
+                keys: &[PhysicalKey::AltLeft, PhysicalKey::F4],
             },
             KeyMacro {
                 label: "Alt+Space  (window menu)",
-                keys: &[KeyCode::AltLeft, KeyCode::Space],
+                keys: &[PhysicalKey::AltLeft, PhysicalKey::Space],
             },
             KeyMacro {
                 label: "Alt+Enter",
-                keys: &[KeyCode::AltLeft, KeyCode::Enter],
+                keys: &[PhysicalKey::AltLeft, PhysicalKey::Enter],
             },
         ],
     },
@@ -103,11 +111,11 @@ pub const GROUPS: &[Group] = &[
         macros: &[
             KeyMacro {
                 label: "Print Screen",
-                keys: &[KeyCode::PrintScreen],
+                keys: &[PhysicalKey::PrintScreen],
             },
             KeyMacro {
                 label: "Alt+Print Screen  (active window)",
-                keys: &[KeyCode::AltLeft, KeyCode::PrintScreen],
+                keys: &[PhysicalKey::AltLeft, PhysicalKey::PrintScreen],
             },
         ],
     },
@@ -117,15 +125,27 @@ pub const GROUPS: &[Group] = &[
         macros: &[
             KeyMacro {
                 label: "Ctrl+Alt+F1",
-                keys: &[KeyCode::ControlLeft, KeyCode::AltLeft, KeyCode::F1],
+                keys: &[
+                    PhysicalKey::ControlLeft,
+                    PhysicalKey::AltLeft,
+                    PhysicalKey::F1,
+                ],
             },
             KeyMacro {
                 label: "Ctrl+Alt+F2",
-                keys: &[KeyCode::ControlLeft, KeyCode::AltLeft, KeyCode::F2],
+                keys: &[
+                    PhysicalKey::ControlLeft,
+                    PhysicalKey::AltLeft,
+                    PhysicalKey::F2,
+                ],
             },
             KeyMacro {
                 label: "Ctrl+Alt+F7",
-                keys: &[KeyCode::ControlLeft, KeyCode::AltLeft, KeyCode::F7],
+                keys: &[
+                    PhysicalKey::ControlLeft,
+                    PhysicalKey::AltLeft,
+                    PhysicalKey::F7,
+                ],
             },
         ],
     },
@@ -168,17 +188,15 @@ mod tests {
         }
     }
 
-    /// Every key has to survive the scancode table, or the macro sends nothing.
+    /// Every key has to carry a real scancode, or the macro sends nothing.
+    ///
+    /// The type guarantees there is *a* code; this catches a hole in the table.
     #[test]
     fn every_key_has_a_scancode() {
         for group in GROUPS {
             for m in group.macros {
                 for key in m.keys {
-                    assert!(
-                        crate::keys::scancode(*key).is_some(),
-                        "{}: no scancode for {key:?}",
-                        m.label
-                    );
+                    assert_ne!(key.scancode().0, 0, "{}: no scancode for {key:?}", m.label);
                 }
             }
         }
@@ -189,17 +207,17 @@ mod tests {
         // Releasing in reverse only works if the modifier is listed first.
         for group in GROUPS {
             for m in group.macros {
-                let modifier = |k: &KeyCode| {
+                let modifier = |k: &PhysicalKey| {
                     matches!(
                         k,
-                        KeyCode::ControlLeft
-                            | KeyCode::ControlRight
-                            | KeyCode::AltLeft
-                            | KeyCode::AltRight
-                            | KeyCode::ShiftLeft
-                            | KeyCode::ShiftRight
-                            | KeyCode::SuperLeft
-                            | KeyCode::SuperRight
+                        PhysicalKey::ControlLeft
+                            | PhysicalKey::ControlRight
+                            | PhysicalKey::AltLeft
+                            | PhysicalKey::AltRight
+                            | PhysicalKey::ShiftLeft
+                            | PhysicalKey::ShiftRight
+                            | PhysicalKey::MetaLeft
+                            | PhysicalKey::MetaRight
                     )
                 };
                 let first_plain = m.keys.iter().position(|k| !modifier(k));

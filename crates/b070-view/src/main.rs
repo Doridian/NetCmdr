@@ -7,12 +7,9 @@
 //! session with that token, and shows the target's screen in a window with
 //! keyboard and mouse passed through.
 
-mod keys;
-mod macros;
-mod menu;
-mod mgmt;
+mod link;
 mod render;
-mod viewer;
+mod shell;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -129,9 +126,9 @@ fn main() -> Result<()> {
 
     match &args.snapshot {
         Some(path) => snapshot(&session, args.frames, path),
-        None => viewer::run(
+        None => shell::run(
             session,
-            viewer::Config {
+            shell::Config {
                 host: args.host,
                 user: args.user,
                 target: args.target,

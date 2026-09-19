@@ -15,6 +15,7 @@ path = "src/main.rs"
 b070-mgmt = { path = "../b070-mgmt" }
 b070-proto = { path = "../b070-proto" }
 b070-session = { path = "../b070-session" }
+b070-ui = { path = "../b070-ui", features = ["winit"] }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true

@@ -332,8 +332,11 @@ crates/
   b070-mgmt/     /message.pv client, PV_* XML models and the editable
                  configuration document (OpenSSL, see TLS above)
   b070-session/  the KVM session: channels, login, video codec, input
+  b070-ui/       the viewer's interface — menu, screen, input routing — with
+                 nothing in it that knows whether it is a window or a tab
   b070-cli/      the `b070` binary
-  b070-view/     the `b070-view` viewer (winit + egui on OpenGL)
+  b070-view/     the `b070-view` viewer: a window, a GL context and raw input,
+                 over `b070-ui` (winit + egui on OpenGL)
   b070-bridge/   the `b070-bridge` WebSocket and HTTPS bridge, so a browser can
                  speak a protocol its TLS stack cannot
 research/        the protocol write-up, provenance for the vendor material it

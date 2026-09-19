@@ -255,6 +255,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "b070-ui"
+version = "0.1.0"
+dependencies = [
+ "b070-mgmt",
+ "b070-proto",
+ "b070-session",
+ "egui",
+ "tracing",
+ "winit",
+]
+
+[[package]]
 name = "b070-view"
 version = "0.1.0"
 dependencies = [
@@ -262,6 +274,7 @@ dependencies = [
  "b070-mgmt",
  "b070-proto",
  "b070-session",
+ "b070-ui",
  "clap",
  "egui",
  "egui-winit",
