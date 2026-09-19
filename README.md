@@ -131,8 +131,12 @@ deliberately does not work on them. They are built from the vendor client's own
 request format and have **never been run against hardware** — nothing has
 confirmed the device accepts what they send, and a firmware write that is wrong
 or interrupted leaves hardware that cannot be recovered over the network. Do not
-use them without a way to reflash out of band. `b070 siu versions` is untested
-too, but only reads.
+use them without a way to reflash out of band.
+
+`b070 siu versions` reads the hardware and firmware revision of the Server
+Interface Unit on each port. The device answers for **one port per request**, so
+a sweep is one round trip per port, at a second or two each; rows print as they
+arrive, and a port with nothing plugged in says so.
 
 Everything else above has been run against a live device.
 

@@ -772,11 +772,20 @@ pub fn parse_siu_versions(xml: &str) -> Result<Vec<SiuVersion>, Error> {
         .filter_map(|e| {
             Some(SiuVersion {
                 port: e.attr_parsed("number")?,
-                hardware: opt(e.attr("roc_hw")),
-                firmware: opt(e.attr("roc_fw")),
+                hardware: siu_field(e.attr("roc_hw")),
+                firmware: siu_field(e.attr("roc_fw")),
             })
         })
         .collect())
+}
+
+/// A SIU version field. The device writes `"Not responding"` into both when the
+/// port has no unit attached, which is an absence rather than a version.
+fn siu_field(v: Option<&str>) -> Option<String> {
+    match v {
+        Some(v) if !v.is_empty() && !v.eq_ignore_ascii_case("Not responding") => Some(v.to_owned()),
+        _ => None,
+    }
 }
 
 /// Pull the `reply_error` description out of any PV document, if it signals an
@@ -928,6 +937,40 @@ mod tests {
         assert_eq!(kvm[0].status, "Available");
         assert!(!kvm[2].has_siu());
         assert_eq!(kvm[2].status, "Off");
+    }
+
+    #[test]
+    fn parses_a_live_siu_version_reply() {
+        // Captured from the device: one port per reply, whatever was asked.
+        let xml = r#"<PV_Message name="PV_STATUS"><PV_status SESSIONID="x"><status_list>
+            <port number="1" roc_hw="20373 0.2 20372 2.0 ID00080207"
+                  roc_fw="RoC II USB En v4.0 C8 B225 12/03/2013"/>
+            </status_list></PV_status></PV_Message>"#;
+        let v = parse_siu_versions(xml).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].port, 1);
+        assert_eq!(
+            v[0].hardware.as_deref(),
+            Some("20373 0.2 20372 2.0 ID00080207")
+        );
+        assert_eq!(
+            v[0].firmware.as_deref(),
+            Some("RoC II USB En v4.0 C8 B225 12/03/2013")
+        );
+        assert!(v[0].responding());
+    }
+
+    #[test]
+    fn an_empty_port_reads_as_no_siu() {
+        // The firmware answers "Not responding" rather than omitting the port.
+        let xml = r#"<PV_Message name="PV_STATUS"><PV_status><status_list>
+            <port number="3" roc_hw="Not responding" roc_fw="Not responding"/>
+            </status_list></PV_status></PV_Message>"#;
+        let v = parse_siu_versions(xml).unwrap();
+        assert_eq!(v[0].port, 3);
+        assert_eq!(v[0].hardware, None);
+        assert_eq!(v[0].firmware, None);
+        assert!(!v[0].responding());
     }
 
     #[test]

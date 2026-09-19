@@ -134,8 +134,18 @@ pub struct SiuUpgradeStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiuVersion {
     pub port: u32,
+    /// e.g. `20373 0.2 20372 2.0 ID00080207`. `None` when no unit answered.
     pub hardware: Option<String>,
+    /// e.g. `RoC II USB En v4.0 C8 B225 12/03/2013`. `None` when none answered.
     pub firmware: Option<String>,
+}
+
+impl SiuVersion {
+    /// Whether a unit answered at all. A port with nothing plugged in reports
+    /// `"Not responding"`, which this crate reads as an absence.
+    pub fn responding(&self) -> bool {
+        self.hardware.is_some() || self.firmware.is_some()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -274,7 +284,15 @@ impl Client {
         if let Some(t) = timeout {
             endpoint.timeout = t.max(self.endpoint.timeout);
         }
+        // Whole bodies, at TRACE only, because recovering this protocol means
+        // reading them. They are not redacted and cannot usefully be: a save
+        // carries any password being set, and a config fetch comes back with
+        // the session token, the RADIUS secrets and the SNMP community in the
+        // clear. Treat a trace log as containing every credential the device
+        // holds.
+        tracing::trace!(verb, body = %inner, "sending");
         let xml = transport::post_message_pv(&endpoint, &body)?;
+        tracing::trace!(verb, reply = %xml, "received");
         if let Some(err) = model::error_in(&xml) {
             return Err(Error::Device(err));
         }
@@ -531,20 +549,37 @@ impl Client {
         )?)
     }
 
-    /// Read the firmware and hardware revision of the SIUs on `ports`.
+    /// Read the firmware and hardware revision of the SIU on one port.
     ///
-    /// The device has to talk to each unit over the Cat5 link, so this is slow
-    /// and only answers for ports that actually have a SIU.
-    pub fn siu_versions(&self, ports: &[u32]) -> Result<Vec<SiuVersion>, Error> {
-        let mut inner = String::from("<action type=\"roc_version\"/>");
-        for p in ports {
-            inner.push_str(&format!("<port number=\"{p}\"/>"));
-        }
-        model::parse_siu_versions(&self.message(
+    /// The device has to talk to the unit over the Cat5 link, so this takes a
+    /// second or two. A port with no SIU answers `"Not responding"`, which
+    /// comes back as a [`SiuVersion`] with nothing in it.
+    ///
+    /// **One port per request.** The vendor's client appends a `<port>` element
+    /// per port and sends them in one message, but the device answers only for
+    /// the first and silently drops the rest — measured on firmware
+    /// 2.2.1258.1.0, where asking for ports 1 and 2 together returned only
+    /// port 1 even though both had a SIU attached.
+    pub fn siu_version(&self, port: u32) -> Result<SiuVersion, Error> {
+        let xml = self.message(
             "CMA_ACTION",
-            &inner,
+            &format!("<action type=\"roc_version\"/><port number=\"{port}\"/>"),
             Some(Duration::from_secs(60)),
-        )?)
+        )?;
+        model::parse_siu_versions(&xml)?
+            .into_iter()
+            .find(|v| v.port == port)
+            .ok_or_else(|| Error::Device(format!("device said nothing about port {port}")))
+    }
+
+    /// [`Client::siu_version`] for several ports.
+    ///
+    /// This is one round trip **per port**, because the device answers for only
+    /// one at a time; a full sweep of a 16-port switch takes half a minute. A
+    /// caller that wants to show progress should loop over
+    /// [`Client::siu_version`] itself.
+    pub fn siu_versions(&self, ports: &[u32]) -> Result<Vec<SiuVersion>, Error> {
+        ports.iter().map(|&p| self.siu_version(p)).collect()
     }
 
     /// Log out, ending the session on the device.

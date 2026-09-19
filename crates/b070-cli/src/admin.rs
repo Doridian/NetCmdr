@@ -357,21 +357,30 @@ pub fn siu_versions(client: &Client, spec: &str, port_count: u32) -> Result<()> 
     if ports.is_empty() {
         bail!("no ports selected");
     }
-    let versions = client
-        .siu_versions(&ports)
-        .context("reading SIU versions")?;
-    if versions.is_empty() {
-        println!("no SIU answered");
-        return Ok(());
+
+    // One round trip per port — the device answers for only one at a time — and
+    // each takes a second or two, so print rows as they arrive rather than
+    // going quiet for the length of a sweep.
+    println!("{:>4}  {:<32} FIRMWARE", "PORT", "HARDWARE");
+    let mut answered = 0;
+    for port in &ports {
+        let v = client
+            .siu_version(*port)
+            .with_context(|| format!("reading the SIU version on port {port}"))?;
+        if v.responding() {
+            answered += 1;
+            println!(
+                "{:>4}  {:<32} {}",
+                v.port,
+                crate::args::or_dash(v.hardware.as_deref()),
+                crate::args::or_dash(v.firmware.as_deref()),
+            );
+        } else {
+            println!("{:>4}  no SIU attached", v.port);
+        }
     }
-    println!("{:>4}  {:<12} FIRMWARE", "PORT", "HARDWARE");
-    for v in versions {
-        println!(
-            "{:>4}  {:<12} {}",
-            v.port,
-            crate::args::or_dash(v.hardware.as_deref()),
-            crate::args::or_dash(v.firmware.as_deref()),
-        );
+    if answered == 0 {
+        println!("\nno SIU answered on any of the ports asked");
     }
     Ok(())
 }

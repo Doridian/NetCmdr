@@ -324,7 +324,7 @@ Six verbs (`name=` on the `CMA_Message`):
 <CMA_Message name="CMA_ACTION" SESSIONID="…"><action type="power" command="cycle|up|down" port="N"/></CMA_Message>
 <!-- act: also systemlock | systemunlock | disconnect port=N | backup
      | restore preserve=B (+ <data><![CDATA[…]]></data>) | restore_from_backup
-     | roc_version (+ <port number="N"/> per port) -->
+     | roc_version (+ <port number="N"/>, one port only — see 5.2.2) -->
 <!-- take / release exclusive write access -->
 <CMA_Message name="CMA_PERMISSION" SESSIONID="…"><permission level="config|normal"/></CMA_Message>
 <!-- write: the whole configuration, see 5.2.1 -->
@@ -427,6 +427,35 @@ showing the port again does **not** put those grants back. Measured on firmware
 Secrets — the LDAP bind password, RADIUS shared secrets and the SNMP community —
 are stored in the clear and come back in **every** configuration fetch, so any
 admin-level account can read them.
+
+#### 5.2.2 SIU versions — IMPLEMENTED AND HARDWARE-VERIFIED (2026-09-19)
+
+`<action type="roc_version"/>` followed by `<port number="N"/>` asks the device
+to interrogate the Server Interface Unit on a port over the Cat5 link. It
+answers with a `PV_STATUS`:
+
+```xml
+<PV_status SESSIONID="…"><status_list>
+<port number="1" roc_hw="20373 0.2 20372 2.0 ID00080207"
+      roc_fw="RoC II USB En v4.0 C8 B225 12/03/2013"/>
+</status_list></PV_status>
+```
+
+Two things the vendor's client does not tell you, both measured on 2.2.1258.1.0:
+
+- **One port per request.** `FetchRoccVersionsHttpCmd` appends a `<port>`
+  element per port and sends them in one message, but the device answers for
+  the **first one only** and silently drops the rest — asking for ports 1 and 2
+  together returned just port 1, though both had a `VMROCC` attached. Reading a
+  whole switch means one round trip per port, about two seconds each.
+- **An empty port answers `roc_hw="Not responding" roc_fw="Not responding"`**
+  rather than being left out, so the absence is reported, not implied.
+
+Note also that `FetchRoccVersionsHttpCmd.composeData` emits `"\t< action
+type=\"roc_version\"/>"` — with a space after the `<`, which is not
+well-formed XML. The device accepts a properly formed `<action …/>` just as
+happily, so `b070-mgmt` sends that; the firmware's parser is evidently lenient
+about the vendor's own typo rather than matching on the literal string.
 
 **Legacy firmware (2013, from the old web UI, now 404):** a single ISAPI
 endpoint `POST /config/` with `client=ConfigXML|AdminXML|SwitchXML|StatusXML|
