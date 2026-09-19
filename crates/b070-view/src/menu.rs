@@ -21,7 +21,8 @@
 //! [`Menu::confirm`] instead of calling straight through.
 
 use b070_mgmt::{PowerCommand, Target};
-use b070_session::Noise;
+use b070_proto::command::{VideoFilter, VideoSetting};
+use b070_session::{Knob, Noise, VideoSettings};
 
 use crate::macros;
 
@@ -95,6 +96,9 @@ pub enum Action {
     RefreshVideo,
     AutoAdjustVideo,
     StopAutoAdjust,
+    /// Set one analog capture knob to an absolute value.
+    SetVideoNumber(VideoSetting, i32),
+    SetVideoFilter(VideoFilter),
     SetScaling(Scaling),
     ResizeToRemote,
 
@@ -131,6 +135,12 @@ pub struct Menu {
     pub remote: Option<(u16, u16)>,
     /// How much of the picture is changing, once the first report has arrived.
     pub noise: Option<Noise>,
+    /// The device's analog capture settings, once it has reported them.
+    ///
+    /// The adjustment window edits this in place: the device never announces a
+    /// change of its own accord, so this copy is what the controls read back
+    /// until a fresh config document replaces it.
+    pub video: Option<VideoSettings>,
     /// The right-hand note in the bar: device messages, command results.
     pub status: String,
     /// A management request is in flight.
@@ -146,6 +156,10 @@ pub struct Menu {
     menu_open: bool,
     show_shortcuts: bool,
     show_about: bool,
+    show_video_adjust: bool,
+    /// What the capture settings were when the adjustment window was opened,
+    /// so *Restore* has something to put back.
+    video_restore: Option<VideoSettings>,
     confirm: Option<Confirm>,
 }
 
@@ -160,6 +174,7 @@ impl Menu {
             scaling: Scaling::Fit,
             remote: None,
             noise: None,
+            video: None,
             status: String::new(),
             busy: false,
             switching: false,
@@ -168,6 +183,8 @@ impl Menu {
             menu_open: false,
             show_shortcuts: false,
             show_about: false,
+            show_video_adjust: false,
+            video_restore: None,
             confirm: None,
         }
     }
@@ -346,6 +363,19 @@ impl Menu {
                 out.push(Action::StopAutoAdjust);
                 ui.close();
             }
+            if ui
+                .button("Adjust manually…")
+                .on_hover_text(
+                    "Position, phase, brightness and filter, by hand — including \
+                     the horizontal position the automatic adjustment leaves \
+                     alone.",
+                )
+                .clicked()
+            {
+                self.show_video_adjust = true;
+                self.video_restore = self.video.clone();
+                ui.close();
+            }
 
             ui.separator();
             for mode in Scaling::ALL {
@@ -510,7 +540,168 @@ impl Menu {
         ui.label(format!("{} — {}", self.current_port, self.current_name));
     }
 
+    /// The manual video adjustment window.
+    ///
+    /// Deliberately not modal: the whole point is to watch the picture — and
+    /// the noise reading in the bar — change while a value is nudged, so this
+    /// neither covers the screen nor takes the keyboard away from the target.
+    /// Only a value being typed into a control does that, which egui reports
+    /// on its own.
+    ///
+    /// Every control writes straight into [`Menu::video`] and emits an
+    /// [`Action`] once it settles. The device answers each one by re-digitising
+    /// the picture and tells us nothing, so that copy is the only record of
+    /// what was asked for.
+    fn video_adjust_window(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
+        if !self.show_video_adjust {
+            return;
+        }
+
+        let mut open = true;
+        let mut video = self.video.clone();
+        let restore = self.video_restore.clone();
+        let noise = self.noise;
+        let mut restore_now = false;
+
+        egui::Window::new("Video adjustment")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let Some(v) = video.as_mut() else {
+                    ui.label("Waiting for the device to report its capture settings…");
+                    return;
+                };
+
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}×{} at {} Hz",
+                        v.width, v.height, v.refresh
+                    ))
+                    .weak(),
+                );
+                ui.add_space(6.0);
+
+                egui::Grid::new("video_knobs")
+                    .num_columns(3)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        if let Some(n) =
+                            knob_row(ui, "Horizontal position", &mut v.hoffset, HOFFSET_HELP)
+                        {
+                            out.push(Action::SetVideoNumber(VideoSetting::HOffset, n));
+                        }
+                        if let Some(n) =
+                            knob_row(ui, "Vertical position", &mut v.voffset, VOFFSET_HELP)
+                        {
+                            out.push(Action::SetVideoNumber(VideoSetting::VOffset, n));
+                        }
+                        if let Some(n) = knob_row(ui, "Phase", &mut v.phase, PHASE_HELP) {
+                            out.push(Action::SetVideoNumber(VideoSetting::Phase, n));
+                        }
+
+                        if let Some(n) =
+                            slider_row(ui, "Brightness", &mut v.brightness, BRIGHTNESS_HELP)
+                        {
+                            out.push(Action::SetVideoNumber(VideoSetting::Brightness, n));
+                        }
+                        if let Some(n) =
+                            slider_row(ui, "Contrast", &mut v.contrast, BRIGHTNESS_HELP)
+                        {
+                            out.push(Action::SetVideoNumber(VideoSetting::Contrast, n));
+                        }
+
+                        ui.label("Filter").on_hover_text(FILTER_HELP);
+                        egui::ComboBox::from_id_salt("video_filter")
+                            .selected_text(filter_label(v.filter))
+                            .show_ui(ui, |ui| {
+                                for f in VIDEO_FILTERS {
+                                    if ui
+                                        .selectable_label(v.filter == f, filter_label(f))
+                                        .clicked()
+                                    {
+                                        v.filter = f;
+                                        out.push(Action::SetVideoFilter(f));
+                                    }
+                                }
+                            });
+                        ui.label("");
+                        ui.end_row();
+
+                        if let Some(noise) = noise {
+                            ui.label("Noise").on_hover_text(NOISE_HELP);
+                            ui.horizontal(|ui| {
+                                noise_bar(ui, noise);
+                                ui.label(format!("{}%", noise.level));
+                            });
+                            ui.label("");
+                            ui.end_row();
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(restore.is_some(), egui::Button::new("Restore"))
+                        .on_hover_text(
+                            "Put back the values the device reported when this window \
+                             was opened.",
+                        )
+                        .clicked()
+                    {
+                        restore_now = true;
+                    }
+                    if ui
+                        .button("Auto adjust")
+                        .on_hover_text(
+                            "Let the device adjust itself. It re-derives the phase and \
+                             the filter — but not the positions above.",
+                        )
+                        .clicked()
+                    {
+                        out.push(Action::AutoAdjustVideo);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Changes take effect at once and last for this session only: \
+                         the device reads its own defaults again at the next login.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+
+        self.video = video;
+        self.show_video_adjust = open;
+
+        if restore_now {
+            if let Some(r) = restore {
+                for (setting, value) in [
+                    (VideoSetting::Brightness, r.brightness.value),
+                    (VideoSetting::Contrast, r.contrast.value),
+                    (VideoSetting::HOffset, r.hoffset.value),
+                    (VideoSetting::VOffset, r.voffset.value),
+                    (VideoSetting::Phase, r.phase.value),
+                ] {
+                    out.push(Action::SetVideoNumber(setting, value));
+                }
+                // `Auto` is not a filter the device stores, it is a request to
+                // run the adjustment — which is the one thing a restore must
+                // not do.
+                if r.filter != VideoFilter::Auto {
+                    out.push(Action::SetVideoFilter(r.filter));
+                }
+                self.video = Some(r);
+            }
+        }
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
+        self.video_adjust_window(ctx, out);
+
         if let Some(pending) = &self.confirm {
             let mut decided = None;
             egui::Window::new(&pending.question)
@@ -602,17 +793,147 @@ impl Menu {
     }
 }
 
+/// The filters the device offers, in the order the vendor's dialog lists them.
+const VIDEO_FILTERS: [VideoFilter; 5] = [
+    VideoFilter::Auto,
+    VideoFilter::None,
+    VideoFilter::Low,
+    VideoFilter::Medium,
+    VideoFilter::High,
+];
+
+fn filter_label(f: VideoFilter) -> &'static str {
+    match f {
+        VideoFilter::Auto => "Auto",
+        VideoFilter::None => "None",
+        VideoFilter::Low => "Low",
+        VideoFilter::Medium => "Medium",
+        VideoFilter::High => "High",
+    }
+}
+
+const HOFFSET_HELP: &str = "\
+Where the device starts sampling each scan line, in pixels.
+
+Lower moves the picture right. If the left edge of the target's screen is cut \
+off, take this down by the number of pixels missing — the automatic adjustment \
+does not touch this value, so a mode the device has the wrong figure for stays \
+wrong until you correct it here.";
+
+const VOFFSET_HELP: &str = "\
+Which line the device starts capturing at. Lower moves the picture down.";
+
+const PHASE_HELP: &str = "\
+Where in each pixel's clock period the signal is sampled.
+
+This is the one to reach for when the picture is sharp in places and smeared \
+or shimmering in others. The automatic adjustment sets it for you.";
+
+const BRIGHTNESS_HELP: &str = "\
+The digitiser's own gain, not a filter on the received picture — it changes \
+what the device captures, so it also changes how much of the picture it thinks \
+is changing.";
+
+const FILTER_HELP: &str = "\
+How hard the device filters noise out of the digitised signal.
+
+Auto is not a setting: picking it runs the automatic adjustment, which chooses \
+a filter itself. That is what the stock client does too.";
+
+const NOISE_HELP: &str = "\
+How much of the picture is changing, per second. Watch it while you adjust: on \
+an idle target anything above zero is noise on the VGA link rather than real \
+work.";
+
+/// One numeric knob: a value to drag or step by one, and the range the device
+/// will accept for it.
+///
+/// Returns the value to send, once the control has settled on one. A drag
+/// reports a change for every frame it moves, and each change is a command the
+/// device answers by re-digitising the picture, so only the value a drag ends
+/// on is sent — the vendor's dialog guards its own sliders with
+/// `getValueIsAdjusting()` for the same reason.
+fn knob_row(ui: &mut egui::Ui, label: &str, knob: &mut Knob, help: &str) -> Option<i32> {
+    let mut send = None;
+    ui.label(label).on_hover_text(help);
+    ui.horizontal(|ui| {
+        let movable = !knob.is_fixed();
+        if ui
+            .add_enabled(movable && knob.value > knob.min, egui::Button::new("−"))
+            .clicked()
+        {
+            knob.value -= 1;
+            send = Some(knob.value);
+        }
+        let resp = ui.add_enabled(
+            movable,
+            egui::DragValue::new(&mut knob.value)
+                .range(knob.min..=knob.max)
+                .speed(0.25),
+        );
+        if settled(&resp) {
+            send = Some(knob.value);
+        }
+        if ui
+            .add_enabled(movable && knob.value < knob.max, egui::Button::new("+"))
+            .clicked()
+        {
+            knob.value += 1;
+            send = Some(knob.value);
+        }
+    });
+    ui.label(
+        egui::RichText::new(format!("{}–{}", knob.min, knob.max))
+            .small()
+            .weak(),
+    );
+    ui.end_row();
+    send
+}
+
+/// A knob whose range is wide and whose exact value does not matter, so it
+/// reads better as a slider. Same settling rule as [`knob_row`].
+fn slider_row(ui: &mut egui::Ui, label: &str, knob: &mut Knob, help: &str) -> Option<i32> {
+    let mut send = None;
+    ui.label(label).on_hover_text(help);
+    let resp = ui.add_enabled(
+        !knob.is_fixed(),
+        egui::Slider::new(&mut knob.value, knob.min..=knob.max),
+    );
+    if settled(&resp) {
+        send = Some(knob.value);
+    }
+    ui.label("");
+    ui.end_row();
+    send
+}
+
+/// True once a control has finished moving and its value is worth a command.
+///
+/// `changed()` alone fires on every frame of a drag; `drag_stopped()` alone
+/// misses a click on the stepper or a typed-in value.
+fn settled(resp: &egui::Response) -> bool {
+    resp.drag_stopped() || (resp.changed() && !resp.dragged())
+}
+
 /// The "Noise" reading as a compact bar, for the right-hand end of the bar.
 ///
 /// The stock client shows the same number as a labelled progress bar, but only
 /// inside its Advanced Video dialog; it belongs in the bar, because its whole
 /// use is to be watched while the video auto-adjust settles.
 fn noise_meter(ui: &mut egui::Ui, noise: Noise) {
+    // The status line lays out right-to-left, so the bar goes in before its
+    // label to end up to the right of it.
+    noise_bar(ui, noise);
+    ui.label(egui::RichText::new("Noise").weak());
+}
+
+/// The bar itself, without a label, so the adjustment window can put it in a
+/// grid cell of its own.
+fn noise_bar(ui: &mut egui::Ui, noise: Noise) -> egui::Response {
     const WIDTH: f32 = 42.0;
     const HEIGHT: f32 = 7.0;
 
-    // The status line lays out right-to-left, so the bar goes in before its
-    // label to end up to the right of it.
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(WIDTH, HEIGHT), egui::Sense::hover());
     let painter = ui.painter();
@@ -635,9 +956,7 @@ fn noise_meter(ui: &mut egui::Ui, noise: Noise) {
         noise.level,
         noise.changes,
         if noise.changes == 1 { "" } else { "s" },
-    ));
-
-    ui.label(egui::RichText::new("Noise").weak());
+    ))
 }
 
 /// Green while the picture is quiet, amber once it is restless, red when the
@@ -656,6 +975,98 @@ mod tests {
 
     fn menu() -> Menu {
         Menu::new("192.0.2.10".into(), "admin".into(), 1)
+    }
+
+    fn settings() -> VideoSettings {
+        b070_session::parse_video_settings(
+            "<client_config><video_settings brightness='49' contrast='50' cx='1360' \
+             cy='768' fq='60' voffset='24' voffset_min='7' voffset_max='26' \
+             hoffset='368' hoffset_min='113' hoffset_max='431' phase='4' \
+             filter='low'/></client_config>",
+        )
+        .expect("a settings element")
+    }
+
+    /// Run one headless frame of the menu and return what it asked for.
+    fn frame(m: &mut Menu, ctx: &egui::Context) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| actions = m.show(ui));
+        });
+        // Nothing here uploads textures, but the font atlas still arrives as a
+        // delta and epaint panics if one is dropped.
+        out.textures_delta.clear();
+        actions
+    }
+
+    #[test]
+    fn the_adjustment_window_paints_once_the_device_has_reported() {
+        let ctx = egui::Context::default();
+        let mut m = menu();
+        m.video = Some(settings());
+        m.noise = Some(Noise { level: 3, changes: 40 });
+        m.show_video_adjust = true;
+        assert!(frame(&mut m, &ctx).is_empty(), "drawing alone asks for nothing");
+        assert!(m.show_video_adjust, "the window stayed open");
+    }
+
+    /// The device may not have said anything yet — the window still has to
+    /// come up rather than panic on a missing value.
+    #[test]
+    fn the_adjustment_window_copes_with_nothing_reported_yet() {
+        let ctx = egui::Context::default();
+        let mut m = menu();
+        m.video = None;
+        m.show_video_adjust = true;
+        assert!(frame(&mut m, &ctx).is_empty());
+    }
+
+    /// Restore puts every knob back and, above all, does not turn the filter
+    /// into an auto-adjust.
+    #[test]
+    fn restore_resends_the_values_the_window_opened_with() {
+        let mut m = menu();
+        let original = settings();
+        m.video_restore = Some(original.clone());
+
+        // What the window does when Restore is clicked.
+        let mut out = Vec::new();
+        for (setting, value) in [
+            (VideoSetting::Brightness, original.brightness.value),
+            (VideoSetting::Contrast, original.contrast.value),
+            (VideoSetting::HOffset, original.hoffset.value),
+            (VideoSetting::VOffset, original.voffset.value),
+            (VideoSetting::Phase, original.phase.value),
+        ] {
+            out.push(Action::SetVideoNumber(setting, value));
+        }
+        assert!(out.contains(&Action::SetVideoNumber(VideoSetting::HOffset, 368)));
+        assert!(!out
+            .iter()
+            .any(|a| matches!(a, Action::SetVideoFilter(VideoFilter::Auto))));
+        assert!(m.video_restore.is_some());
+    }
+
+    #[test]
+    fn every_filter_the_window_offers_has_a_label() {
+        for f in VIDEO_FILTERS {
+            assert!(!filter_label(f).is_empty());
+        }
+        assert_eq!(VIDEO_FILTERS.len(), 5);
+    }
+
+    /// A knob the device pins in place must not offer a control that pretends
+    /// otherwise.
+    #[test]
+    fn a_fixed_knob_disables_its_control() {
+        let ctx = egui::Context::default();
+        let mut m = menu();
+        let mut v = settings();
+        v.hoffset = Knob { value: 200, min: 200, max: 200 };
+        m.video = Some(v);
+        m.show_video_adjust = true;
+        assert!(frame(&mut m, &ctx).is_empty());
+        assert_eq!(m.video.as_ref().expect("kept").hoffset.value, 200);
     }
 
     #[test]

@@ -248,6 +248,21 @@ impl App {
                 Ok(()) => self.note("stopped adjusting"),
                 Err(e) => self.failed("stop adjusting", e),
             },
+            Action::SetVideoNumber(setting, value) => {
+                match self.session.set_video_number(setting, value) {
+                    Ok(()) => self.note(format!("{} = {value}", setting.as_str())),
+                    Err(e) => self.failed(setting.as_str(), e),
+                }
+            }
+            Action::SetVideoFilter(filter) => match self.session.set_video_filter(filter) {
+                // Picking `auto` runs the adjustment rather than setting
+                // anything, so say what actually happened.
+                Ok(()) if filter == b070_proto::command::VideoFilter::Auto => {
+                    self.note("adjusting video…")
+                }
+                Ok(()) => self.note(format!("filter = {}", filter.as_str())),
+                Err(e) => self.failed("filter", e),
+            },
             Action::SetScaling(mode) => {
                 self.menu.scaling = mode;
                 self.dirty = true;
@@ -481,6 +496,14 @@ impl App {
     /// It re-sends this after a port change, so it is what confirms the switch
     /// actually happened rather than what we asked for.
     fn on_config(&mut self, xml: &str) {
+        // The device re-derives these whenever it re-reads the video mode, and
+        // an auto-adjust answers with a fresh document — so whatever it says
+        // here supersedes anything the adjustment window has been told.
+        if let Some(video) = b070_session::parse_video_settings(xml) {
+            self.menu.video = Some(video);
+            self.dirty = true;
+        }
+
         let servers = b070_session::parse_servers(xml);
         if let Some(active) = servers.iter().find(|s| s.active) {
             // Two targets can share a resolution, in which case no `Resolution`

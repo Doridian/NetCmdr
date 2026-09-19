@@ -40,7 +40,9 @@ pub mod ycbcr;
 
 pub use channel::Channel;
 pub use input::{Input, Modifiers, MouseButton};
-pub use session::{parse_servers, Event, Server, Session, SessionConfig};
+pub use session::{
+    parse_servers, parse_video_settings, Event, Knob, Server, Session, SessionConfig, VideoSettings,
+};
 pub use video::{Framebuffer, Noise, Rect, SharedFrame, VideoDecoder};
 
 #[derive(Debug, thiserror::Error)]

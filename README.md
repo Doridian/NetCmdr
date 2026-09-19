@@ -72,7 +72,7 @@ minus virtual media:
 |---|---|
 | **Keyboard** | Ctrl+Alt+Delete, and the combinations your own desktop swallows — Alt+Tab, Alt+F4, Ctrl+Shift+Esc, Super+L, Print Screen, Ctrl+Alt+F1… — plus *release held keys* |
 | **Mouse** | sync pointer, calibrate, align, and how the local pointer is drawn over the video |
-| **Video** | refresh, auto adjust, fit-to-window or 1:1, resize the window to the target |
+| **Video** | refresh, auto adjust, **manual adjustment** (position, phase, brightness, filter), fit-to-window or 1:1, resize the window to the target |
 | **Power** | cycle / on / off for the current target's IP-PDU outlet, each behind a confirmation |
 | **Session** | **switch target without reconnecting**, reload the target list, exclusive access, disconnect |
 
@@ -92,6 +92,34 @@ The device digitises analog VGA, so its horizontal position and sampling phase
 drift per target and per video mode; `--auto-adjust` (or Ctrl+Alt+A, or
 Video → Auto adjust) is what re-centres the captured image.
 
+### When the automatic adjustment is not enough
+
+The device keeps a horizontal sampling offset per video mode, and on a mode
+whose figure it has wrong, the edge of the picture is simply never captured —
+measured on a target driving 1360×768, the device starts sampling 4 px into the
+active area and cuts the first character off every line. **Its own automatic
+adjustment does not touch that value**: ask for one and the device answers with
+a byte-identical `<video_settings>`, so Ctrl+Alt+A can never fix it.
+
+Video → *Adjust manually…* opens the controls the stock client keeps in its
+Advanced Video dialog, each applied live as you move it:
+
+| Control | What it does |
+|---|---|
+| **Horizontal position** | where sampling starts on each line, in pixels. **Lower moves the picture right** — this is the one that recovers a cut-off left edge |
+| **Vertical position** | which line capture starts at |
+| **Phase** | where in each pixel's clock period the signal is sampled: what to reach for when the picture is sharp in places and smeared in others |
+| **Brightness / contrast** | the digitiser's gain, so they also move the Noise reading |
+| **Filter** | how hard the device filters the signal. *Auto* is not a value — picking it runs the automatic adjustment, exactly as the stock client does |
+
+To find the right horizontal position, take it *down* until a black band appears
+along the left edge, then back up until the band is just gone: that band is the
+scan line's back porch, so its edge is where the picture really begins.
+
+These settings are per session and are **not** persisted — the device reads its
+own defaults again at the next login, so a mode it has wrong needs correcting
+each time you connect.
+
 The right-hand end of the bar carries a **Noise** bar next to the resolution:
 how much of the picture is changing, per second, the same reading the stock
 client buries in its Advanced Video dialog. A target sitting at an idle desktop
@@ -109,7 +137,7 @@ percentage is computed here, exactly as the vendor's native library computes it
 | Session framing (`KVMMsg`) | per-channel TCP 900, plaintext handshake ± TLS | **Implemented, verified** |
 | Video codec | LZW / zlib + tile bitfield, RGB555 or YCbCr | **Implemented**; RGB555 verified, YCbCr ported but unexercised |
 | Keyboard and mouse | 16-byte records on the kbmouse channel | **Implemented, verified** |
-| Control commands | `<commands>` facade → `KVMMsg` | **Recovered**; the ones the viewer needs are implemented and verified, `change_port` included |
+| Control commands | `<commands>` facade → `KVMMsg` | **Recovered**; the ones the viewer needs are implemented and verified, `change_port` and the video settings included |
 | Virtual media | USB-over-IP in `KVMMsg` on its own channel | Specified, not implemented |
 | Serial passthrough | SSH on 4001/4002 | Documented |
 

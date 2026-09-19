@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use b070_proto::command::{VideoFilter, VideoSetting};
 use b070_proto::kvmmsg::{Cmd, CmdFlag, Header, MagicNumber, Message, SocketType};
 
 use crate::channel::{Channel, ShutdownHandle};
@@ -262,6 +263,39 @@ impl Session {
         self.send_command(Cmd::VideoStopAdjust)
     }
 
+    /// Set one analog video knob by hand
+    /// (`<video_settings hoffset='364'/>` and friends).
+    ///
+    /// This is what [`Session::auto_adjust_video`] cannot do for you. On the
+    /// firmware this was verified against, the automatic adjustment leaves
+    /// `hoffset` exactly as the device's video-mode table set it — so where
+    /// that table is wrong for the mode, as it is for 1360×768, the edge it
+    /// cuts off can only be recovered here.
+    ///
+    /// The change applies immediately and lasts for the session; the device
+    /// does not announce it, so the caller keeps its own copy of the value. It
+    /// is **not** persisted: the next login reads the device's default again.
+    pub fn set_video_setting(&self, setting: VideoSetting, value: &str) -> Result<(), Error> {
+        self.send_config_xml(&b070_proto::command::set_video_setting(setting, value))
+    }
+
+    /// Set a numeric video knob. See [`Session::set_video_setting`].
+    pub fn set_video_number(&self, setting: VideoSetting, value: i32) -> Result<(), Error> {
+        self.set_video_setting(setting, &value.to_string())
+    }
+
+    /// Choose the capture's noise filter.
+    ///
+    /// [`VideoFilter::Auto`] is not a value the device accepts: the vendor's
+    /// client answers that choice by running the automatic adjustment, which
+    /// picks a filter itself, and so does this.
+    pub fn set_video_filter(&self, filter: VideoFilter) -> Result<(), Error> {
+        match filter {
+            VideoFilter::Auto => self.auto_adjust_video(),
+            other => self.set_video_setting(VideoSetting::Filter, other.as_str()),
+        }
+    }
+
     /// Switch the session to another target without tearing it down.
     ///
     /// This is what the stock client's target menu does: the device re-points
@@ -427,6 +461,124 @@ pub fn parse_servers(xml: &str) -> Vec<Server> {
             Ok(XmlEvent::Eof) | Err(_) => return out,
             _ => {}
         }
+    }
+}
+
+/// One numeric video knob, with the range the device will accept for it.
+///
+/// `min` and `max` are inclusive. Where the device reports no range — it gives
+/// one only for the two offsets — these carry the range the vendor's own
+/// dialog hardcodes for that control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Knob {
+    pub value: i32,
+    pub min: i32,
+    pub max: i32,
+}
+
+impl Knob {
+    fn new(value: i32, min: i32, max: i32) -> Knob {
+        Knob { value, min, max }
+    }
+
+    /// True when the device left no room to move — there is nothing to offer.
+    pub fn is_fixed(&self) -> bool {
+        self.min >= self.max
+    }
+
+    pub fn clamp(&self, value: i32) -> i32 {
+        value.clamp(self.min, self.max)
+    }
+}
+
+/// The analog capture settings for the mode the target is currently driving.
+///
+/// The device pushes these as `<video_settings …/>` inside the client config,
+/// at login and again whenever it has re-derived them — after an auto-adjust,
+/// or after the target changes video mode. They are *per session*: a value set
+/// through [`Session::set_video_setting`] applies at once but is gone on the
+/// next login, which is why the device's own defaults are what a fresh session
+/// starts from.
+///
+/// Mirrors `com.minicom.app.video.data.xml.cfg.XVideoSettings`, minus the
+/// `scale` and `blacklevel` fields, which that class carries but the vendor's
+/// dialog gives no control over and this device answers with a sentinel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoSettings {
+    /// The mode the device says it is digitising, and its refresh rate in Hz.
+    pub width: u16,
+    pub height: u16,
+    pub refresh: u16,
+    pub brightness: Knob,
+    pub contrast: Knob,
+    /// Where sampling starts on each scan line, in pixels. Lowering it moves
+    /// the captured picture **right**, which is what recovers a left edge the
+    /// device is cutting off.
+    pub hoffset: Knob,
+    pub voffset: Knob,
+    /// Sampling phase within the pixel clock. The device reports no range for
+    /// this one; the vendor's dialog fixes it at 0–31.
+    pub phase: Knob,
+    pub filter: VideoFilter,
+}
+
+/// Pull `<video_settings>` out of a client config document.
+///
+/// `None` when the document has none — not every config the device sends
+/// carries them, and the caller should keep whatever it had.
+pub fn parse_video_settings(xml: &str) -> Option<VideoSettings> {
+    use quick_xml::events::Event as XmlEvent;
+
+    let mut reader = quick_xml::Reader::from_str(xml);
+    loop {
+        let e = match reader.read_event() {
+            Ok(XmlEvent::Start(e)) | Ok(XmlEvent::Empty(e)) => e,
+            Ok(XmlEvent::Eof) | Err(_) => return None,
+            _ => continue,
+        };
+        if e.name().as_ref() != b"video_settings" {
+            continue;
+        }
+
+        let mut a: Vec<(Vec<u8>, String)> = Vec::new();
+        for attr in e.attributes().flatten() {
+            a.push((
+                attr.key.as_ref().to_vec(),
+                String::from_utf8_lossy(&attr.value).trim().to_string(),
+            ));
+        }
+        let get = |name: &str| {
+            a.iter()
+                .find(|(k, _)| k == name.as_bytes())
+                .map(|(_, v)| v.as_str())
+        };
+        let num = |name: &str| get(name).and_then(|v| v.parse::<i32>().ok());
+        // A range the device declines to give is not a reason to lock the
+        // control: offer a window around wherever it currently sits instead.
+        let ranged = |name: &str, fallback: i32| {
+            let value = num(name).unwrap_or(0);
+            Knob::new(
+                value,
+                num(&format!("{name}_min")).unwrap_or(value - fallback),
+                num(&format!("{name}_max")).unwrap_or(value + fallback),
+            )
+        };
+
+        return Some(VideoSettings {
+            width: num("cx").unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
+            height: num("cy").unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
+            refresh: num("fq").unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
+            // The vendor's sliders are fixed 0–100 and it clamps the reported
+            // value into that range rather than widening the slider.
+            brightness: Knob::new(num("brightness").unwrap_or(50).clamp(0, 100), 0, 100),
+            contrast: Knob::new(num("contrast").unwrap_or(50).clamp(0, 100), 0, 100),
+            hoffset: ranged("hoffset", 64),
+            voffset: ranged("voffset", 32),
+            phase: Knob::new(num("phase").unwrap_or(0).clamp(0, 31), 0, 31),
+            filter: get("filter")
+                .and_then(VideoFilter::parse)
+                .unwrap_or(VideoFilter::Auto),
+        });
     }
 }
 
@@ -666,6 +818,70 @@ fn spawn_input_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `<video_settings>` element exactly as a B070-008-19-IP on firmware
+    /// 2.2.1258.1.0 sends it, for a target driving 1360x768.
+    const REAL_VIDEO_SETTINGS: &str = r#"<client_config><video_settings \
+brightness='49' contrast='50' cx='1360' cy='768' fq='60' voffset='24' \
+voffset_min='7' voffset_max='26' hoffset='368' hoffset_min='113' \
+hoffset_max='431' scale='-10000000' scale_min='-10000000' \
+scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
+
+    #[test]
+    fn reads_the_capture_settings_the_device_sends() {
+        let v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
+        assert_eq!((v.width, v.height, v.refresh), (1360, 768, 60));
+        assert_eq!(v.hoffset, Knob { value: 368, min: 113, max: 431 });
+        assert_eq!(v.voffset, Knob { value: 24, min: 7, max: 26 });
+        assert_eq!(v.brightness.value, 49);
+        assert_eq!(v.contrast.value, 50);
+        assert_eq!(v.filter, VideoFilter::Low);
+    }
+
+    /// The device reports no range for the phase, and the two it does report
+    /// are the only ones it gives. The rest come from the vendor's dialog.
+    #[test]
+    fn ranges_the_device_leaves_out_come_from_the_vendors_own_limits() {
+        let v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
+        assert_eq!(v.phase, Knob { value: 4, min: 0, max: 31 });
+        assert_eq!((v.brightness.min, v.brightness.max), (0, 100));
+        assert_eq!((v.contrast.min, v.contrast.max), (0, 100));
+    }
+
+    /// An offset with no range is still worth a control: it gets a window
+    /// around wherever the device has it, rather than being locked.
+    #[test]
+    fn an_offset_without_a_range_still_gets_one() {
+        let v = parse_video_settings("<client_config><video_settings hoffset='200'/></client_config>")
+            .expect("a settings element");
+        assert_eq!(v.hoffset, Knob { value: 200, min: 136, max: 264 });
+        assert!(!v.hoffset.is_fixed());
+    }
+
+    #[test]
+    fn a_config_without_video_settings_yields_none() {
+        assert!(parse_video_settings("<client_config><connection userlevel='1'/></client_config>")
+            .is_none());
+    }
+
+    /// Values outside the vendor's own slider range are clamped, not widened —
+    /// what its dialog does when the device reports a brightness above 100.
+    #[test]
+    fn out_of_range_values_are_clamped_into_the_control() {
+        let v = parse_video_settings(
+            "<client_config><video_settings brightness='140' phase='99'/></client_config>",
+        )
+        .expect("a settings element");
+        assert_eq!(v.brightness.value, 100);
+        assert_eq!(v.phase.value, 31);
+    }
+
+    #[test]
+    fn a_fixed_knob_is_recognised_as_having_nowhere_to_go() {
+        assert!(Knob { value: 5, min: 5, max: 5 }.is_fixed());
+        assert!(!Knob { value: 5, min: 4, max: 6 }.is_fixed());
+        assert_eq!(Knob { value: 5, min: 0, max: 10 }.clamp(99), 10);
+    }
 
     #[test]
     fn finds_the_user_level() {

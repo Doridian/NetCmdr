@@ -69,6 +69,79 @@ impl MousePointer {
     }
 }
 
+/// One knob of the device's analog video capture.
+///
+/// These are the seven settings behind the stock client's Advanced Video
+/// dialog (`AdvancedVideoCmd`, whose integer constants these mirror). Each is
+/// set on its own, as a single attribute of a `<video_settings>` element —
+/// see [`set_video_setting`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoSetting {
+    Brightness,
+    Contrast,
+    /// Where the digitiser starts sampling each scan line, in pixels.
+    HOffset,
+    /// Sampling phase within the pixel clock, 0–31.
+    Phase,
+    VOffset,
+    /// Reported by the device but given no control in the vendor's own dialog,
+    /// and answered with a `-10000000` sentinel on every mode seen so far.
+    Scale,
+    Filter,
+}
+
+impl VideoSetting {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VideoSetting::Brightness => "brightness",
+            VideoSetting::Contrast => "contrast",
+            VideoSetting::HOffset => "hoffset",
+            VideoSetting::Phase => "phase",
+            VideoSetting::VOffset => "voffset",
+            VideoSetting::Scale => "scale",
+            VideoSetting::Filter => "filter",
+        }
+    }
+}
+
+/// The noise filter applied to the digitised signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoFilter {
+    /// Not a filter setting at all: the vendor's dialog answers this choice by
+    /// running [`auto_video_adjust`] instead of sending anything, because the
+    /// device picks the filter itself as part of that. Callers must do the
+    /// same; sending `filter='auto'` is not what the stock client does.
+    Auto,
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+impl VideoFilter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VideoFilter::Auto => "auto",
+            VideoFilter::None => "nofilter",
+            VideoFilter::Low => "low",
+            VideoFilter::Medium => "medium",
+            VideoFilter::High => "high",
+        }
+    }
+
+    /// Parse the value the device reports in `<video_settings filter='…'/>`.
+    pub fn parse(s: &str) -> Option<VideoFilter> {
+        Some(match s.trim() {
+            "auto" => VideoFilter::Auto,
+            "nofilter" => VideoFilter::None,
+            "low" => VideoFilter::Low,
+            "medium" => VideoFilter::Medium,
+            "high" => VideoFilter::High,
+            _ => return None,
+        })
+    }
+}
+
 /// Power action for a target mapped to an IP PDU outlet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerCommand {
@@ -244,6 +317,19 @@ pub fn config(inner: &str) -> String {
     wrap(&s)
 }
 
+/// Set one analog video knob, as a `config` command.
+///
+/// One attribute per command is the vendor's own granularity: its Advanced
+/// Video dialog sends a fresh document for every slider release and every
+/// spinner click, rather than the whole `<video_settings>` element.
+pub fn set_video_setting(setting: VideoSetting, value: &str) -> String {
+    config(&format!(
+        "<video_settings {}='{}'/>",
+        setting.as_str(),
+        attr(value)
+    ))
+}
+
 /// Session exclusivity change, expressed as a `config` command.
 pub fn set_exclusivity(e: Exclusivity) -> String {
     config(&format!(
@@ -304,6 +390,38 @@ mod tests {
         // 'exlusive', not 'exclusive' — the device parses the misspelling.
         assert!(set_exclusivity(Exclusivity::Exclusive).contains("session_exlusive"));
         assert!(!set_exclusivity(Exclusivity::Exclusive).contains("session_exclusive"));
+    }
+
+    /// The exact document `AdvancedVideoCmd` builds, one attribute at a time.
+    #[test]
+    fn a_video_setting_matches_the_client_literal() {
+        assert_eq!(
+            set_video_setting(VideoSetting::HOffset, "364"),
+            "<commands><command name='config'><config>\
+             <video_settings hoffset='364'/></config></command></commands>"
+        );
+    }
+
+    #[test]
+    fn every_filter_round_trips_through_its_wire_name() {
+        for f in [
+            VideoFilter::Auto,
+            VideoFilter::None,
+            VideoFilter::Low,
+            VideoFilter::Medium,
+            VideoFilter::High,
+        ] {
+            assert_eq!(VideoFilter::parse(f.as_str()), Some(f));
+        }
+        assert_eq!(VideoFilter::parse("sharpen"), None);
+    }
+
+    /// The names are the device's, and it parses them literally.
+    #[test]
+    fn video_setting_names_are_the_vendors() {
+        assert_eq!(VideoSetting::HOffset.as_str(), "hoffset");
+        assert_eq!(VideoSetting::VOffset.as_str(), "voffset");
+        assert_eq!(VideoFilter::None.as_str(), "nofilter");
     }
 
     #[test]
