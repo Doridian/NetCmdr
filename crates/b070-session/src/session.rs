@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! The session: opens the channels, logs in, and runs them.
 //!
 //! Transcribed from `com.minicom.plugin.kvm_impl.KVMFacadeImpl`,

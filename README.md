@@ -195,6 +195,20 @@ rustfmt defaults, pinned in `rustfmt.toml` so the style does not drift with the
 toolchain; `cargo fmt --all --check` and `cargo clippy --workspace
 --all-targets` are both clean and expected to stay that way.
 
+## License
+
+Copyright (C) 2026 Doridian.
+
+GNU Affero General Public License, version 3 or later — see [`LICENSE`](LICENSE).
+
+Every dependency is permissively licensed (MIT, Apache-2.0, BSD, Zlib, ISC,
+Unicode-3.0 and the like), so nothing here conflicts. Two worth naming: the
+`self_cell` crate is `Apache-2.0 OR GPL-2.0-only` and is taken under Apache-2.0,
+and `epaint_default_fonts` carries the fonts egui draws with under OFL-1.1 and
+the Ubuntu Font Licence, which they keep. OpenSSL 3 is Apache-2.0; if you link
+this against the end-of-life OpenSSL 1.1.1 instead, its old licence has the
+advertising clause that GPL-family licences do not admit.
+
 ## Likely applicable to
 
 B070-008-19-IP, B070-016-19-IP(2), B072-008-1-IP, B072-016-1-IP, B072-016-IP2,

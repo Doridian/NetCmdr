@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Physical key to PC scancode (set 1) mapping.
 //!
 //! The device replays scancodes into the target's keyboard controller, so what

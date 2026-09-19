@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `KVMMsg` — the unified KVM session message.
 //!
 //! **Authoritative.** The layout, enums and encoding here are transcribed from

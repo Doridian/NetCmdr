@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Key combinations the local machine eats before we ever see them.
 //!
 //! A KVM viewer's keyboard menu exists because a window manager claims

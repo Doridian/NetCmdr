@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Video frame decoding: DIB parsing, decompression, colour conversion and the
 //! tile blit into the framebuffer.
 //!

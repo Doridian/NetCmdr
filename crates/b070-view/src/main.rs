@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `b070-view` — a KVM viewer for Tripp Lite NetCommander / Minicom Smart IP
 //! switches.
 //!

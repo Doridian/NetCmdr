@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Wire protocol types for Tripp Lite NetCommander / Minicom Smart IP KVM switches.
 //!
 //! The [`kvmmsg`] module is **authoritative**: it is transcribed from the

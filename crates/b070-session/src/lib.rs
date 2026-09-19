@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! KVM session client for Tripp Lite NetCommander / Minicom Smart IP switches:
 //! live video, keyboard and mouse.
 //!

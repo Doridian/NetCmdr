@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! HTTPS transport for the device's `/message.pv` endpoint.
 //!
 //! The device (an Embedthis Appweb 2.4.x server on Windows CE) speaks TLS 1.2

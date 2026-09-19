@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Parsed representations of the device's `PV_*` management XML.
 //!
 //! The schema here is from **live captures** of a B070-008-19-IP on firmware

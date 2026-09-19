@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! OpenGL context, the egui painter, and the remote screen as a texture.
 //!
 //! The session decodes into a plain `u32` framebuffer; everything on screen is

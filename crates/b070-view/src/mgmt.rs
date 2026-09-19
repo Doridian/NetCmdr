@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! A worker thread for the management API.
 //!
 //! Power control and the target list live on the HTTPS side, not on the KVM

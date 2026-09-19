@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! The app-level `<commands>` control vocabulary.
 //!
 //! These are the documents the GUI hands to its plugin facade

@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! The window: the menu bar, the remote screen, and the input routing between
 //! them.
 //!

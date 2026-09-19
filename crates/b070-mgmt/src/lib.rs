@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Management client for Tripp Lite NetCommander / Minicom Smart IP KVM switches.
 //!
 //! Current-firmware protocol, verified against a live B070-008-19-IP

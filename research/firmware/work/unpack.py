@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Doridian
+# SPDX-License-Identifier: AGPL-3.0-or-later
 import struct,sys,os
 def u32(d,o): return struct.unpack_from('<I',d,o)[0]
 def parse(path,outdir):

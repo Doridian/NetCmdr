@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `b070` — command-line management for Tripp Lite NetCommander IP KVM switches.
 //!
 //! Talks to the device's `/message.pv` management API over HTTPS. It does not

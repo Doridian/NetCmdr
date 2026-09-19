@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! YCbCr → RGB conversion for the video stream.
 //!
 //! Transcribed from `com.minicom.plugin.ycbcr.YCbCrToRGB` in the current

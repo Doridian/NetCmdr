@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! The video stream's LZW expander.
 //!
 //! Transcribed from the current firmware's own client

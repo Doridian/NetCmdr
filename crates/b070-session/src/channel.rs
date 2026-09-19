@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! One session socket: the plaintext handshake, the optional TLS upgrade, and
 //! `KVMMsg` framing on top.
 //!

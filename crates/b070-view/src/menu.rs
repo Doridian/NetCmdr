@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Doridian
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! The menu bar.
 //!
 //! The layout follows the stock Java client's toolbar so that anyone who has
