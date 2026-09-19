@@ -29,7 +29,14 @@ use crate::Error;
 /// it, and a corrupt header must not turn into a huge allocation.
 const MAX_PAYLOAD: usize = 32 * 1024 * 1024;
 
-enum Stream {
+/// One session socket once its handshake is done: plaintext for video and
+/// virtual media, TLS for command and keyboard/mouse.
+///
+/// [`Channel`] puts `KVMMsg` framing on top of this. It is public in its own
+/// right because the handshake is where the TLS decision lives, so a relay that
+/// only needs to move bytes — the web bridge — can call [`connect_stream`] and
+/// then stay out of the protocol entirely.
+pub enum Stream {
     Plain(TcpStream),
     Tls(Box<SslStream<TcpStream>>),
 }
@@ -40,6 +47,29 @@ impl Stream {
             Stream::Plain(s) => s,
             Stream::Tls(s) => s.get_ref(),
         }
+    }
+
+    /// Set the read timeout, or clear it for blocking reads.
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.tcp().set_read_timeout(timeout)
+    }
+
+    /// Switch between blocking and non-blocking reads.
+    ///
+    /// A relay pumping both directions on one thread needs this; a reader that
+    /// can park on the socket wants a timeout instead.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.tcp().set_nonblocking(nonblocking)
+    }
+
+    /// Close the underlying socket, unblocking a reader.
+    pub fn shutdown(&self) {
+        let _ = self.tcp().shutdown(std::net::Shutdown::Both);
+    }
+
+    /// A handle that can shut this stream down from another thread.
+    pub fn shutdown_handle(&self) -> io::Result<ShutdownHandle> {
+        Ok(ShutdownHandle(self.tcp().try_clone()?))
     }
 }
 
@@ -98,39 +128,21 @@ impl Channel {
         socket_type: SocketType,
         timeout: Duration,
     ) -> Result<Self, Error> {
-        let tcp = TcpStream::connect((host, port))?;
-        tcp.set_nodelay(true).ok();
-        tcp.set_read_timeout(Some(timeout))?;
-        tcp.set_write_timeout(Some(timeout))?;
-
-        let mut plain = tcp;
-        plain.write_all(format!("{session_id}#").as_bytes())?;
-        let code = socket_type.code();
-        plain.write_all(&code.to_le_bytes())?;
-        plain.flush()?;
-
-        let mut echo = [0u8; 4];
-        plain.read_exact(&mut echo)?;
-        let echoed = i32::from_le_bytes(echo);
-        if echoed != code {
-            return Err(Error::Handshake {
-                expected: code,
-                got: echoed,
-            });
-        }
-
-        let stream = if socket_type.uses_tls() {
-            Stream::Tls(Box::new(start_tls(host, plain)?))
-        } else {
-            Stream::Plain(plain)
-        };
-
-        tracing::debug!(?socket_type, tls = socket_type.uses_tls(), "channel open");
+        let stream = connect_stream(host, port, session_id, socket_type, timeout)?;
         Ok(Channel {
             stream,
             socket_type,
             incoming: Incoming::default(),
         })
+    }
+
+    /// Wrap an already-handshaken stream in `KVMMsg` framing.
+    pub fn from_stream(stream: Stream, socket_type: SocketType) -> Self {
+        Channel {
+            stream,
+            socket_type,
+            incoming: Incoming::default(),
+        }
     }
 
     pub fn socket_type(&self) -> SocketType {
@@ -139,7 +151,7 @@ impl Channel {
 
     /// Set the read timeout, or clear it for blocking reads.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), Error> {
-        self.stream.tcp().set_read_timeout(timeout)?;
+        self.stream.set_read_timeout(timeout)?;
         Ok(())
     }
 
@@ -204,12 +216,12 @@ impl Channel {
 
     /// Close the underlying socket, unblocking a reader.
     pub fn shutdown(&self) {
-        let _ = self.stream.tcp().shutdown(std::net::Shutdown::Both);
+        self.stream.shutdown()
     }
 
     /// A handle that can shut this channel down from another thread.
     pub fn shutdown_handle(&self) -> Result<ShutdownHandle, Error> {
-        Ok(ShutdownHandle(self.stream.tcp().try_clone()?))
+        Ok(self.stream.shutdown_handle()?)
     }
 }
 
@@ -221,6 +233,54 @@ impl ShutdownHandle {
     pub fn shutdown(&self) {
         let _ = self.0.shutdown(std::net::Shutdown::Both);
     }
+}
+
+/// Open one session socket and complete the device's handshake.
+///
+/// This is the whole device-specific part of opening a channel, and the only
+/// place that decides whether TLS is started, so everything that talks to a
+/// session port goes through here — the framing client above and the web
+/// bridge alike. See the module docs for the four steps.
+///
+/// `session_id` is the `SESSIONID` from the HTTPS login — the same token the
+/// management API returns, which is also what the command channel sends as its
+/// "password" when verifying the user.
+pub fn connect_stream(
+    host: &str,
+    port: u16,
+    session_id: &str,
+    socket_type: SocketType,
+    timeout: Duration,
+) -> Result<Stream, Error> {
+    let tcp = TcpStream::connect((host, port))?;
+    tcp.set_nodelay(true).ok();
+    tcp.set_read_timeout(Some(timeout))?;
+    tcp.set_write_timeout(Some(timeout))?;
+
+    let mut plain = tcp;
+    plain.write_all(format!("{session_id}#").as_bytes())?;
+    let code = socket_type.code();
+    plain.write_all(&code.to_le_bytes())?;
+    plain.flush()?;
+
+    let mut echo = [0u8; 4];
+    plain.read_exact(&mut echo)?;
+    let echoed = i32::from_le_bytes(echo);
+    if echoed != code {
+        return Err(Error::Handshake {
+            expected: code,
+            got: echoed,
+        });
+    }
+
+    let stream = if socket_type.uses_tls() {
+        Stream::Tls(Box::new(start_tls(host, plain)?))
+    } else {
+        Stream::Plain(plain)
+    };
+
+    tracing::debug!(?socket_type, tls = socket_type.uses_tls(), "channel open");
+    Ok(stream)
 }
 
 fn would_block(e: &io::Error) -> bool {

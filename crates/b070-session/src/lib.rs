@@ -39,7 +39,7 @@ pub mod session;
 pub mod video;
 pub mod ycbcr;
 
-pub use channel::Channel;
+pub use channel::{connect_stream, Channel, Stream};
 pub use input::{Input, Modifiers, MouseButton};
 pub use session::{
     parse_servers, parse_video_settings, Event, Knob, Server, Session, SessionConfig, VideoSettings,

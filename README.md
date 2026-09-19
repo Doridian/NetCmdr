@@ -15,6 +15,9 @@ Verified against real hardware (a B070-008-19-IP on firmware **2.2.1258.1.0**).
 - **The KVM session works end to end.** `b070-view` opens a window on a target's
   screen with keyboard and mouse passed through: live video decoded from the
   device's own LZW + tile codec, verified against hardware.
+- **A browser can reach the device.** `b070-bridge` terminates the device's
+  un-negotiable TLS and relays both the management API and the session sockets
+  over WebSockets. The web client that will use it is next.
 
 Virtual media (the session's fourth channel) is not implemented.
 
@@ -228,6 +231,64 @@ happened, longer for work still running, which each progress report renews. The
 device never says an auto-adjust or a calibration has finished, so the bar times
 those out rather than sitting on the last thing it was told.
 
+### `b070-bridge` — the web bridge
+
+```sh
+b070-bridge --host 192.0.2.10                     # serve on 127.0.0.1:8080
+b070-bridge --host 192.0.2.10 --static-dir ./web  # ... and the web client with it
+```
+
+The device's TLS is why this exists. As [TLS](#tls) explains, it offers no ECDHE
+suite at all, no TLS 1.3 and a 1024-bit DHE group; `b070` and `b070-view` reach
+it by asking OpenSSL for security level 1, and a browser has no equivalent
+switch. The handshake fails before a certificate is ever considered, so no
+amount of clicking through a warning helps.
+
+So the bridge terminates that TLS itself — the same settings the native client
+already proved against hardware — and offers the browser plain HTTP and
+WebSockets:
+
+| Route | Purpose |
+|---|---|
+| `POST /message.pv` | forwarded verbatim to the device's management API |
+| `GET /kvm?type=cmd\|video\|km\|vm` | a WebSocket carrying one session socket |
+| `GET /api/info` | which device this bridge is pointed at |
+| anything else | a file from `--static-dir` |
+
+Each `/kvm` WebSocket is one of the session's four TCP connections. The client
+sends its `SESSIONID` as the **first message**, as text; the bridge then
+completes the device's plaintext handshake and, where the socket type calls for
+it, the TLS upgrade — that decision belongs to the channel, not to the client.
+Everything after that first message is opaque bytes. The bridge deliberately
+does not understand `KVMMsg`: WebSocket message boundaries have nothing to do
+with protocol message boundaries, and the client reassembles the stream exactly
+as it would from a socket.
+
+The token travels in the socket rather than the URL for two measured reasons.
+It is base64 — on firmware 2.2.1258.1.0 a 44-character string routinely
+containing `+`, `/` and `=`, which is to say every character a query string
+handles badly. And **a browser never exposes the body of a failed WebSocket
+handshake**, so a device refusal answered with an HTTP status would reach the
+page as nothing more than "connection failed"; upgrading first and then closing
+with a reason is the only way the client can say *why*.
+
+**The bridge authenticates nobody.** It cannot: the only credential in this
+protocol is the device's own `SESSIONID`, and minting one is what `/message.pv`
+is for. Anything that can reach the listening port can reach the device's
+management API and session ports, including to attempt logins. That is why the
+default listen address is loopback, and why anything else belongs behind a
+reverse proxy that does authenticate — and that terminates a TLS the browser
+will accept. It is not an open relay, though: the device address and both ports
+are fixed at startup, and no request can steer them.
+
+All of this has been run against a live device: a management login, the TLS
+command channel answering with its `CONFIG_XML`, and video decoding to the same
+picture the native viewer produces.
+
+The web client this exists to serve is not written yet. The bridge is the piece
+that had to come first, because it is what makes a browser client possible at
+all.
+
 ## Protocols
 
 | Layer | Transport | Status |
@@ -273,6 +334,8 @@ crates/
   b070-session/  the KVM session: channels, login, video codec, input
   b070-cli/      the `b070` binary
   b070-view/     the `b070-view` viewer (winit + egui on OpenGL)
+  b070-bridge/   the `b070-bridge` WebSocket and HTTPS bridge, so a browser can
+                 speak a protocol its TLS stack cannot
 research/        the protocol write-up, provenance for the vendor material it
                  was derived from, and the live fixtures the tests parse
 ```
@@ -312,12 +375,14 @@ B072-032-IP2, and the Minicom Smart 108/116 IP originals.
 
 ## Next steps
 
-1. Virtual media: the fourth channel is USB-over-IP with a SCSI command handler.
-2. Exercise the YCbCr and palette video paths. The live device sends RGB555
+1. The web client: `b070-bridge` serves it and relays the protocol for it, but
+   the WebAssembly build of the viewer itself is still to come.
+2. Virtual media: the fourth channel is USB-over-IP with a SCSI command handler.
+3. Exercise the YCbCr and palette video paths. The live device sends RGB555
    (`ALX_PACK_16`) with LZW; the other formats are ported from the vendor's
    client and unit-tested, but no hardware has produced one yet.
-3. Serial passthrough (`OPEN_TTY_SESSION` on the command channel).
-4. Cascade configuration — the `switch`/`switch_id`/`switch_ports` fields that
+4. Serial passthrough (`OPEN_TTY_SESSION` on the command channel).
+5. Cascade configuration — the `switch`/`switch_id`/`switch_ports` fields that
    describe an analog KVM hanging off a port. The live unit has no cascade and
    answers the `switch` document with nothing, so there is nothing to verify
    against.

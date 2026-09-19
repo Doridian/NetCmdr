@@ -1,0 +1,32 @@
+[package]
+name = "b070-bridge"
+description = "WebSocket and HTTPS bridge that lets a browser talk to a Tripp Lite NetCommander / Minicom Smart IP KVM switch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "b070-bridge"
+path = "src/main.rs"
+
+[dependencies]
+b070-mgmt = { path = "../b070-mgmt" }
+b070-proto = { path = "../b070-proto" }
+b070-session = { path = "../b070-session" }
+anyhow.workspace = true
+clap.workspace = true
+# OpenSSL is already the device's TLS stack here; the WebSocket accept key is
+# a SHA-1 and a base64, so it supplies those too rather than pulling in crates
+# that would duplicate them.
+openssl = "0.10"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Framing only: `handshake` is off because the HTTP upgrade is done by this
+# crate's own server, which has already parsed the request by the time a
+# WebSocket exists.
+[dependencies.tungstenite]
+version = "0.30"
+default-features = false
