@@ -188,7 +188,9 @@ Key corrections:
 
 3. **Management is `POST /message.pv`, not `/config/`.** The old `/config/`
    `client=*XML` endpoint (§5.2) is **404** on current firmware. See §5.2 for
-   the replacement, which is implemented and verified in `b070-mgmt`.
+   the replacement, which is implemented and verified in `b070-mgmt` —
+   including **writing** configuration (§5.2.1), which is one whole-document
+   `CMA_CONFIG` between two `CMA_PERMISSION` calls, not a per-setting update.
 
 4. **The session message is `KVMMsg`, authoritative in §5.4** — it replaces the
    `ITCMsg`/`CommIO` framing that was guessed from the disassembly. The 32-byte
@@ -309,7 +311,7 @@ text/plain`, `Content-Length`-framed). This is implemented in `b070-mgmt` and
 run against the device; captured request/response fixtures are in
 `research/notes/analysis/live-fixtures/`.
 
-Three verbs (`name=` on the `CMA_Message`):
+Six verbs (`name=` on the `CMA_Message`):
 
 ```xml
 <!-- log in: returns SESSIONID used by every later request -->
@@ -320,6 +322,17 @@ Three verbs (`name=` on the `CMA_Message`):
 <!-- act -->
 <CMA_Message name="CMA_ACTION" SESSIONID="…"><action type="reboot"/></CMA_Message>
 <CMA_Message name="CMA_ACTION" SESSIONID="…"><action type="power" command="cycle|up|down" port="N"/></CMA_Message>
+<!-- act: also systemlock | systemunlock | disconnect port=N | backup
+     | restore preserve=B (+ <data><![CDATA[…]]></data>) | restore_from_backup
+     | roc_version (+ <port number="N"/> per port) -->
+<!-- take / release exclusive write access -->
+<CMA_Message name="CMA_PERMISSION" SESSIONID="…"><permission level="config|normal"/></CMA_Message>
+<!-- write: the whole configuration, see 5.2.1 -->
+<CMA_Message name="CMA_CONFIG" SESSIONID="…"><config_data config_id="…" value="">…</config_data></CMA_Message>
+<!-- upload a file -->
+<CMA_Message name="CMA_POST" SESSIONID="…"><post_data value="upgrade"><![CDATA[…]]></post_data></CMA_Message>
+<CMA_Message name="CMA_POST" SESSIONID="…"><post_data value="roc" ports="1,2"><![CDATA[…]]></post_data></CMA_Message>
+<CMA_Message name="CMA_POST" SESSIONID="…"><post_data value="ssl_certificate"><private password="…"><![CDATA[…]]></private><public><![CDATA[…]]></public></post_data></CMA_Message>
 <!-- log out: CMA_AUTHORIZE with a SESSIONID and no user element -->
 ```
 
@@ -339,6 +352,81 @@ session" means re-authenticate. Full request grammar and every `Fetch*`/`Save*`/
 `com.minicom.app.config.controller.http.pv` package.
 The many attribute names are XStream-mangled on the wire (underscores doubled,
 etc.); `HttpUtils.replaceX*UnderlineTokens` lists every substitution.
+
+#### 5.2.1 Writing configuration — IMPLEMENTED AND HARDWARE-VERIFIED (2026-09-19)
+
+There is **no partial write**. `CMA_CONFIG` takes the entire `<config_data>`
+document and applies all of it, so changing one setting means fetching the
+configuration, editing it, and posting the whole thing back. That is what the
+vendor's client does: `FetchCfgHttpCmd` → the dialogs mutate one XStream object
+graph → `SaveCfgHttpCmd` serializes the lot. Implemented in
+`b070-mgmt`'s `config.rs` (the lossless document) and driven by `b070 <area> set`.
+
+The full sequence, from `com.ext.SetConfigCmd`:
+
+1. `CMA_PERMISSION level="config"` — exclusive write access. One session at a
+   time; `reply_error` id `32003` means someone else has it.
+2. `CMA_CONFIG` with the document.
+3. `CMA_PERMISSION level="normal"` — released, **unless** the save rebooted the
+   device, in which case the session is already gone.
+
+The reply is a `PV_reply`; `need_boot="true"` means the device is rebooting to
+apply the change (network settings and the session TCP port do this).
+
+Three rules a writer has to follow, all learned from the vendor's client and
+confirmed on hardware:
+
+- **`<system_time>` is a command, not a setting.** `DatePanel.saveUIToPvXml`
+  blanks all six attributes unless the user actually set the clock. Echoing back
+  the time that was read would set the clock to a value that is stale by the
+  length of the round trip. Verified: a dozen saves with blanked fields left the
+  clock free-running.
+- **`<aaa>` may be absent.** The firmware omits it entirely until LDAP or RADIUS
+  is configured; `FetchCfgHttpCmd.addAaaStubToDeviceResponseLinesIfNeeded`
+  inserts `<aaa><ldap mode="basic" … user_attrib="cn" …/><radius realm=""
+  accounting="false"/></aaa>` after `<security_policy>` when it is.
+- **A user's password is write-only.** It never appears in a fetch. Setting one
+  means adding `password="…"` — in the clear — to that `<user>` for that one
+  save. Omitting the attribute leaves the stored password alone.
+
+Element order inside `<proxyview>` does **not** matter: XStream emits the
+sections in its own field order, which is not the order the firmware sends them
+in, and the device accepts both.
+
+The `<aaa>` schema, which the sanitized fixture does not show because the
+fixture's device had none:
+
+```xml
+<aaa>
+  <ldap mode="basic|user|group" search_dn="" search_passw="" search_base=""
+        user_attrib="cn" acl_attrib="">
+    <server host="…" port="636" proto="ldap|ldaps|tls"/>
+  </ldap>
+  <radius realm="" accounting="false">
+    <server host="…" port="1812" acc_port="1813" secret="…"/>
+  </radius>
+</aaa>
+```
+
+Both server lists are `<server>` on the wire; the client's XStream cannot have
+two classes on one tag, so `HttpUtils.replaceXpvMessageServerTokens` renames the
+LDAP ones to `<lserver>` on the way in (they are the ones carrying `proto=`) and
+back on the way out. Working on the document directly, as `b070-mgmt` does,
+makes that substitution unnecessary.
+
+`security_policy/@aaa_order` is the enabled sources in priority order, as the
+numeric codes from `MethodDescriptor`: `0` LDAP, `1` RADIUS, `3` local (`2`
+TACACS+ and `4` none exist in `XPvReply` but no UI offers them). Local is always
+present and always first. The live unit reads `3,1`.
+
+**A side effect worth knowing:** hiding a serial port (`serial_device/@active`
+= `false`) also strips that port from every account's `starget_ports`, and
+showing the port again does **not** put those grants back. Measured on firmware
+2.2.1258.1.0; `b070 serial set --visible off` names the accounts that lose it.
+
+Secrets — the LDAP bind password, RADIUS shared secrets and the SNMP community —
+are stored in the clear and come back in **every** configuration fetch, so any
+admin-level account can read them.
 
 **Legacy firmware (2013, from the old web UI, now 404):** a single ISAPI
 endpoint `POST /config/` with `client=ConfigXML|AdminXML|SwitchXML|StatusXML|
@@ -654,7 +742,9 @@ Recommended order: **B** now → **A** on arrival → capture traffic → **C**.
    client recovered from firmware.
 2. Does the newer `plugin.jar` still ship `libkvmipjproxy.so`, and is it still i386?
 3. Exact session framing on TCP 900 and the tile codec.
-4. The `/config/` write path.
+4. ~~The `/config/` write path.~~ **Answered.** `/config/` is gone; writing is
+   `CMA_CONFIG` on `/message.pv`, a whole-document replace between two
+   `CMA_PERMISSION` calls — §5.2.1.
 5. Whether virtual media rides the same 900 socket or a separate port (901/902).
 
 ---

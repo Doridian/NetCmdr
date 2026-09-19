@@ -8,8 +8,10 @@ The vendor ships a Windows-only Java client. This project replaces it.
 
 Verified against real hardware (a B070-008-19-IP on firmware **2.2.1258.1.0**).
 
-- **Management CLI works end to end.** `b070` reads config/status/targets/users
-  and can power-control and reboot, over the device's real `/message.pv` API.
+- **Management CLI works end to end.** `b070` reads and *writes* every setting
+  the device has — network, users, LDAP, RADIUS, security policy, serial ports,
+  SNMP, power — over the device's real `/message.pv` API, and can power-control,
+  back up, restore and reboot.
 - **The KVM session works end to end.** `b070-view` opens a window on a target's
   screen with keyboard and mouse passed through: live video decoded from the
   device's own LZW + tile codec, verified against hardware.
@@ -33,19 +35,96 @@ Needs Rust 1.95 or newer (the viewer's egui version sets the floor).
 
 ```sh
 b070 --host 192.0.2.10 status     # firmware, LAN, per-port state (+ SIU detection)
-b070 --host 192.0.2.10 config     # device, network, session settings
-b070 --host 192.0.2.10 targets    # ports, names, which have an SIU attached
+b070 --host 192.0.2.10 config     # every setting, in one page
+b070 --host 192.0.2.10 targets    # ports and names
 b070 --host 192.0.2.10 users      # local accounts
-b070 --host 192.0.2.10 fetch config          # raw XML (config|status|switch|…)
-b070 --host 192.0.2.10 power cycle 3         # power-cycle target on port 3
-b070 --host 192.0.2.10 reboot --confirm
 ```
 
 Credentials default to the factory `admin` / `access`; override with `--user` /
-`--password` or `B070_USER` / `B070_PASSWORD`. The device speaks **TLS 1.2** with
-a self-signed cert, so the client does not verify it — treat the management
-network as trusted or tunnel it. See [TLS](#tls) for why this is OpenSSL and not
-rustls.
+`--password` or `B070_USER` / `B070_PASSWORD`. `--host` also comes from
+`B070_HOST`. The device speaks **TLS 1.2** with a self-signed cert, so the
+client does not verify it — treat the management network as trusted or tunnel
+it. See [TLS](#tls) for why this is OpenSSL and not rustls.
+
+#### Changing settings
+
+Settings are grouped by area, and every area answers to `show` and `set`:
+
+| Area | What it covers |
+|---|---|
+| `device` | name, session TCP port |
+| `network` | IPv4 and IPv6 addressing, DNS |
+| `ssh` | serial-over-SSH passthrough and its ports |
+| `security` | lockout policy, password rules, idle timeout |
+| `auth` | which authentication sources are tried, in what order |
+| `ldap` | directory settings, plus `ldap server add`/`remove` |
+| `radius` | realm and accounting, plus `radius server add`/`remove` |
+| `snmp` | traps, destination, community |
+| `time` | the device clock |
+| `serial` | both serial ports' line settings |
+| `kvm-manager` | central management appliance |
+| `target` | the names of the machines on the KVM ports |
+| `user` | accounts: `list`, `add`, `remove`, `set`, `password` |
+| `pdu` | power strips: `list`, `models`, `add`, `remove`, `outlet` |
+
+```sh
+b070 network set --ipv4 static --address 192.0.2.10 --subnet 255.255.255.0 \
+                 --gateway 192.0.2.1 --dns-source static --dns 192.0.2.53
+b070 security set --max-attempts 5 --attempt-window 3m --block-for 30m
+b070 ldap server add ldap.example.com --protocol ldaps
+b070 ldap set --mode group --search-base dc=example,dc=com --user-attribute uid
+b070 auth set --order local,ldap
+b070 user add alice --new-password-stdin --targets 1-4 --serial 1
+b070 target set 3 --name ntp-pi
+b070 time set --now
+```
+
+A `set` applies only the options you give it and prints what it changed; with
+no options it changes nothing, so it is safe to run just to see what it offers.
+
+One firmware behaviour to know about: hiding a serial port
+(`b070 serial set 2 --visible off`) also strips that port from every account's
+serial access, and showing the port again does **not** put those grants back.
+`b070` names the accounts that lose it so you can re-grant them.
+
+Stored secrets — the LDAP bind password, RADIUS shared secrets, the SNMP
+community — are masked in every `show` unless you pass `--show-secrets`. The
+device keeps them in the clear and hands them back on every fetch, so any
+admin-level account can read them.
+
+**One `set` is one whole-configuration write.** The device has no partial
+update: its only write verb replaces the entire configuration document, so each
+command fetches, edits and posts the lot back (see
+[`research/notes/FINDINGS.md`](research/notes/FINDINGS.md) §5.2.1). For several
+changes at once — or to keep a configuration in version control — use the
+document directly:
+
+```sh
+b070 export config.xml     # the device's own <config_data>, verbatim
+$EDITOR config.xml
+b070 import config.xml --confirm
+```
+
+Changing the network settings or the session port reboots the device; `b070`
+says so when it happens.
+
+#### Operating the device
+
+```sh
+b070 power cycle 3              # power-cycle the target on port 3
+b070 disconnect 3               # kick whoever is holding port 3
+b070 lock / b070 unlock         # keep everyone else out while you work
+b070 backup device.bak          # the device's own backup blob
+b070 restore device.bak --confirm
+b070 factory-reset --keep-network --confirm
+b070 certificate --certificate cert.pem --key key.pem --confirm
+b070 reboot --confirm
+b070 fetch config               # raw XML (config|status|switch|…)
+```
+
+The firmware-upgrade commands (`b070 upgrade`, `b070 siu upgrade`,
+`b070 siu versions`) are built from the vendor client's own request format but
+have **not been run against hardware**; everything else above has.
 
 ### `b070-view` — KVM viewer
 
@@ -139,7 +218,9 @@ those out rather than sitting on the last thing it was told.
 
 | Layer | Transport | Status |
 |---|---|---|
-| Management | `POST /message.pv`, TLS 1.2, `CMA_*`/`PV_*` XML | **Implemented, verified** |
+| Management, reading | `POST /message.pv`, TLS 1.2, `CMA_REQUEST` → `PV_*` XML | **Implemented, verified** |
+| Management, writing | `CMA_PERMISSION` → `CMA_CONFIG` → `CMA_PERMISSION` | **Implemented, verified** |
+| Management, uploads | `CMA_POST`: firmware, SIU firmware, TLS certificate | Implemented, **unexercised** |
 | Session framing (`KVMMsg`) | per-channel TCP 900, plaintext handshake ± TLS | **Implemented, verified** |
 | Video codec | LZW / zlib + tile bitfield, RGB555 or YCbCr | **Implemented**; RGB555 verified, YCbCr ported but unexercised |
 | Keyboard and mouse | 16-byte records on the kbmouse channel | **Implemented, verified** |
@@ -173,7 +254,8 @@ weaker than stock, but the session is only as private as the network it crosses.
 ```
 crates/
   b070-proto/    KVMMsg framing + enums (authoritative), command vocabulary
-  b070-mgmt/     /message.pv client and PV_* XML models (OpenSSL, see TLS above)
+  b070-mgmt/     /message.pv client, PV_* XML models and the editable
+                 configuration document (OpenSSL, see TLS above)
   b070-session/  the KVM session: channels, login, video codec, input
   b070-cli/      the `b070` binary
   b070-view/     the `b070-view` viewer (winit + egui on OpenGL)
@@ -221,3 +303,7 @@ B072-032-IP2, and the Minicom Smart 108/116 IP originals.
    (`ALX_PACK_16`) with LZW; the other formats are ported from the vendor's
    client and unit-tested, but no hardware has produced one yet.
 3. Serial passthrough (`OPEN_TTY_SESSION` on the command channel).
+4. Cascade configuration — the `switch`/`switch_id`/`switch_ports` fields that
+   describe an analog KVM hanging off a port. The live unit has no cascade and
+   answers the `switch` document with nothing, so there is nothing to verify
+   against.

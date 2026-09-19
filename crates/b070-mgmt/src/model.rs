@@ -16,7 +16,9 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+use crate::config::{AuthMethod, SerialAssign};
 use crate::Error;
+use crate::{SiuUpgradeStatus, SiuVersion, UpgradeStatus};
 
 fn local_name(name: &[u8]) -> &[u8] {
     match name.iter().rposition(|&b| b == b':') {
@@ -152,10 +154,13 @@ pub fn parse_auth_reply(xml: &str) -> Result<AuthReply, Error> {
 }
 
 /// One KVM port target.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Target {
     pub port: u32,
     pub name: String,
+    /// Power outlets ("points of control") on a cascaded switch. `0` or absent
+    /// on a device with no cascade.
+    pub num_pocs: Option<u32>,
 }
 
 /// Network settings from `<network_adapter>`.
@@ -169,30 +174,224 @@ pub struct NetworkAdapter {
     pub dns: Option<String>,
     /// `use_static_ip="false"` means DHCP.
     pub use_static_ip: bool,
+    /// Whether `dns` is used rather than whatever DHCP hands out.
+    pub static_dns: bool,
     pub ipv6_enabled: bool,
     pub ipv6: Option<String>,
+    /// Prefix length, as a number of bits.
+    pub ipv6_prefix: Option<u32>,
+    pub ipv6_gateway: Option<String>,
+    /// `dhcp`, `stateless`, `static` or `none`.
+    pub ipv6_mode: Option<String>,
+    pub ipv6_dns: Option<String>,
+    pub ipv6_static_dns: bool,
+}
+
+/// Serial-over-SSH passthrough, from `<SSH>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Ssh {
+    pub enabled: bool,
+    /// TCP port that reaches serial device 1.
+    pub port1: Option<u16>,
+    /// TCP port that reaches serial device 2.
+    pub port2: Option<u16>,
+}
+
+/// Login policy, from `<security_policy>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SecurityPolicy {
+    /// "High security" password rules.
+    pub password_restrictions: bool,
+    /// Block a locked-out account until an administrator clears it.
+    pub lock_forever: bool,
+    /// How long a lockout lasts, in seconds. Meaningless when `lock_forever`.
+    pub lock_time_secs: Option<u32>,
+    /// Require the OSD password on the local console.
+    pub osd_password: bool,
+    /// Failed logins that trigger a lockout.
+    pub max_try: Option<u32>,
+    /// Window the failures have to fall inside, in seconds.
+    pub try_time_secs: Option<u32>,
+    /// Authentication sources, in the order they are tried.
+    pub auth_order: Vec<AuthMethod>,
+}
+
+/// One LDAP server, from `<aaa>/<ldap>/<server>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LdapServer {
+    pub host: String,
+    pub port: Option<u16>,
+    /// `ldap`, `ldaps` or `tls`.
+    pub protocol: Option<String>,
+}
+
+/// LDAP settings, from `<aaa>/<ldap>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Ldap {
+    /// `basic`, `user` or `group`: where a user's permissions come from.
+    pub mode: Option<String>,
+    /// DN the device binds as to search the directory.
+    pub search_dn: Option<String>,
+    /// That DN's password. Stored on the device in the clear and handed back
+    /// on every fetch.
+    pub search_password: Option<String>,
+    pub search_base: Option<String>,
+    /// Attribute holding the login name, e.g. `cn` or `sAMAccountName`.
+    pub user_attribute: Option<String>,
+    /// Attribute holding the device permissions, in `user` and `group` mode.
+    pub acl_attribute: Option<String>,
+    pub servers: Vec<LdapServer>,
+}
+
+/// One RADIUS server, from `<aaa>/<radius>/<server>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RadiusServer {
+    pub host: String,
+    pub port: Option<u16>,
+    pub accounting_port: Option<u16>,
+    /// The shared secret, in the clear, as the device hands it back.
+    pub secret: Option<String>,
+}
+
+/// RADIUS settings, from `<aaa>/<radius>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Radius {
+    pub realm: Option<String>,
+    pub accounting: bool,
+    pub servers: Vec<RadiusServer>,
+}
+
+/// External authentication, from `<aaa>`.
+///
+/// The firmware omits this element entirely on a device that has never had it
+/// configured; both halves are then empty.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Aaa {
+    pub ldap: Ldap,
+    pub radius: Radius,
+}
+
+/// The device clock, from `<system_time>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeviceTime {
+    pub year: u32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+}
+
+/// Central-management appliance, from `<kvm_manager>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KvmManager {
+    pub enabled: bool,
+    /// Whether `ip` is used rather than discovery.
+    pub fixed_ip: bool,
+    pub ip: Option<String>,
+}
+
+/// One serial device, from `<serial_devices>/<serial_device>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SerialDevice {
+    pub port: u32,
+    pub name: String,
+    /// Whether the port is offered to users.
+    pub active: bool,
+    pub baud_rate: Option<String>,
+    pub data_bits: Option<String>,
+    pub stop_bits: Option<String>,
+    /// Parity as the single letter the wire uses (`N`, `O`, `E`, `M`, `S`).
+    pub parity: Option<String>,
+    /// What the port is wired to: a console, or a power strip.
+    pub assign: Option<SerialAssign>,
+    pub charset: Option<String>,
+}
+
+/// SNMP trap settings, from `<snmp>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Snmp {
+    pub traps_enabled: bool,
+    /// Where traps are sent. Empty means traps are off whatever the flag says.
+    pub manager_ip: Option<String>,
+    pub community: Option<String>,
+}
+
+/// A PDU model the firmware knows how to drive, from `<power>/<pdu_types>/<entry>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PduType {
+    pub manufacturer: String,
+    /// The exact string a `<pdu>`'s `model` has to carry.
+    pub model: String,
+    pub outlets: Option<u32>,
+    /// How the device talks to it; every entry in current firmware is `snmp`.
+    pub mode: Option<String>,
+}
+
+/// One outlet's mapping, from `<pdu>/<outlet>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Outlet {
+    /// Outlet number on the PDU.
+    pub outlet: u32,
+    /// KVM port it powers.
+    pub target_port: u32,
+}
+
+/// A configured power distribution unit, from `<power>/<pdu>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Pdu {
+    pub name: String,
+    /// One of the [`PduType::model`] strings.
+    pub model: Option<String>,
+    pub outlets: Option<u32>,
+    pub ip: Option<String>,
+    pub outlet_map: Vec<Outlet>,
+}
+
+/// Power configuration, from `<power>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Power {
+    /// The models this firmware supports. Read-only.
+    pub types: Vec<PduType>,
+    pub pdus: Vec<Pdu>,
 }
 
 /// The device configuration, from a `value="config"` request (`PV_CONFIG`).
+///
+/// This is the read-only view, parsed leniently: unknown elements and
+/// attributes are dropped, so it must never be used to build a save. Writing
+/// goes through [`crate::config::ConfigDoc`], which keeps the document whole.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeviceConfig {
+    /// The device's own stamp on this document.
+    pub config_id: Option<String>,
     /// Device name, e.g. the serial `D1214403`.
     pub name: Option<String>,
     /// Hardware family code, e.g. `108`.
     pub hardware_type: Option<String>,
     pub switch_ports: Option<u32>,
+    /// Model of cascaded analog switch, when one is configured.
+    pub cascade: Option<String>,
     pub idle_time_minutes: Option<u32>,
     /// Raw `ip_port` from `<connection>` (session port list).
     pub session_ports: Vec<u16>,
     pub ssh_enabled: bool,
     pub ssh_ports: Vec<u16>,
+    pub ssh: Ssh,
+    pub security: SecurityPolicy,
+    pub aaa: Aaa,
+    pub system_time: Option<DeviceTime>,
+    pub kvm_manager: KvmManager,
+    pub serial_devices: Vec<SerialDevice>,
     pub network: NetworkAdapter,
+    pub snmp: Snmp,
     pub users: Vec<User>,
     pub targets: Vec<Target>,
+    pub power: Power,
 }
 
 /// A local user account from `<users>/<user>`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct User {
     pub name: String,
     pub active: bool,
@@ -200,79 +399,243 @@ pub struct User {
     pub user_level: Option<u32>,
     /// Ports this user may reach, e.g. `"1,2,3,4,5,6,7,8"`.
     pub target_ports: Option<String>,
+    /// Ports this user may mount virtual media on.
+    pub vm_target_ports: Option<String>,
+    /// Serial ports this user may reach.
+    pub serial_target_ports: Option<String>,
 }
 
 /// Parse a `PV_CONFIG` document.
 pub fn parse_config(xml: &str) -> Result<DeviceConfig, Error> {
-    let mut c = DeviceConfig::default();
+    let Some(data) = crate::xml::find_element(xml, "config_data")? else {
+        return Ok(DeviceConfig::default());
+    };
+    let Some(pv) = data.child("proxyview") else {
+        return Ok(DeviceConfig::default());
+    };
 
-    on_first(xml, "proxyview", |a| {
-        c.name = get(a, "name").map(str::to_owned);
-        c.hardware_type = get(a, "type").map(str::to_owned);
-        c.switch_ports = get(a, "switch_ports").and_then(|v| v.parse().ok());
-        Ok(())
-    })?;
+    let mut c = DeviceConfig {
+        config_id: opt(data.attr("config_id")),
+        name: opt(pv.attr("name")),
+        hardware_type: opt(pv.attr("type")),
+        switch_ports: pv.attr_parsed("switch_ports"),
+        cascade: opt(pv.attr("switch")),
+        ..DeviceConfig::default()
+    };
 
-    on_first(xml, "connection", |a| {
-        c.idle_time_minutes = get(a, "idle_time").and_then(|v| v.parse().ok());
-        c.session_ports = get(a, "ip_port")
-            .unwrap_or_default()
-            .split(',')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-        Ok(())
-    })?;
+    if let Some(e) = pv.child("connection") {
+        c.idle_time_minutes = e.attr_parsed("idle_time");
+        c.session_ports = split_ports(e.attr_or_empty("ip_port"));
+    }
 
-    on_first(xml, "SSH", |a| {
-        c.ssh_enabled = get(a, "enable").map(as_bool).unwrap_or(false);
-        c.ssh_ports = ["port1", "port2"]
-            .iter()
-            .filter_map(|k| get(a, k).and_then(|v| v.parse().ok()))
-            .collect();
-        Ok(())
-    })?;
-
-    on_first(xml, "network_adapter", |a| {
-        c.network = NetworkAdapter {
-            name: get(a, "name").map(str::to_owned),
-            mac: get(a, "mac").map(str::to_owned),
-            ip: get(a, "ip").map(str::to_owned),
-            subnet: get(a, "subnet").map(str::to_owned),
-            gateway: get(a, "gateway").map(str::to_owned),
-            dns: get(a, "dns").map(str::to_owned),
-            use_static_ip: get(a, "use_static_ip").map(as_bool).unwrap_or(false),
-            ipv6_enabled: get(a, "enableipv6").map(as_bool).unwrap_or(false),
-            ipv6: get(a, "ipv6").map(str::to_owned),
+    if let Some(e) = pv.child("SSH") {
+        c.ssh = Ssh {
+            enabled: e.attr_bool("enable"),
+            port1: e.attr_parsed("port1"),
+            port2: e.attr_parsed("port2"),
         };
-        Ok(())
-    })?;
+        // Kept flat as well: these two predate the `ssh` field.
+        c.ssh_enabled = c.ssh.enabled;
+        c.ssh_ports = [c.ssh.port1, c.ssh.port2].into_iter().flatten().collect();
+    }
 
-    on_each(xml, "user", |a| {
-        if let Some(name) = get(a, "name") {
-            c.users.push(User {
-                name: name.to_owned(),
-                active: get(a, "active").map(as_bool).unwrap_or(false),
-                admin: get(a, "admin").map(as_bool).unwrap_or(false),
-                user_level: get(a, "userlevel").and_then(|v| v.parse().ok()),
-                target_ports: get(a, "target_ports").map(str::to_owned),
+    if let Some(e) = pv.child("security_policy") {
+        c.security = SecurityPolicy {
+            password_restrictions: e.attr_bool("pw_restrictions"),
+            lock_forever: e.attr_bool("forever"),
+            lock_time_secs: e.attr_parsed("lock_time"),
+            osd_password: e.attr_bool("osd_password"),
+            max_try: e.attr_parsed("max_try"),
+            try_time_secs: e.attr_parsed("try_time"),
+            auth_order: AuthMethod::parse_order(e.attr_or_empty("aaa_order")),
+        };
+    }
+
+    if let Some(aaa) = pv.child("aaa") {
+        if let Some(e) = aaa.child("ldap") {
+            c.aaa.ldap = Ldap {
+                mode: opt(e.attr("mode")),
+                search_dn: opt(e.attr("search_dn")),
+                search_password: opt(e.attr("search_passw")),
+                search_base: opt(e.attr("search_base")),
+                user_attribute: opt(e.attr("user_attrib")),
+                acl_attribute: opt(e.attr("acl_attrib")),
+                servers: e
+                    .children_named("server")
+                    .map(|s| LdapServer {
+                        host: s.attr_or_empty("host").to_owned(),
+                        port: s.attr_parsed("port"),
+                        protocol: opt(s.attr("proto")),
+                    })
+                    .collect(),
+            };
+        }
+        if let Some(e) = aaa.child("radius") {
+            c.aaa.radius = Radius {
+                realm: opt(e.attr("realm")),
+                accounting: e.attr_bool("accounting"),
+                servers: e
+                    .children_named("server")
+                    .map(|s| RadiusServer {
+                        host: s.attr_or_empty("host").to_owned(),
+                        port: s.attr_parsed("port"),
+                        accounting_port: s.attr_parsed("acc_port"),
+                        secret: opt(s.attr("secret")),
+                    })
+                    .collect(),
+            };
+        }
+    }
+
+    if let Some(e) = pv.child("system_time") {
+        // The device blanks these on a save; a fetch always fills them.
+        if let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+            e.attr_parsed("year"),
+            e.attr_parsed("month"),
+            e.attr_parsed("day"),
+            e.attr_parsed("hour"),
+            e.attr_parsed("min"),
+            e.attr_parsed("sec"),
+        ) {
+            c.system_time = Some(DeviceTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
             });
         }
-        Ok(())
-    })?;
+    }
 
-    on_each(xml, "target", |a| {
-        if let (Some(port), Some(name)) =
-            (get(a, "port").and_then(|v| v.parse().ok()), get(a, "name"))
-        {
-            c.targets.push(Target {
-                port,
-                name: name.to_owned(),
-            });
+    if let Some(e) = pv.child("kvm_manager") {
+        c.kvm_manager = KvmManager {
+            enabled: e.attr_bool("enable"),
+            fixed_ip: e.attr_bool("fixed_ip"),
+            ip: opt(e.attr("ip")),
+        };
+    }
+
+    if let Some(list) = pv.child("serial_devices") {
+        c.serial_devices = list
+            .children_named("serial_device")
+            .map(|e| SerialDevice {
+                port: e.attr_parsed("port").unwrap_or(0),
+                name: e.attr_or_empty("name").to_owned(),
+                active: e.attr_bool("active"),
+                baud_rate: opt(e.attr("baud_rate")),
+                data_bits: opt(e.attr("data_bits")),
+                stop_bits: opt(e.attr("stop_bits")),
+                parity: opt(e.attr("parity")),
+                assign: e.attr("PDU").and_then(SerialAssign::from_code),
+                charset: opt(e.attr("charset")),
+            })
+            .collect();
+    }
+
+    if let Some(e) = pv
+        .child("network_adapters")
+        .and_then(|l| l.child("network_adapter"))
+    {
+        c.network = NetworkAdapter {
+            name: opt(e.attr("name")),
+            mac: opt(e.attr("mac")),
+            ip: opt(e.attr("ip")),
+            subnet: opt(e.attr("subnet")),
+            gateway: opt(e.attr("gateway")),
+            dns: opt(e.attr("dns")),
+            use_static_ip: e.attr_bool("use_static_ip"),
+            static_dns: e.attr_bool("staticdns"),
+            ipv6_enabled: e.attr_bool("enableipv6"),
+            ipv6: opt(e.attr("ipv6")),
+            ipv6_prefix: e.attr_parsed("subnetv6"),
+            ipv6_gateway: opt(e.attr("gatewayv6")),
+            ipv6_mode: opt(e.attr("autoconfigv6")),
+            ipv6_dns: opt(e.attr("dnsv6")),
+            ipv6_static_dns: e.attr_bool("staticdnsv6"),
+        };
+    }
+
+    if let Some(e) = pv.child("snmp") {
+        c.snmp = Snmp {
+            traps_enabled: e.attr_bool("enable_traps"),
+            manager_ip: opt(e.attr("mngr_ip")),
+            community: opt(e.attr("community")),
+        };
+    }
+
+    if let Some(list) = pv.child("users") {
+        c.users = list
+            .children_named("user")
+            .filter(|e| e.attr("name").is_some())
+            .map(|e| User {
+                name: e.attr_or_empty("name").to_owned(),
+                active: e.attr_bool("active"),
+                admin: e.attr_bool("admin"),
+                user_level: e.attr_parsed("userlevel"),
+                target_ports: opt(e.attr("target_ports")),
+                vm_target_ports: opt(e.attr("vmtarget_ports")),
+                serial_target_ports: opt(e.attr("starget_ports")),
+            })
+            .collect();
+    }
+
+    if let Some(list) = pv.child("targets") {
+        c.targets = list
+            .children_named("target")
+            .filter_map(|e| {
+                Some(Target {
+                    port: e.attr_parsed("port")?,
+                    name: e.attr("name")?.to_owned(),
+                    num_pocs: e.attr_parsed("numpocs"),
+                })
+            })
+            .collect();
+    }
+
+    if let Some(power) = pv.child("power") {
+        if let Some(types) = power.child("pdu_types") {
+            c.power.types = types
+                .children_named("entry")
+                .map(|e| PduType {
+                    manufacturer: e.attr_or_empty("manufacturer").to_owned(),
+                    model: e.attr_or_empty("model").to_owned(),
+                    outlets: e.attr_parsed("outlets"),
+                    mode: opt(e.attr("mode")),
+                })
+                .collect();
         }
-        Ok(())
-    })?;
+        c.power.pdus = power
+            .children_named("pdu")
+            .map(|e| Pdu {
+                name: e.attr_or_empty("name").to_owned(),
+                model: opt(e.attr("model")),
+                outlets: e.attr_parsed("outlets"),
+                ip: opt(e.attr("ip")),
+                outlet_map: e
+                    .children_named("outlet")
+                    .filter_map(|o| {
+                        Some(Outlet {
+                            outlet: o.attr_parsed("port")?,
+                            target_port: o.attr_parsed("target_port")?,
+                        })
+                    })
+                    .collect(),
+            })
+            .collect();
+    }
 
     Ok(c)
+}
+
+/// `Some(owned)` unless the attribute was absent. Empty strings are kept:
+/// `mngr_ip=""` means "no trap destination", which is worth showing.
+fn opt(v: Option<&str>) -> Option<String> {
+    v.map(str::to_owned)
+}
+
+fn split_ports(v: &str) -> Vec<u16> {
+    v.split(',').filter_map(|s| s.trim().parse().ok()).collect()
 }
 
 /// State of one port from a `PV_STATUS` `<status_list>`.
@@ -356,6 +719,66 @@ pub fn parse_status(xml: &str) -> Result<Status, Error> {
     Ok(s)
 }
 
+/// Whether a `CMA_CONFIG` reply says the device is rebooting to apply the save.
+pub fn reboot_in_progress(xml: &str) -> bool {
+    matches!(
+        crate::xml::find_element(xml, "PV_reply"),
+        Ok(Some(ref e)) if e.attr_bool("need_boot")
+    )
+}
+
+/// The payload of a `<reply_data>` element (a configuration backup).
+pub fn reply_data(xml: &str) -> Option<String> {
+    let e = crate::xml::find_element(xml, "reply_data").ok()??;
+    Some(e.text())
+}
+
+/// Parse a device firmware upgrade's progress from a `status` request.
+pub fn parse_upgrade_status(xml: &str) -> Result<UpgradeStatus, Error> {
+    let e = crate::xml::find_element(xml, "device_upgrade")?
+        .ok_or_else(|| Error::Device("no upgrade in progress".into()))?;
+    Ok(UpgradeStatus {
+        status: e.attr_or_empty("upgrade_status").to_owned(),
+        percent_complete: e.attr_parsed("percent_complete"),
+    })
+}
+
+/// Parse per-port SIU upgrade progress.
+pub fn parse_siu_upgrade_status(xml: &str) -> Result<Vec<SiuUpgradeStatus>, Error> {
+    let Some(data) = crate::xml::find_element(xml, "config_data")? else {
+        return Ok(Vec::new());
+    };
+    Ok(data
+        .children_named("target")
+        .filter_map(|e| {
+            Some(SiuUpgradeStatus {
+                port: e.attr_parsed("port")?,
+                status: e.attr_or_empty("status").to_owned(),
+                percent_complete: e.attr_parsed("percent"),
+            })
+        })
+        .collect())
+}
+
+/// Parse the SIU version reply. The `roc_hw`/`roc_fw` attribute names are the
+/// firmware's own; the vendor's client renames them only to please XStream.
+pub fn parse_siu_versions(xml: &str) -> Result<Vec<SiuVersion>, Error> {
+    let Some(status) = crate::xml::find_element(xml, "PV_status")? else {
+        return Ok(Vec::new());
+    };
+    let list = status.child("status_list").unwrap_or(&status);
+    Ok(list
+        .children_named("port")
+        .filter_map(|e| {
+            Some(SiuVersion {
+                port: e.attr_parsed("number")?,
+                hardware: opt(e.attr("roc_hw")),
+                firmware: opt(e.attr("roc_fw")),
+            })
+        })
+        .collect())
+}
+
 /// Pull the `reply_error` description out of any PV document, if it signals an
 /// error (used to surface "Invalid session" and friends).
 pub fn error_in(xml: &str) -> Option<String> {
@@ -425,12 +848,60 @@ mod tests {
         assert!(c.users[0].admin);
         assert_eq!(c.users[0].target_ports.as_deref(), Some("1,2,3,4,5,6,7,8"));
 
+        assert_eq!(c.security.max_try, Some(5));
+        assert_eq!(c.security.try_time_secs, Some(180));
+        assert_eq!(c.security.lock_time_secs, Some(1800));
+        assert!(!c.security.lock_forever);
+        assert_eq!(c.security.auth_order, [crate::AuthMethod::Local]);
+
+        // This firmware omits <aaa> entirely until it is configured.
+        assert_eq!(c.aaa, Aaa::default());
+
+        assert_eq!(
+            c.system_time,
+            Some(DeviceTime {
+                year: 2026,
+                month: 9,
+                day: 18,
+                hour: 23,
+                minute: 31,
+                second: 37,
+            })
+        );
+
+        assert_eq!(c.serial_devices.len(), 2);
+        assert_eq!(c.serial_devices[0].name, "Telnet 01");
+        assert_eq!(c.serial_devices[0].baud_rate.as_deref(), Some("9600"));
+        assert_eq!(c.serial_devices[0].parity.as_deref(), Some("N"));
+        // This firmware omits @PDU entirely when nothing is wired to the port.
+        assert_eq!(c.serial_devices[0].assign, None);
+
+        assert!(c.network.ipv6_enabled);
+        assert_eq!(c.network.ipv6_mode.as_deref(), Some("dhcp"));
+        assert_eq!(c.network.ipv6_prefix, Some(64));
+        assert!(!c.network.static_dns);
+
+        assert!(!c.snmp.traps_enabled);
+        assert_eq!(c.snmp.manager_ip.as_deref(), Some(""));
+
+        assert_eq!(
+            c.users[0].vm_target_ports.as_deref(),
+            Some("1,2,3,4,5,6,7,8")
+        );
+        assert_eq!(c.users[0].serial_target_ports.as_deref(), Some("1,2"));
+
+        // The firmware lists every PDU it can drive; none is configured here.
+        assert_eq!(c.power.types.len(), 40);
+        assert_eq!(c.power.types[0].manufacturer, "Tripp Lite");
+        assert!(c.power.pdus.is_empty());
+
         assert_eq!(c.targets.len(), 8);
         assert_eq!(
             c.targets[0],
             Target {
                 port: 1,
-                name: "Server 01".into()
+                name: "Server 01".into(),
+                num_pocs: None,
             }
         );
         assert_eq!(c.targets[7].port, 8);

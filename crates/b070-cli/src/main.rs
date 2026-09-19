@@ -4,10 +4,28 @@
 //!
 //! Talks to the device's `/message.pv` management API over HTTPS. It does not
 //! open a KVM video session; that is a separate protocol (see `b070-proto`).
+//!
+//! Settings are grouped by area, and every area answers to `show` and `set`:
+//! `b070 network show`, `b070 ldap set --search-base …`. `b070 config` prints
+//! every area at once.
+//!
+//! Each `set` is a read-modify-write of the device's whole configuration,
+//! because that is the only write the device has (see [`b070_mgmt::config`]).
+//! One command is therefore one round trip and one save; to make several
+//! changes atomically, use `export`, edit the file, and `import` it.
+
+mod admin;
+mod args;
+mod edit;
+mod show;
 
 use anyhow::{Context, Result};
-use b070_mgmt::{Client, PowerCommand};
 use clap::{Parser, Subcommand, ValueEnum};
+
+use b070_mgmt::{Client, PowerCommand};
+
+/// Help heading for the options that apply to every command.
+const CONNECTION: &str = "Connection";
 
 #[derive(Parser)]
 #[command(
@@ -15,17 +33,28 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "Manage a Tripp Lite NetCommander / Minicom Smart IP KVM switch",
     version
 )]
+// The connection options are global so they can follow the subcommand
+// (`b070 ldap show --host …`). Each carries the heading itself, because a
+// global argument keeps its own heading when clap copies it into every
+// subcommand's help, and a heading set on the command would not travel with it.
 struct Cli {
     /// Device hostname or IP address.
-    #[arg(long, short = 'H', env = "B070_HOST")]
-    host: String,
+    #[arg(long, short = 'H', env = "B070_HOST", global = true, help_heading = CONNECTION)]
+    host: Option<String>,
 
     /// HTTPS port.
-    #[arg(long, default_value_t = b070_proto::DEFAULT_HTTPS_PORT, env = "B070_PORT")]
+    #[arg(long, default_value_t = b070_proto::DEFAULT_HTTPS_PORT, env = "B070_PORT", global = true, help_heading = CONNECTION)]
     port: u16,
 
     /// Username (default `admin`).
-    #[arg(long, short = 'u', default_value = "admin", env = "B070_USER")]
+    #[arg(
+        long,
+        short = 'u',
+        default_value = "admin",
+        env = "B070_USER",
+        global = true,
+        help_heading = CONNECTION
+    )]
     user: String,
 
     /// Password (default `access`, the factory default). Prefer the env var.
@@ -34,9 +63,16 @@ struct Cli {
         short = 'p',
         default_value = "access",
         env = "B070_PASSWORD",
-        hide_env_values = true
+        hide_env_values = true,
+        global = true,
+        help_heading = CONNECTION
     )]
     password: String,
+
+    /// Print the stored LDAP password, RADIUS secrets and SNMP community
+    /// instead of masking them.
+    #[arg(long, global = true, help_heading = CONNECTION)]
+    show_secrets: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -46,27 +82,274 @@ struct Cli {
 enum Command {
     /// Show firmware, LAN state and per-port status.
     Status,
-    /// Show device, network and user configuration.
+    /// Show every setting.
     Config,
-    /// List KVM ports, their names, and whether an SIU is attached.
+    /// List KVM ports and their names.
     Targets,
     /// List local user accounts.
     Users,
     /// Fetch one raw document (config, status, switch, …).
     Fetch { value: String },
+
+    /// Device name and session port.
+    Device {
+        #[command(subcommand)]
+        cmd: SetOrShow<edit::DeviceArgs>,
+    },
+    /// IPv4 and IPv6 addressing.
+    Network {
+        #[command(subcommand)]
+        cmd: SetOrShow<edit::NetworkArgs>,
+    },
+    /// Serial-over-SSH passthrough.
+    Ssh {
+        #[command(subcommand)]
+        cmd: SetOrShow<edit::SshArgs>,
+    },
+    /// Lockout policy, password rules and idle timeout.
+    Security {
+        #[command(subcommand)]
+        cmd: SetOrShow<edit::SecurityArgs>,
+    },
+    /// Which authentication sources are tried, and in what order.
+    Auth {
+        #[command(subcommand)]
+        cmd: SetOrShow<edit::AuthArgs>,
+    },
+    /// LDAP directory authentication.
+    Ldap {
+        #[command(subcommand)]
+        cmd: LdapCmd,
+    },
+    /// RADIUS authentication.
+    Radius {
+        #[command(subcommand)]
+        cmd: RadiusCmd,
+    },
+    /// SNMP traps.
+    Snmp {
+        #[command(subcommand)]
+        cmd: SetOrShow<edit::SnmpArgs>,
+    },
+    /// The device clock.
+    Time {
+        #[command(subcommand)]
+        cmd: SetOrShow<edit::TimeArgs>,
+    },
+    /// The two serial ports.
+    Serial {
+        #[command(subcommand)]
+        cmd: SerialCmd,
+    },
+    /// Central KVM management appliance.
+    KvmManager {
+        #[command(subcommand)]
+        cmd: SetOrShow<edit::KvmManagerArgs>,
+    },
+    /// Names of the machines on the KVM ports.
+    Target {
+        #[command(subcommand)]
+        cmd: TargetCmd,
+    },
+    /// Local user accounts.
+    User {
+        #[command(subcommand)]
+        cmd: UserCmd,
+    },
+    /// Power distribution units and their outlets.
+    Pdu {
+        #[command(subcommand)]
+        cmd: PduCmd,
+    },
+
     /// Power-control a target's IP-PDU outlet.
     Power {
         #[arg(value_enum)]
         action: PowerAction,
         /// Target port number.
+        #[arg(id = "power_port", value_name = "PORT")]
         port: u32,
     },
+    /// Disconnect whoever is using a KVM port.
+    Disconnect {
+        #[arg(id = "disconnect_port", value_name = "PORT")]
+        port: u32,
+    },
+    /// Lock every other user out of the device.
+    Lock,
+    /// Undo `lock`.
+    Unlock,
+    /// Release a configuration lock left behind by an interrupted save.
+    ReleaseLock,
+
+    /// Write the configuration document to a file, or to standard output.
+    Export {
+        file: Option<std::path::PathBuf>,
+        /// Overwrite the file if it exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Apply a configuration document written by `export`.
+    Import {
+        file: std::path::PathBuf,
+        /// Required. This replaces every setting at once.
+        #[arg(long)]
+        confirm: bool,
+        /// Also set the device clock to the `<system_time>` in the file.
+        /// Without this the clock is left alone, because an exported document
+        /// carries the time it was exported at.
+        #[arg(long)]
+        set_clock: bool,
+    },
+    /// Download the device's own backup blob.
+    Backup {
+        file: std::path::PathBuf,
+        /// Overwrite the file if it exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Restore a backup taken with `backup`.
+    Restore(admin::RestoreArgs),
+    /// Erase every setting and return to factory defaults.
+    FactoryReset(admin::FactoryResetArgs),
+
+    /// Install a TLS certificate for the management server.
+    Certificate(admin::CertificateArgs),
+    /// Upload device firmware and start the upgrade.
+    Upgrade(admin::UpgradeArgs),
+    /// Progress of a device firmware upgrade.
+    UpgradeStatus,
+    /// The Server Interface Units on the KVM ports.
+    Siu {
+        #[command(subcommand)]
+        cmd: SiuCmd,
+    },
+
     /// Reboot the device.
     Reboot {
         /// Required. Rebooting drops every active session.
         #[arg(long)]
         confirm: bool,
     },
+}
+
+/// The shape every settings area has: look at it, or change it.
+#[derive(Subcommand)]
+enum SetOrShow<T: clap::Args> {
+    /// Print the current settings.
+    Show,
+    /// Change settings. Options not given are left alone.
+    Set(T),
+}
+
+#[derive(Subcommand)]
+enum LdapCmd {
+    /// Print the LDAP settings.
+    Show,
+    /// Change the LDAP settings.
+    Set(edit::LdapArgs),
+    /// The directory servers to ask.
+    Server {
+        #[command(subcommand)]
+        cmd: LdapServerCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum LdapServerCmd {
+    /// List the configured servers.
+    List,
+    /// Add a server.
+    Add(edit::LdapServerArgs),
+    /// Remove every server with this hostname.
+    Remove {
+        #[arg(id = "ldap_remove_host", value_name = "HOST")]
+        host: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RadiusCmd {
+    /// Print the RADIUS settings.
+    Show,
+    /// Change the RADIUS settings.
+    Set(edit::RadiusArgs),
+    /// The RADIUS servers to ask.
+    Server {
+        #[command(subcommand)]
+        cmd: RadiusServerCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum RadiusServerCmd {
+    /// List the configured servers.
+    List,
+    /// Add a server.
+    Add(edit::RadiusServerArgs),
+    /// Remove every server with this hostname.
+    Remove {
+        #[arg(id = "radius_remove_host", value_name = "HOST")]
+        host: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SerialCmd {
+    /// Print both serial ports' settings.
+    Show,
+    /// Change one serial port.
+    Set(edit::SerialArgs),
+}
+
+#[derive(Subcommand)]
+enum TargetCmd {
+    /// List the KVM ports and their names.
+    List,
+    /// Rename a KVM port.
+    Set(edit::TargetArgs),
+}
+
+#[derive(Subcommand)]
+enum UserCmd {
+    /// List the accounts and what they may reach.
+    List,
+    /// Create an account.
+    Add(edit::UserAddArgs),
+    /// Delete an account.
+    Remove { name: String },
+    /// Change an account's rights.
+    Set(edit::UserSetArgs),
+    /// Change an account's password.
+    Password(edit::UserPasswordArgs),
+}
+
+#[derive(Subcommand)]
+enum PduCmd {
+    /// List the configured power strips and their outlet mapping.
+    List,
+    /// List the power strip models this firmware can drive.
+    Models,
+    /// Add a power strip.
+    Add(edit::PduAddArgs),
+    /// Remove a power strip.
+    Remove { name: String },
+    /// Map an outlet to the KVM port it powers.
+    Outlet(edit::PduOutletArgs),
+}
+
+#[derive(Subcommand)]
+enum SiuCmd {
+    /// Read the SIUs' hardware and firmware revisions.
+    Versions {
+        /// Ports to ask: `all`, or e.g. `1,3-5`.
+        #[arg(default_value = "all")]
+        ports: String,
+    },
+    /// Upload SIU firmware and start the upgrade.
+    Upgrade(admin::SiuUpgradeArgs),
+    /// Progress of a SIU firmware upgrade.
+    UpgradeStatus,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -86,6 +369,16 @@ impl From<PowerAction> for PowerCommand {
     }
 }
 
+impl PowerAction {
+    fn name(self) -> &'static str {
+        match self {
+            PowerAction::Cycle => "cycle",
+            PowerAction::Up => "up",
+            PowerAction::Down => "down",
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -96,136 +389,144 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let host = cli
+        .host
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("no device given; pass --host or set B070_HOST"))?;
 
     let client = Client::connect_with(
-        &cli.host,
+        host,
         cli.port,
         &cli.user,
         &cli.password,
         std::time::Duration::from_secs(20),
     )
-    .with_context(|| format!("connecting to {}", cli.host))?;
+    .with_context(|| format!("connecting to {host}"))?;
 
-    match cli.command {
-        Command::Status => {
-            let s = client.status().context("fetching status")?;
-            kv("Device", s.name.as_deref());
-            kv("Health", s.description.as_deref());
-            kv("Severity", s.severity.as_deref());
-            kv("Firmware", s.firmware_version.as_deref());
-            kv("Hardware", s.hardware.as_deref());
-            kv("LAN", s.lan_active.as_deref());
-            let kvm: Vec<_> = s.ports.iter().filter(|p| p.kind == "kvm").collect();
-            if !kvm.is_empty() {
-                println!("\nPorts:");
-                for p in kvm {
-                    let siu = if p.has_siu() {
-                        format!("SIU:{}", p.rocc_type)
-                    } else {
-                        "empty".into()
-                    };
-                    let who = if p.user.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  user={}", p.user)
-                    };
-                    println!(
-                        "  {:>2}  {:<12} {:<10} {}{}",
-                        p.number, p.name, p.status, siu, who
-                    );
-                }
-            }
-        }
+    run(&client, &cli)
+}
 
-        Command::Config => {
-            let c = client.config().context("fetching config")?;
-            kv("Device", c.name.as_deref());
-            kv("Hardware", c.hardware_type.as_deref());
-            kv("Ports", c.switch_ports.map(|v| v.to_string()).as_deref());
-            kv(
-                "Idle timeout",
-                c.idle_time_minutes.map(|m| format!("{m} min")).as_deref(),
-            );
-            if !c.session_ports.is_empty() {
-                kv(
-                    "Session port",
-                    Some(join_ports(&c.session_ports)).as_deref(),
-                );
-            }
-            kv(
-                "SSH",
-                Some(if c.ssh_enabled {
-                    format!("on ({})", join_ports(&c.ssh_ports))
-                } else {
-                    "off".into()
-                })
-                .as_deref(),
-            );
-            println!();
-            kv("MAC", c.network.mac.as_deref());
-            kv(
-                "Addressing",
-                Some(if c.network.use_static_ip {
-                    "static"
-                } else {
-                    "DHCP"
-                }),
-            );
-            kv("IPv4", c.network.ip.as_deref());
-            kv("Subnet", c.network.subnet.as_deref());
-            kv("Gateway", c.network.gateway.as_deref());
-            kv("DNS", c.network.dns.as_deref());
-            if c.network.ipv6_enabled {
-                kv("IPv6", c.network.ipv6.as_deref());
-            }
-        }
+fn run(client: &Client, cli: &Cli) -> Result<()> {
+    let secrets = cli.show_secrets;
 
-        Command::Targets => {
-            let c = client.config().context("fetching config")?;
-            let status = client.status().ok();
-            for t in c.targets {
-                let siu = status
-                    .as_ref()
-                    .and_then(|s| {
-                        s.ports
-                            .iter()
-                            .find(|p| p.number == t.port && p.kind == "kvm")
-                    })
-                    .map(|p| {
-                        if p.has_siu() {
-                            p.rocc_type.as_str()
-                        } else {
-                            "empty"
-                        }
-                    })
-                    .unwrap_or("");
-                println!("{:>2}  {:<14} {}", t.port, t.name, siu);
-            }
-        }
+    // Most commands need the configuration; fetch it once, where needed.
+    macro_rules! config {
+        () => {
+            client.config().context("fetching the configuration")?
+        };
+    }
 
-        Command::Users => {
-            let c = client.config().context("fetching config")?;
-            for u in c.users {
-                println!(
-                    "{:<16} {}{}  targets={}",
-                    u.name,
-                    if u.admin { "admin" } else { "user " },
-                    if u.active { "" } else { " (disabled)" },
-                    u.target_ports.as_deref().unwrap_or("-"),
-                );
-            }
-        }
-
+    match &cli.command {
+        Command::Status => status(client)?,
+        Command::Config => show::all(&config!(), secrets),
+        Command::Targets => show::targets(&config!()),
+        Command::Users => show::users(&config!()),
         Command::Fetch { value } => {
-            print!("{}", client.fetch_raw(&value).context("fetching document")?);
+            print!("{}", client.fetch_raw(value).context("fetching document")?)
         }
+
+        Command::Device { cmd } => match cmd {
+            SetOrShow::Show => show::device(&config!()),
+            SetOrShow::Set(a) => edit::device(client, a)?,
+        },
+        Command::Network { cmd } => match cmd {
+            SetOrShow::Show => show::network(&config!()),
+            SetOrShow::Set(a) => edit::network(client, a)?,
+        },
+        Command::Ssh { cmd } => match cmd {
+            SetOrShow::Show => show::ssh(&config!()),
+            SetOrShow::Set(a) => edit::ssh(client, a)?,
+        },
+        Command::Security { cmd } => match cmd {
+            SetOrShow::Show => show::security(&config!()),
+            SetOrShow::Set(a) => edit::security(client, a)?,
+        },
+        Command::Auth { cmd } => match cmd {
+            SetOrShow::Show => show::auth(&config!(), secrets),
+            SetOrShow::Set(a) => edit::auth(client, a)?,
+        },
+        Command::Ldap { cmd } => match cmd {
+            LdapCmd::Show => show::ldap(&config!(), secrets),
+            LdapCmd::Set(a) => edit::ldap(client, a)?,
+            LdapCmd::Server { cmd } => match cmd {
+                LdapServerCmd::List => show::ldap(&config!(), secrets),
+                LdapServerCmd::Add(a) => edit::ldap_server_add(client, a)?,
+                LdapServerCmd::Remove { host } => edit::ldap_server_remove(client, host)?,
+            },
+        },
+        Command::Radius { cmd } => match cmd {
+            RadiusCmd::Show => show::radius(&config!(), secrets),
+            RadiusCmd::Set(a) => edit::radius(client, a)?,
+            RadiusCmd::Server { cmd } => match cmd {
+                RadiusServerCmd::List => show::radius(&config!(), secrets),
+                RadiusServerCmd::Add(a) => edit::radius_server_add(client, a)?,
+                RadiusServerCmd::Remove { host } => edit::radius_server_remove(client, host)?,
+            },
+        },
+        Command::Snmp { cmd } => match cmd {
+            SetOrShow::Show => show::snmp(&config!(), secrets),
+            SetOrShow::Set(a) => edit::snmp(client, a)?,
+        },
+        Command::Time { cmd } => match cmd {
+            SetOrShow::Show => show::time(&config!()),
+            SetOrShow::Set(a) => edit::time(client, a)?,
+        },
+        Command::Serial { cmd } => match cmd {
+            SerialCmd::Show => show::serial(&config!()),
+            SerialCmd::Set(a) => edit::serial(client, a)?,
+        },
+        Command::KvmManager { cmd } => match cmd {
+            SetOrShow::Show => show::kvm_manager(&config!()),
+            SetOrShow::Set(a) => edit::kvm_manager(client, a)?,
+        },
+        Command::Target { cmd } => match cmd {
+            TargetCmd::List => show::targets(&config!()),
+            TargetCmd::Set(a) => edit::target(client, a)?,
+        },
+        Command::User { cmd } => match cmd {
+            UserCmd::List => show::users(&config!()),
+            UserCmd::Add(a) => edit::user_add(client, a)?,
+            UserCmd::Remove { name } => edit::user_remove(client, name)?,
+            UserCmd::Set(a) => edit::user_set(client, a)?,
+            UserCmd::Password(a) => edit::user_password(client, a)?,
+        },
+        Command::Pdu { cmd } => match cmd {
+            PduCmd::List => show::power(&config!()),
+            PduCmd::Models => show::pdu_models(&config!()),
+            PduCmd::Add(a) => edit::pdu_add(client, a)?,
+            PduCmd::Remove { name } => edit::pdu_remove(client, name)?,
+            PduCmd::Outlet(a) => edit::pdu_outlet(client, a)?,
+        },
 
         Command::Power { action, port } => {
             client
-                .power(port, action.into())
-                .with_context(|| format!("power {:?} on port {port}", action_name(action)))?;
-            println!("power {} sent to port {port}", action_name(action));
+                .power(*port, (*action).into())
+                .with_context(|| format!("power {} on port {port}", action.name()))?;
+            println!("power {} sent to port {port}", action.name());
         }
+        Command::Disconnect { port } => admin::disconnect(client, *port)?,
+        Command::Lock => admin::lock(client)?,
+        Command::Unlock => admin::unlock(client)?,
+        Command::ReleaseLock => admin::release_lock(client)?,
+
+        Command::Export { file, force } => admin::export(client, file.as_ref(), *force)?,
+        Command::Import {
+            file,
+            confirm,
+            set_clock,
+        } => admin::import(client, file, *confirm, *set_clock)?,
+        Command::Backup { file, force } => admin::backup(client, file, *force)?,
+        Command::Restore(a) => admin::restore(client, a)?,
+        Command::FactoryReset(a) => admin::factory_reset(client, a)?,
+
+        Command::Certificate(a) => admin::install_certificate(client, a)?,
+        Command::Upgrade(a) => admin::upgrade(client, a)?,
+        Command::UpgradeStatus => admin::upgrade_status(client)?,
+        Command::Siu { cmd } => match cmd {
+            SiuCmd::Versions { ports } => admin::siu_versions(client, ports, port_count(client)?)?,
+            SiuCmd::Upgrade(a) => admin::siu_upgrade(client, a, port_count(client)?)?,
+            SiuCmd::UpgradeStatus => admin::siu_upgrade_status(client)?,
+        },
 
         Command::Reboot { confirm } => {
             if !confirm {
@@ -241,26 +542,58 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn action_name(a: PowerAction) -> &'static str {
-    match a {
-        PowerAction::Cycle => "cycle",
-        PowerAction::Up => "up",
-        PowerAction::Down => "down",
-    }
+/// How many KVM ports this device has, for validating a port argument.
+fn port_count(client: &Client) -> Result<u32> {
+    Ok(client
+        .config()
+        .context("fetching the configuration")?
+        .switch_ports
+        .unwrap_or(0))
 }
 
-fn join_ports(ports: &[u16]) -> String {
-    ports
-        .iter()
-        .map(u16::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+fn status(client: &Client) -> Result<()> {
+    let s = client.status().context("fetching status")?;
+    show::kv("Device", args::or_dash(s.name.as_deref()));
+    show::kv("Health", args::or_dash(s.description.as_deref()));
+    show::kv("Severity", args::or_dash(s.severity.as_deref()));
+    show::kv("Firmware", args::or_dash(s.firmware_version.as_deref()));
+    show::kv("Hardware", args::or_dash(s.hardware.as_deref()));
+    show::kv("LAN", args::or_dash(s.lan_active.as_deref()));
 
-fn kv(key: &str, value: Option<&str>) {
-    if let Some(v) = value {
-        if !v.is_empty() {
-            println!("{key:<14} {v}");
+    let kvm: Vec<_> = s.ports.iter().filter(|p| p.kind == "kvm").collect();
+    if !kvm.is_empty() {
+        println!("\nPorts:");
+        for p in kvm {
+            let siu = if p.has_siu() {
+                format!("SIU:{}", p.rocc_type)
+            } else {
+                "empty".into()
+            };
+            let who = if p.user.is_empty() {
+                String::new()
+            } else {
+                format!("  user={}", p.user)
+            };
+            println!(
+                "  {:>2}  {:<12} {:<10} {}{}",
+                p.number, p.name, p.status, siu, who
+            );
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// clap merges two arguments that share an id, which silently routes a
+    /// subcommand's positional into a global option — `b070 ldap server add
+    /// HOST` once landed in `--host` and made the tool connect to the LDAP
+    /// server. `debug_assert` catches every such collision.
+    #[test]
+    fn command_tree_is_well_formed() {
+        Cli::command().debug_assert();
     }
 }
