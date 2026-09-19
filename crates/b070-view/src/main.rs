@@ -6,10 +6,15 @@
 //! keyboard and mouse passed through.
 
 mod keys;
+mod macros;
+mod menu;
+mod mgmt;
+mod render;
 mod viewer;
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -24,7 +29,10 @@ use clap::Parser;
                   Keyboard and mouse are passed through. Ctrl+Alt+End sends \
                   Ctrl+Alt+Delete to the target, Ctrl+Alt+Home re-syncs the \
                   remote pointer with yours, and Ctrl+Alt+A runs the device's \
-                  automatic video adjustment."
+                  automatic video adjustment.\n\n\
+                  The window's menu bar covers the rest: key combinations your \
+                  own desktop swallows, switching target without reconnecting, \
+                  mouse calibration, video adjustment and target power control."
 )]
 struct Args {
     /// Device address.
@@ -83,8 +91,10 @@ fn main() -> Result<()> {
 
     // The management login is what mints the session token; hold the client for
     // the whole session, because logging out would invalidate it.
-    let client = b070_mgmt::Client::connect(&args.host, &args.user, &args.password)
-        .with_context(|| format!("logging in to {}", args.host))?;
+    let client = Arc::new(
+        b070_mgmt::Client::connect(&args.host, &args.user, &args.password)
+            .with_context(|| format!("logging in to {}", args.host))?,
+    );
 
     if args.list {
         for t in client.targets().context("reading targets")? {
@@ -117,7 +127,16 @@ fn main() -> Result<()> {
 
     match &args.snapshot {
         Some(path) => snapshot(&session, args.frames, path),
-        None => viewer::run(session),
+        None => viewer::run(
+            session,
+            viewer::Config {
+                host: args.host,
+                user: args.user,
+                target: args.target,
+                exclusive: !args.shared,
+                client,
+            },
+        ),
     }
 }
 
@@ -137,6 +156,9 @@ fn snapshot(session: &Session, frames: u32, path: &PathBuf) -> Result<()> {
             }
             Ok(Event::Resolution { width, height }) => {
                 tracing::info!(width, height, "resolution")
+            }
+            Ok(Event::Noise(n)) => {
+                tracing::info!(level = n.level, changes = n.changes, "video noise")
             }
             Ok(Event::NoSignal) => tracing::warn!("no video signal from the target"),
             Ok(Event::Gui(msg)) => tracing::info!(%msg, "device message"),

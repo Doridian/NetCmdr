@@ -35,7 +35,9 @@ use b070_proto::kvmmsg::{Cmd, CmdFlag, Header, MagicNumber, Message, SocketType}
 
 use crate::channel::{Channel, ShutdownHandle};
 use crate::input::{self, Input};
-use crate::video::{parse_palette, Framebuffer, Rect, SharedFrame, SharedPalette, VideoDecoder};
+use crate::video::{
+    parse_palette, Framebuffer, Noise, Rect, SharedFrame, SharedPalette, VideoDecoder,
+};
 use crate::Error;
 
 /// How long to wait for the device's `CONFIG_XML` answer to `VERIFY_USER`.
@@ -91,6 +93,9 @@ pub enum Event {
     Frame(Rect),
     /// The device reports no video signal from the target.
     NoSignal,
+    /// How much of the picture is changing, reported once a second while
+    /// frames are arriving. See [`Noise`].
+    Noise(Noise),
     /// An on-screen message from the device, as a message id such as
     /// `detecting_signal` or `no_signal`.
     Gui(String),
@@ -257,11 +262,73 @@ impl Session {
         self.send_command(Cmd::VideoStopAdjust)
     }
 
+    /// Switch the session to another target without tearing it down.
+    ///
+    /// This is what the stock client's target menu does: the device re-points
+    /// the same three channels at another switch port and sends a fresh
+    /// `CONFIG_XML` plus a key frame. The session id, the sockets and the
+    /// heartbeat all survive, so there is no second login.
+    ///
+    /// The device wants the target's *name* as well as its port; it echoes the
+    /// name back in the config document.
+    pub fn change_target(&self, name: &str, port: u32) -> Result<(), Error> {
+        self.send_xml(&b070_proto::command::change_port(name, &port.to_string()))
+    }
+
+    /// Run the device's mouse calibration
+    /// (`<command name='calibrate' state='start' mode='calibrate'/>`).
+    ///
+    /// The device moves the remote pointer around a known path to learn the
+    /// target's acceleration curve. Progress arrives as [`Event::Gui`].
+    pub fn calibrate_mouse(&self) -> Result<(), Error> {
+        self.send_xml(&b070_proto::command::calibrate_mouse())
+    }
+
+    /// Align the remote pointer with the local one
+    /// (`<command name='align' state='start' mode='align'/>`).
+    pub fn align_mouse(&self) -> Result<(), Error> {
+        self.send_xml(&b070_proto::command::align_mouse())
+    }
+
+    /// Claim or release exclusive use of the target mid-session.
+    ///
+    /// Unlike the commands above this one is a *config* document, which the
+    /// device expects under [`Cmd::ConfigXml`] rather than [`Cmd::MsgCmdXml`]
+    /// (`ConfigCommandHandler` vs `DefaultCommandHandler`).
+    pub fn set_exclusive(&self, exclusive: bool) -> Result<(), Error> {
+        let e = if exclusive {
+            b070_proto::command::Exclusivity::Exclusive
+        } else {
+            b070_proto::command::Exclusivity::Shared
+        };
+        self.send_config_xml(&b070_proto::command::set_exclusivity(e))
+    }
+
+    /// Send an app-level `<commands>` document on the command channel.
+    ///
+    /// The stock client hands these strings to its plugin facade, which
+    /// forwards anything without a dedicated handler verbatim as
+    /// [`Cmd::MsgCmdXml`] (`DefaultCommandHandler`). Use
+    /// [`Session::send_config_xml`] for `<command name='config'>` documents,
+    /// which take a different command code.
+    pub fn send_xml(&self, xml: &str) -> Result<(), Error> {
+        self.send_payload(CmdFlag::RawData, Cmd::MsgCmdXml, xml.as_bytes().to_vec())
+    }
+
+    /// Send a `<command name='config'>` document (`ConfigCommandHandler`).
+    pub fn send_config_xml(&self, xml: &str) -> Result<(), Error> {
+        self.send_payload(CmdFlag::RawData, Cmd::ConfigXml, xml.as_bytes().to_vec())
+    }
+
     fn send_command(&self, cmd: Cmd) -> Result<(), Error> {
+        self.send_payload(CmdFlag::General, cmd, Vec::new())
+    }
+
+    fn send_payload(&self, flag: CmdFlag, cmd: Cmd, payload: Vec<u8>) -> Result<(), Error> {
         self.cmd_tx
             .as_ref()
             .ok_or(Error::Closed)?
-            .send(Message::new(CmdFlag::General, cmd, Vec::new()))
+            .send(Message::new(flag, cmd, payload))
             .map_err(|_| Error::Closed)
     }
 
@@ -313,6 +380,54 @@ fn await_login(cmd: &mut Channel) -> Result<String, Error> {
         }
     }
     Err(Error::LoginTimeout)
+}
+
+/// One target as the *session's* own config document describes it.
+///
+/// The client config the device pushes on the command channel carries a
+/// `<server servername='…' port='…' active='…'/>` per switch port
+/// (`com.minicom.app.video.data.xml.cfg.XServer`). This is the authoritative
+/// answer to "which target am I looking at", and it updates itself after a
+/// [`Session::change_target`] — no management request needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Server {
+    pub port: u32,
+    pub name: String,
+    pub active: bool,
+}
+
+/// Pull the `<server>` list out of a client config document.
+///
+/// Returns an empty vector when the document has none; not every config the
+/// device sends carries them, so callers keep whatever they had.
+pub fn parse_servers(xml: &str) -> Vec<Server> {
+    use quick_xml::events::Event as XmlEvent;
+    let mut out = Vec::new();
+    let mut reader = quick_xml::Reader::from_str(xml);
+    loop {
+        match reader.read_event() {
+            Ok(XmlEvent::Start(e)) | Ok(XmlEvent::Empty(e)) => {
+                if e.name().as_ref() != b"server" {
+                    continue;
+                }
+                let (mut port, mut name, mut active) = (None, String::new(), false);
+                for attr in e.attributes().flatten() {
+                    let value = String::from_utf8_lossy(&attr.value).trim().to_string();
+                    match attr.key.as_ref() {
+                        b"port" => port = value.parse().ok(),
+                        b"servername" => name = value,
+                        b"active" => active = value.eq_ignore_ascii_case("true"),
+                        _ => {}
+                    }
+                }
+                if let Some(port) = port {
+                    out.push(Server { port, name, active });
+                }
+            }
+            Ok(XmlEvent::Eof) | Err(_) => return out,
+            _ => {}
+        }
+    }
 }
 
 /// Pull `userlevel` out of the `connection` element of the client config.
@@ -502,6 +617,9 @@ fn spawn_video_thread(
                         if let Some((width, height)) = decoder.take_resolution_change() {
                             events.send(Event::Resolution { width, height }).ok();
                         }
+                        if let Some(noise) = decoder.take_noise() {
+                            events.send(Event::Noise(noise)).ok();
+                        }
                         if !rect.is_empty() && events.send(Event::Frame(rect)).is_err() {
                             break;
                         }
@@ -554,6 +672,25 @@ mod tests {
         let xml = r#"<client_config><version_info v="1"/>
             <connection userlevel="2" idletimout="0"/></client_config>"#;
         assert_eq!(find_user_level(xml), Some(2));
+    }
+
+    #[test]
+    fn finds_the_servers_and_which_one_is_active() {
+        let xml = r#"<client_config><servers>
+            <server servername="Server 01" port="1" active="false"/>
+            <server servername="Server 02" port="2" active="true"/>
+            </servers></client_config>"#;
+        let servers = parse_servers(xml);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[1].name, "Server 02");
+        assert!(servers[1].active);
+        assert!(!servers[0].active);
+    }
+
+    #[test]
+    fn a_config_without_servers_yields_none_rather_than_an_error() {
+        assert!(parse_servers("<client_config><connection userlevel='1'/></client_config>").is_empty());
+        assert!(parse_servers("not xml at all").is_empty());
     }
 
     #[test]

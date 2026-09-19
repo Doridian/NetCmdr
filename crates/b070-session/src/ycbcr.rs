@@ -193,7 +193,7 @@ impl YCbCrToRgb {
 
 /// `Inplace_eShuttle2BSbuf`: reverse every 4-byte group.
 pub fn inplace_word_swap(data: &mut [u8]) {
-    for chunk in data.chunks_exact_mut(4) {
+    for chunk in data.as_chunks_mut::<4>().0 {
         chunk.swap(0, 3);
         chunk.swap(1, 2);
     }

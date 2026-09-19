@@ -27,6 +27,8 @@ for provenance.
 cargo build --release
 ```
 
+Needs Rust 1.95 or newer (the viewer's egui version sets the floor).
+
 ### `b070` — management CLI
 
 ```sh
@@ -54,14 +56,50 @@ b070-view --host 192.0.2.10 -t 1 --auto-adjust   # re-align the analog capture
 b070-view --host 192.0.2.10 -t 1 --snapshot out.ppm   # headless frame capture
 ```
 
-In the window: keyboard and mouse go to the target, **Ctrl+Alt+End** sends
-Ctrl+Alt+Delete, **Ctrl+Alt+Home** re-syncs the remote pointer, and
-**Ctrl+Alt+A** runs the device's automatic video adjustment. The image scales to
-the window with the aspect ratio preserved.
+In the window, keyboard and mouse go to the target and the image scales to the
+window with the aspect ratio preserved. Three shortcuts stay local:
+
+| Key | Does |
+|---|---|
+| **Ctrl+Alt+End** | send Ctrl+Alt+Delete to the target |
+| **Ctrl+Alt+Home** | re-sync the remote pointer with yours |
+| **Ctrl+Alt+A** | run the device's automatic video adjustment |
+
+Everything else is on the menu bar, which mirrors the stock client's toolbar
+minus virtual media:
+
+| Menu | Offers |
+|---|---|
+| **Keyboard** | Ctrl+Alt+Delete, and the combinations your own desktop swallows — Alt+Tab, Alt+F4, Ctrl+Shift+Esc, Super+L, Print Screen, Ctrl+Alt+F1… — plus *release held keys* |
+| **Mouse** | sync pointer, calibrate, align, and how the local pointer is drawn over the video |
+| **Video** | refresh, auto adjust, fit-to-window or 1:1, resize the window to the target |
+| **Power** | cycle / on / off for the current target's IP-PDU outlet, each behind a confirmation |
+| **Session** | **switch target without reconnecting**, reload the target list, exclusive access, disconnect |
+
+Switching target sends the device's own `change_port` command on the live
+session, so the sockets, the login and the heartbeat all survive: the picture
+just becomes the other machine's, at whatever resolution that machine runs.
+
+The device does not switch instantly — it keeps sending the **old** target's
+video for several seconds first (measured: 5 s when the new target was driving
+video, 9.6 s when it was not). Showing that would be showing one machine under
+another machine's name, so the viewer blanks the screen and puts up a
+*Switching to …* notice, the same way it does while the first frame of a fresh
+session is still on its way. Video comes back when the device itself says the
+switch landed.
 
 The device digitises analog VGA, so its horizontal position and sampling phase
-drift per target and per video mode; `--auto-adjust` (or Ctrl+Alt+A) is what
-re-centres the captured image.
+drift per target and per video mode; `--auto-adjust` (or Ctrl+Alt+A, or
+Video → Auto adjust) is what re-centres the captured image.
+
+The right-hand end of the bar carries a **Noise** bar next to the resolution:
+how much of the picture is changing, per second, the same reading the stock
+client buries in its Advanced Video dialog. A target sitting at an idle desktop
+should read zero; a steady non-zero level means the digitiser is picking up
+noise on the VGA link rather than watching real work, and an auto-adjust will
+usually settle it. Only the raw changed-tile count comes off the wire — the
+percentage is computed here, exactly as the vendor's native library computes it
+(see `research/notes/FINDINGS.md` §5.4.1).
 
 ## Protocols
 
@@ -71,7 +109,7 @@ re-centres the captured image.
 | Session framing (`KVMMsg`) | per-channel TCP 900, plaintext handshake ± TLS | **Implemented, verified** |
 | Video codec | LZW / zlib + tile bitfield, RGB555 or YCbCr | **Implemented**; RGB555 verified, YCbCr ported but unexercised |
 | Keyboard and mouse | 16-byte records on the kbmouse channel | **Implemented, verified** |
-| Control commands | `<commands>` facade → `KVMMsg` | **Recovered**; the ones the viewer needs are implemented |
+| Control commands | `<commands>` facade → `KVMMsg` | **Recovered**; the ones the viewer needs are implemented and verified, `change_port` included |
 | Virtual media | USB-over-IP in `KVMMsg` on its own channel | Specified, not implemented |
 | Serial passthrough | SSH on 4001/4002 | Documented |
 
@@ -104,7 +142,7 @@ crates/
   b070-mgmt/     /message.pv client and PV_* XML models (OpenSSL, see TLS above)
   b070-session/  the KVM session: channels, login, video codec, input
   b070-cli/      the `b070` binary
-  b070-view/     the `b070-view` viewer (winit + softbuffer)
+  b070-view/     the `b070-view` viewer (winit + egui on OpenGL)
 research/        vendor firmware, extracted clients (2013 + live 2017),
                  decompiled sources, disassembly, live fixtures, findings
 ```

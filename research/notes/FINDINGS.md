@@ -251,6 +251,46 @@ translates them onto the wire. Complete vocabulary recovered from the client:
 <commands><command name='config'><config>...</config></command></commands>
 ```
 
+**How they reach the wire (verified live, 2026-09-19).** The all-Java client's
+`CommandHandlerFactory` routes each document by its `name` attribute, and only a
+handful get a dedicated encoding:
+
+| `name` | Handler | On the wire |
+|---|---|---|
+| `video_refresh` | `VideoRefreshCommandHandler` | `CmdFlag::General`, `Cmd::RefreshScreen`, empty payload |
+| `auto_video_adjust` | `AutoAdjustVideoCommandHandler` | `CmdFlag::General`, `Cmd::VideoAuto` (`state='end'` → `Cmd::VideoStopAdjust`) |
+| `config` | `ConfigCommandHandler` | `CmdFlag::RawData`, **`Cmd::ConfigXml`**, the document as bytes |
+| `mouse_pointer` | `MousePointerCommandHandler` | **nothing** — it only changes how the *client* draws its own cursor |
+| `run_special_key` id 1000 | `CtrlAltDelCommandHanlder` | the keyboard channel's Ctrl+Alt+Del record, not XML |
+| everything else, incl. `change_port` and `power` | `DefaultCommandHandler` | `CmdFlag::RawData`, **`Cmd::MsgCmdXml`** (77), the document as bytes |
+
+So the `Cmd` code is *not* uniform across the vocabulary: `config` documents and
+everything-else documents differ, and two entries never reach the device at all.
+
+`change_port` is implemented in `b070-session` as `Session::change_target` and
+**verified against the hardware**: sending it on a live session moved the same
+three channels from port 1 (1360×768) to port 2 (1024×768) and back, emitting a
+new `Resolution` and a fresh client config each time, with no re-login and no
+reconnect. The client config's `<server servername='…' port='…' active='…'/>`
+list is what confirms the switch landed.
+
+**The switch is not instant, and the video channel lies in the meantime.**
+Timed against the device, tiles of the *previous* target keep arriving from
+~90 ms after the command until the device re-points its capture:
+
+| Transition | Old target's video continues | Settled by |
+|---|---|---|
+| port 1 (1360×768) → port 2 (1024×768) | 4.8 s | `Resolution` at 4.85 s, config at 4.91 s |
+| port 2 → port 3 (no signal) | 9.6 s, at port 2's geometry | `NoSignal` at 9.59 s, config at 9.80 s |
+| port 3 → port 1 | — | `Resolution` at 4.48 s, config at 4.54 s |
+
+So the first frame after a `change_port` is **not** a usable "the switch is
+done" signal. The usable ones, in the order they arrive, are `Resolution` (or
+`NoSignal` for a dead port) and then the client config naming the new active
+port. A client has to treat the gap as "picture unknown" — `b070-view` blanks
+the window over it. Two targets at the same resolution emit no `Resolution`
+event at all, which is why the config document is needed as well.
+
 Events pushed back (native → Java): `resolution_change`, `config_change(d)`,
 `status_change(d)`, `mounted_devices`, `toolbarstatus`, `client_config`,
 `global_config`. Example payload:
@@ -432,6 +472,42 @@ a few pixels off horizontally until adjusted. `CmdFlag::GENERAL` + `Cmd` 64
 (`VIDEO_AUTO`) starts the device's own auto-adjust, 65 stops it, and progress
 comes back as `RAW_DATA` + `Cmd` 19 with an `RPMAutoAdjStruct` (two i16s then a
 64-byte status string).
+
+**The "noise" meter is computed client-side from a wire field.** The stock
+client's Advanced Video dialog shows a "Noise / Level" progress bar, and nothing
+on the wire is named "noise": the device supplies only `idx_size`, the
+changed-tile count in every video message header, and the *client* turns it into
+the reading. The whole calculation is `KVMClientProxy::SetNoiseLevel(bool)` at
+`0x440c0` in `research/software/native/libkvmipjproxy.so`, called once per
+decoded frame:
+
+```
+tiles   = (source_cx * source_cy) / (tile_cx * tile_cy)   // tiles on screen
+sum    += idx_size * 100 / tiles                          // per frame
+changes+= idx_size                                        // per frame
+                                                          // once a second:
+level   = min(sum / elapsed_seconds, 100)
+level   = 1 if level == 0 and changes != 0                // never read silent
+```
+
+So the level is a *rate*, not an average: per-frame change percentage multiplied
+by the frame rate, capped at 100. A still desktop that nevertheless reads
+non-zero is the point of the meter — that is tiles flipping because the
+digitiser is picking up noise on the analog VGA link, which the device's
+auto-adjust settles.
+
+The bar only moves while a client-side gate at `this+0x5bd` is set, and the
+*client's own* config handler (`KVMClientProxy::Config`) sets it when it sees
+`<video_settings manual_adjust_dlg='open'/>` — the command the dialog sends on
+open, and `<command name='gui' active='false'/>` on close. Both go to the device
+too, but the gate is purely local, so a client that wants the reading all the
+time can simply always compute it. Once a second the native library formats
+`noise_level='%d' changes='%d'`, wraps it as `statistics`, and pushes it up
+through JNI as `OnEvent("status_change", …)`; `EventsController` matches the
+substring `statistics noise_level` and routes it to the dialog's `JProgressBar`.
+
+`crates/b070-session/src/video.rs` (`NoiseMeter`) transcribes this, ungated, and
+`b070-view` shows it as a bar in the menu bar rather than hiding it in a dialog.
 
 #### 5.4.2 `ITCMsg` / `CommIO` — LEGACY (2013 firmware, superseded)
 

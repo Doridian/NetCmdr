@@ -40,8 +40,8 @@ pub mod ycbcr;
 
 pub use channel::Channel;
 pub use input::{Input, Modifiers, MouseButton};
-pub use session::{Event, Session, SessionConfig};
-pub use video::{Framebuffer, Rect, SharedFrame, VideoDecoder};
+pub use session::{parse_servers, Event, Server, Session, SessionConfig};
+pub use video::{Framebuffer, Noise, Rect, SharedFrame, VideoDecoder};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

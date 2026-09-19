@@ -195,7 +195,9 @@ mod tests {
 
     fn words(m: &Message) -> Vec<i32> {
         m.payload
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }

@@ -168,7 +168,7 @@ impl<'a> BitReader<'a> {
     fn set_opmode(&mut self, mode: i32) {
         if mode == opmode::BITS16 {
             self.bit_pos = 0;
-        } else if self.bit_pos % 32 != 0 {
+        } else if !self.bit_pos.is_multiple_of(32) {
             self.bit_pos = (self.bit_pos / 32 + 1) * 32;
         }
         self.opmode = mode;
@@ -389,7 +389,9 @@ impl Expander {
             return Err(Error::Lzw("zero sized input buffer"));
         }
         let words: Vec<u32> = input[..len]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
 
@@ -594,7 +596,7 @@ mod tests {
         }
         /// Emit as the big-endian word stream `expand` expects.
         fn finish(mut self) -> Vec<u8> {
-            while self.bits.len() % 32 != 0 {
+            while !self.bits.len().is_multiple_of(32) {
                 self.bits.push(false);
             }
             let mut out = Vec::new();
@@ -616,7 +618,9 @@ mod tests {
         let mut out = vec![0u8; 4096];
         let n = exp.expand(bytes, bytes.len(), &mut out).unwrap();
         out[..n]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
@@ -672,7 +676,7 @@ mod tests {
         w.literal(0x1234_5678);
         w.ctrl(ctrl::FLUSH);
         // 32-bit mode is word aligned, so pad to the boundary first.
-        while w.bits.len() % 32 != 0 {
+        while !w.bits.len().is_multiple_of(32) {
             w.bits.push(false);
         }
         w.put(0xDEAD_BEEF, 32);

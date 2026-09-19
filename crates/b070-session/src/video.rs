@@ -35,6 +35,7 @@
 //! them back with a little-endian `getInt` into a `TYPE_INT_RGB` image.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use flate2::{Decompress, FlushDecompress};
 
@@ -296,6 +297,90 @@ impl Framebuffer {
     }
 }
 
+/// How much of the picture is changing, as the stock client measures it.
+///
+/// This is the value behind the vendor viewer's "Noise / Level" bar, and it is
+/// meant to be read as an analogue-noise reading: on a quiet desktop almost no
+/// tiles change, so a steady non-zero level means the capture is picking up
+/// noise on the VGA link rather than real activity. Turning the gain down —
+/// with the device's video auto-adjust — is what settles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Noise {
+    /// 0..=100. Percent of the screen changing per second, clamped, and
+    /// rounded up to 1 whenever anything changed at all.
+    pub level: u8,
+    /// Tiles that changed over the reporting interval, unscaled.
+    pub changes: u32,
+}
+
+/// Accumulates [`Noise`] over one-second intervals.
+///
+/// Transcribed from `KVMClientProxy::SetNoiseLevel(bool)` in the vendor's
+/// native client library (`research/software/native/libkvmipjproxy.so`,
+/// `0x440c0`), which is where the number is computed — the device sends only
+/// the per-frame changed-tile count that feeds it. Per frame the vendor adds
+/// that count as a percentage of the tiles on screen; once a second it divides
+/// the running total by the elapsed seconds, so the reading is a *rate*: the
+/// per-frame percentage multiplied by the frame rate, capped at 100.
+#[derive(Debug)]
+struct NoiseMeter {
+    /// Running total of per-frame changed-tile percentages.
+    sum_percent: u32,
+    /// Running total of raw changed-tile counts.
+    sum_changes: u32,
+    last_report: Instant,
+}
+
+impl NoiseMeter {
+    fn new() -> Self {
+        NoiseMeter {
+            sum_percent: 0,
+            sum_changes: 0,
+            last_report: Instant::now(),
+        }
+    }
+
+    /// Fold one decoded frame in.
+    fn record(&mut self, dib: &Dib) {
+        // `parse_dib` has already rejected zero tile sizes, tiles bigger than
+        // the screen and more changed tiles than the screen holds, so the
+        // divisor is at least 1 and the percentage is at most 100. The vendor
+        // guards all three here instead, having validated none of them.
+        let tiles = (dib.source_cx as u32 * dib.source_cy as u32)
+            / (dib.tile_cx as u32 * dib.tile_cy as u32);
+        self.sum_percent += dib.idx_size as u32 * 100 / tiles.max(1);
+        self.sum_changes += dib.idx_size as u32;
+    }
+
+    /// Report, if a whole second has passed since the last one.
+    ///
+    /// The vendor compares `time()` values, so its interval is whole seconds
+    /// and the report lands on the first frame after the second turns over;
+    /// this keeps that cadence but off the monotonic clock. The interval is
+    /// advanced by the seconds it actually covered rather than reset to *now*,
+    /// which is what the vendor's integer clock does implicitly and which keeps
+    /// the sub-second remainder from being dropped every report. A gap of
+    /// several seconds — a frozen or idle target — divides by that many, so it
+    /// reads as quiet rather than as one large spike.
+    fn take(&mut self) -> Option<Noise> {
+        let secs = self.last_report.elapsed().as_secs();
+        if secs == 0 {
+            return None;
+        }
+        self.last_report += Duration::from_secs(secs);
+        let changes = self.sum_changes;
+        let rate = self.sum_percent as u64 / secs;
+        self.sum_percent = 0;
+        self.sum_changes = 0;
+        // A screen that is changing, however little, should not read as silent.
+        let level = match rate {
+            0 if changes != 0 => 1,
+            r => r.min(100) as u8,
+        };
+        Some(Noise { level, changes })
+    }
+}
+
 /// Stateful video decoder. One instance decodes a whole session: the zlib and
 /// LZW streams, the tile bitfield and the framebuffer all persist between
 /// messages.
@@ -321,6 +406,7 @@ pub struct VideoDecoder {
     width: u16,
     height: u16,
     resolution_changed: bool,
+    noise: NoiseMeter,
     frame: SharedFrame,
 }
 
@@ -343,6 +429,7 @@ impl VideoDecoder {
             width: 0,
             height: 0,
             resolution_changed: false,
+            noise: NoiseMeter::new(),
             frame,
         }
     }
@@ -376,6 +463,7 @@ impl VideoDecoder {
             bytes = dib.compressed_size,
             "video message"
         );
+        self.noise.record(&dib);
         self.update_resolution(&dib);
         self.restore(&dib)?;
         self.post_uncompress(&dib)?;
@@ -390,6 +478,12 @@ impl VideoDecoder {
         } else {
             None
         }
+    }
+
+    /// The [`Noise`] reading, once a second's worth of frames has gone by.
+    /// Returns `None` in between, so the caller can poll it per frame.
+    pub fn take_noise(&mut self) -> Option<Noise> {
+        self.noise.take()
     }
 
     fn update_resolution(&mut self, dib: &Dib) {
@@ -644,7 +738,7 @@ pub fn parse_palette(data: &[u8]) -> Result<[u32; 256], Error> {
         return Err(Error::BadVideoField("palette shorter than 256 entries"));
     }
     let mut lut = [0u32; 256];
-    for (i, c) in data[..1024].chunks_exact(4).enumerate() {
+    for (i, c) in data[..1024].as_chunks::<4>().0.iter().enumerate() {
         lut[i] = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
     }
     Ok(lut)
@@ -939,5 +1033,86 @@ mod tests {
             dec.decode(&payload),
             Err(Error::UnsupportedCompression(2))
         ));
+    }
+
+    /// A `Dib` carrying only the fields the noise meter reads.
+    fn noise_dib(idx_size: u16) -> Dib {
+        Dib {
+            tile_cx: 16,
+            tile_cy: 16,
+            source_cx: 640,
+            source_cy: 480,
+            idx_size,
+            ..Dib::default()
+        }
+    }
+
+    #[test]
+    fn noise_reports_nothing_before_a_second_has_passed() {
+        let mut m = NoiseMeter::new();
+        m.record(&noise_dib(100));
+        assert_eq!(m.take(), None);
+    }
+
+    #[test]
+    fn noise_is_the_change_percentage_per_second() {
+        // 640x480 in 16x16 tiles is 1200 tiles; 120 of them is 10%.
+        let mut m = NoiseMeter::new();
+        m.last_report -= Duration::from_secs(1);
+        for _ in 0..3 {
+            m.record(&noise_dib(120));
+        }
+        // Three frames at 10% inside one second reads as 30.
+        assert_eq!(m.take(), Some(Noise { level: 30, changes: 360 }));
+        // Reporting resets the accumulators.
+        m.last_report -= Duration::from_secs(1);
+        assert_eq!(m.take(), Some(Noise { level: 0, changes: 0 }));
+    }
+
+    #[test]
+    fn noise_is_clamped_to_a_hundred() {
+        let mut m = NoiseMeter::new();
+        m.last_report -= Duration::from_secs(1);
+        // Twelve full-screen frames in a second is 1200%, not 1200.
+        for _ in 0..12 {
+            m.record(&noise_dib(1200));
+        }
+        assert_eq!(m.take().unwrap().level, 100);
+    }
+
+    #[test]
+    fn a_barely_changing_screen_does_not_read_as_silent() {
+        let mut m = NoiseMeter::new();
+        m.last_report -= Duration::from_secs(1);
+        // One tile of 1200 rounds to 0%, but something did change.
+        m.record(&noise_dib(1));
+        assert_eq!(m.take(), Some(Noise { level: 1, changes: 1 }));
+    }
+
+    #[test]
+    fn a_long_gap_divides_by_its_whole_length() {
+        let mut m = NoiseMeter::new();
+        m.last_report -= Duration::from_secs(4);
+        // 10% once, four seconds ago: a quiet target, not a spike.
+        m.record(&noise_dib(120));
+        assert_eq!(m.take(), Some(Noise { level: 2, changes: 120 }));
+    }
+
+    #[test]
+    fn decoding_a_frame_feeds_the_meter() {
+        let payload = make_payload(
+            compress::UNCOMPRESSED,
+            format::PACK_16,
+            &[0u8; 128],
+            (8, 8),
+            (64, 32),
+            1,
+            &[0x01],
+        );
+        let (mut dec, _frame) = decoder();
+        dec.decode(&payload).unwrap();
+        assert_eq!(dec.noise.sum_changes, 1);
+        dec.noise.last_report -= Duration::from_secs(1);
+        assert_eq!(dec.take_noise().map(|n| n.changes), Some(1));
     }
 }
