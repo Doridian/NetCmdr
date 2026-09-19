@@ -32,6 +32,8 @@
 
 pub mod config;
 pub mod model;
+pub mod request;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod transport;
 pub mod xml;
 
@@ -43,15 +45,17 @@ pub use model::{
     parse_auth_reply, parse_config, parse_status, AuthReply, DeviceConfig, NetworkAdapter,
     PortStatus, Status, Target, User,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use transport::Endpoint;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 /// XML-escape a value for a double-quoted attribute.
 ///
 /// The stock client does no escaping — it concatenates strings — so a password
 /// containing `"` or `&` would break its request. We escape properly.
-fn attr(v: &str) -> String {
+pub(crate) fn attr(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     for c in v.chars() {
         match c {
@@ -96,6 +100,7 @@ pub enum Permission {
     Normal,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Permission {
     fn as_str(self) -> &'static str {
         match self {
@@ -156,6 +161,7 @@ pub enum Error {
     #[error("TLS: {0}")]
     Tls(String),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("OpenSSL: {0}")]
     OpenSsl(#[from] openssl::error::ErrorStack),
 
@@ -189,6 +195,7 @@ pub enum Error {
     Config(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<openssl::ssl::HandshakeError<std::net::TcpStream>> for Error {
     fn from(e: openssl::ssl::HandshakeError<std::net::TcpStream>) -> Self {
         Error::Tls(e.to_string())
@@ -198,6 +205,12 @@ impl From<openssl::ssl::HandshakeError<std::net::TcpStream>> for Error {
 /// A management client bound to one device.
 ///
 /// Construct with [`Client::connect`], which also authenticates.
+///
+/// This is the native client: it owns a blocking TLS transport. A browser
+/// cannot have one — see `b070-bridge` — so the web client drives the same
+/// protocol through [`crate::request`] and [`crate::model`] instead, with
+/// `fetch` in between.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Client {
     endpoint: Endpoint,
     session_id: String,
@@ -205,6 +218,7 @@ pub struct Client {
     auth: AuthReply,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Client {
     /// Connect and authenticate in one step.
     pub fn connect(host: &str, username: &str, password: &str) -> Result<Self, Error> {
@@ -228,12 +242,7 @@ impl Client {
         let mut endpoint = Endpoint::new(host, port);
         endpoint.timeout = timeout;
 
-        let body = format!(
-            "<CMA_Message name=\"CMA_AUTHORIZE\"><user name=\"{}\" password=\"{}\"/></CMA_Message>",
-            attr(username),
-            attr(password),
-        );
-        let xml = transport::post_message_pv(&endpoint, &body)?;
+        let xml = transport::post_message_pv(&endpoint, &request::authorize(username, password))?;
         let reply = parse_auth_reply(&xml)?;
 
         if !reply.is_ok() {
@@ -274,12 +283,7 @@ impl Client {
     /// slow at: the vendor's client allows a save 60 s and a fetch 45 s, and
     /// an upload takes as long as the flash write does.
     fn message(&self, verb: &str, inner: &str, timeout: Option<Duration>) -> Result<String, Error> {
-        let body = format!(
-            "<CMA_Message name=\"{}\" SESSIONID=\"{}\">{}</CMA_Message>",
-            verb,
-            attr(&self.session_id),
-            inner,
-        );
+        let body = request::envelope(verb, &self.session_id, inner);
         let mut endpoint = self.endpoint.clone();
         if let Some(t) = timeout {
             endpoint.timeout = t.max(self.endpoint.timeout);
@@ -584,11 +588,7 @@ impl Client {
 
     /// Log out, ending the session on the device.
     pub fn logout(self) -> Result<(), Error> {
-        let body = format!(
-            "<CMA_Message name=\"CMA_AUTHORIZE\" SESSIONID=\"{}\"></CMA_Message>",
-            attr(&self.session_id),
-        );
-        transport::post_message_pv(&self.endpoint, &body)?;
+        transport::post_message_pv(&self.endpoint, &request::logout(&self.session_id))?;
         Ok(())
     }
 }
@@ -598,6 +598,7 @@ impl Client {
 /// `]]>` would end the section early and let the rest of the payload be parsed
 /// as markup. Nothing the device produces contains it, so refusing is better
 /// than silently splitting the section.
+#[cfg(not(target_arch = "wasm32"))]
 fn cdata_safe(payload: &str) -> Result<&str, Error> {
     if payload.contains("]]>") {
         return Err(Error::Config(
@@ -607,6 +608,7 @@ fn cdata_safe(payload: &str) -> Result<&str, Error> {
     Ok(payload)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn join_u32(values: &[u32]) -> String {
     values
         .iter()

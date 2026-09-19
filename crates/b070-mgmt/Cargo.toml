@@ -9,9 +9,11 @@ repository.workspace = true
 
 [dependencies]
 b070-proto = { path = "../b070-proto" }
-openssl = "0.10"
 quick-xml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-[dev-dependencies]
+# The device's TLS is spoken natively; in a browser `b070-bridge` has already
+# terminated it, so only the request builders and parsers cross over.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+openssl = "0.10"
