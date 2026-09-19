@@ -519,7 +519,11 @@ impl App {
         if let Some(active) = servers.iter().find(|s| s.active) {
             // Two targets can share a resolution, in which case no `Resolution`
             // event marks the switch — this document is what confirms it.
-            if self.switching.as_ref().is_some_and(|s| s.port == active.port) {
+            if self
+                .switching
+                .as_ref()
+                .is_some_and(|s| s.port == active.port)
+            {
                 self.finish_switch();
             }
             let changed = active.port != self.menu.current_port;

@@ -27,7 +27,13 @@ struct Cli {
     user: String,
 
     /// Password (default `access`, the factory default). Prefer the env var.
-    #[arg(long, short = 'p', default_value = "access", env = "B070_PASSWORD", hide_env_values = true)]
+    #[arg(
+        long,
+        short = 'p',
+        default_value = "access",
+        env = "B070_PASSWORD",
+        hide_env_values = true
+    )]
     password: String,
 
     #[command(subcommand)]
@@ -121,7 +127,10 @@ fn main() -> Result<()> {
                     } else {
                         format!("  user={}", p.user)
                     };
-                    println!("  {:>2}  {:<12} {:<10} {}{}", p.number, p.name, p.status, siu, who);
+                    println!(
+                        "  {:>2}  {:<12} {:<10} {}{}",
+                        p.number, p.name, p.status, siu, who
+                    );
                 }
             }
         }
@@ -136,7 +145,10 @@ fn main() -> Result<()> {
                 c.idle_time_minutes.map(|m| format!("{m} min")).as_deref(),
             );
             if !c.session_ports.is_empty() {
-                kv("Session port", Some(join_ports(&c.session_ports)).as_deref());
+                kv(
+                    "Session port",
+                    Some(join_ports(&c.session_ports)).as_deref(),
+                );
             }
             kv(
                 "SSH",
@@ -151,7 +163,11 @@ fn main() -> Result<()> {
             kv("MAC", c.network.mac.as_deref());
             kv(
                 "Addressing",
-                Some(if c.network.use_static_ip { "static" } else { "DHCP" }),
+                Some(if c.network.use_static_ip {
+                    "static"
+                } else {
+                    "DHCP"
+                }),
             );
             kv("IPv4", c.network.ip.as_deref());
             kv("Subnet", c.network.subnet.as_deref());
@@ -168,8 +184,18 @@ fn main() -> Result<()> {
             for t in c.targets {
                 let siu = status
                     .as_ref()
-                    .and_then(|s| s.ports.iter().find(|p| p.number == t.port && p.kind == "kvm"))
-                    .map(|p| if p.has_siu() { p.rocc_type.as_str() } else { "empty" })
+                    .and_then(|s| {
+                        s.ports
+                            .iter()
+                            .find(|p| p.number == t.port && p.kind == "kvm")
+                    })
+                    .map(|p| {
+                        if p.has_siu() {
+                            p.rocc_type.as_str()
+                        } else {
+                            "empty"
+                        }
+                    })
                     .unwrap_or("");
                 println!("{:>2}  {:<14} {}", t.port, t.name, siu);
             }

@@ -181,6 +181,14 @@ research/        vendor firmware, extracted clients (2013 + live 2017),
                  decompiled sources, disassembly, live fixtures, findings
 ```
 
+## Development
+
+Standard cargo: `cargo build`, `cargo test --workspace`. Formatting is plain
+rustfmt defaults, pinned in `rustfmt.toml` so the style does not drift with the
+toolchain; `cargo fmt --all --check` and `cargo clippy --workspace
+--all-targets` are both clean and expected to stay that way. Nothing under
+`research/` is ours, so no formatter touches it.
+
 ## Likely applicable to
 
 B070-008-19-IP, B070-016-19-IP(2), B072-008-1-IP, B072-016-1-IP, B072-016-IP2,

@@ -130,7 +130,13 @@ pub struct Client {
 impl Client {
     /// Connect and authenticate in one step.
     pub fn connect(host: &str, username: &str, password: &str) -> Result<Self, Error> {
-        Client::connect_with(host, b070_proto::DEFAULT_HTTPS_PORT, username, password, Duration::from_secs(20))
+        Client::connect_with(
+            host,
+            b070_proto::DEFAULT_HTTPS_PORT,
+            username,
+            password,
+            Duration::from_secs(20),
+        )
     }
 
     /// Connect and authenticate with an explicit port and timeout.

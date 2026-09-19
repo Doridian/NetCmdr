@@ -29,8 +29,7 @@ fn attrs_of(e: &quick_xml::events::BytesStart<'_>) -> Result<Vec<(String, String
     for a in e.attributes().with_checks(false) {
         let a = a?;
         out.push((
-            String::from_utf8_lossy(local_name(a.key.as_ref()))
-                .to_ascii_lowercase(),
+            String::from_utf8_lossy(local_name(a.key.as_ref())).to_ascii_lowercase(),
             a.unescape_value()?.trim().to_string(),
         ));
     }
@@ -260,10 +259,9 @@ pub fn parse_config(xml: &str) -> Result<DeviceConfig, Error> {
     })?;
 
     on_each(xml, "target", |a| {
-        if let (Some(port), Some(name)) = (
-            get(a, "port").and_then(|v| v.parse().ok()),
-            get(a, "name"),
-        ) {
+        if let (Some(port), Some(name)) =
+            (get(a, "port").and_then(|v| v.parse().ok()), get(a, "name"))
+        {
             c.targets.push(Target {
                 port,
                 name: name.to_owned(),
@@ -329,8 +327,8 @@ pub fn parse_status(xml: &str) -> Result<Status, Error> {
     })?;
     on_first(xml, "version", |a| {
         // The firmware string has an embedded newline; collapse whitespace.
-        s.firmware_version = get(a, "firmware")
-            .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "));
+        s.firmware_version =
+            get(a, "firmware").map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "));
         s.hardware = get(a, "hardware").map(str::to_owned);
         Ok(())
     })?;
@@ -375,15 +373,11 @@ pub fn error_in(xml: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    const AUTH_OK: &str = include_str!(
-        "../../../research/notes/analysis/live-fixtures/auth_reply.xml"
-    );
-    const CONFIG: &str = include_str!(
-        "../../../research/notes/analysis/live-fixtures/config_full.xml"
-    );
-    const STATUS: &str = include_str!(
-        "../../../research/notes/analysis/live-fixtures/status.xml"
-    );
+    const AUTH_OK: &str =
+        include_str!("../../../research/notes/analysis/live-fixtures/auth_reply.xml");
+    const CONFIG: &str =
+        include_str!("../../../research/notes/analysis/live-fixtures/config_full.xml");
+    const STATUS: &str = include_str!("../../../research/notes/analysis/live-fixtures/status.xml");
 
     #[test]
     fn parses_live_auth_reply() {
@@ -430,7 +424,13 @@ mod tests {
         assert_eq!(c.users[0].target_ports.as_deref(), Some("1,2,3,4,5,6,7,8"));
 
         assert_eq!(c.targets.len(), 8);
-        assert_eq!(c.targets[0], Target { port: 1, name: "Server 01".into() });
+        assert_eq!(
+            c.targets[0],
+            Target {
+                port: 1,
+                name: "Server 01".into()
+            }
+        );
         assert_eq!(c.targets[7].port, 8);
     }
 
@@ -460,7 +460,8 @@ mod tests {
     #[test]
     fn error_in_ignores_no_error() {
         assert_eq!(error_in(AUTH_OK), None);
-        let bad = r#"<PV_Message><reply_error description="Invalid session" id="32001"/></PV_Message>"#;
+        let bad =
+            r#"<PV_Message><reply_error description="Invalid session" id="32001"/></PV_Message>"#;
         assert_eq!(error_in(bad).as_deref(), Some("Invalid session"));
     }
 }

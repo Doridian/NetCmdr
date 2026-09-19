@@ -111,7 +111,9 @@ impl Renderer {
     /// Match the GL surface to the window, if it has drifted.
     pub fn resize(&self) {
         let size = self.window.inner_size();
-        if size.width == 0 || size.height == 0 || self.surface_size.get() == (size.width, size.height)
+        if size.width == 0
+            || size.height == 0
+            || self.surface_size.get() == (size.width, size.height)
         {
             return;
         }
@@ -268,8 +270,12 @@ impl Screen {
         self.scratch.reserve((right - left) * (bottom - top));
         for y in top..bottom {
             let row = y * w;
-            self.scratch
-                .extend(frame.pixels[row + left..row + right].iter().copied().map(rgb));
+            self.scratch.extend(
+                frame.pixels[row + left..row + right]
+                    .iter()
+                    .copied()
+                    .map(rgb),
+            );
         }
         let image = egui::ColorImage::new(
             [right - left, bottom - top],
@@ -316,7 +322,10 @@ mod tests {
 
     #[test]
     fn colours_keep_their_channel_order() {
-        assert_eq!(rgb(0x00_FF_80_01), egui::Color32::from_rgb(0xFF, 0x80, 0x01));
+        assert_eq!(
+            rgb(0x00_FF_80_01),
+            egui::Color32::from_rgb(0xFF, 0x80, 0x01)
+        );
         assert_eq!(rgb(0), egui::Color32::BLACK);
     }
 }

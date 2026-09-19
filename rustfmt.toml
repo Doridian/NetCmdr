@@ -1,0 +1,6 @@
+# Default rustfmt style, pinned so the output does not drift with the toolchain.
+edition = "2021"
+style_edition = "2021"
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true

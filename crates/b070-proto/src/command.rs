@@ -246,10 +246,7 @@ pub fn power(cmd: PowerCommand) -> String {
 
 /// `<command name='mount_drive' .../>` — expose a local drive as virtual media.
 pub fn mount_drive(id: &str) -> String {
-    wrap(&format!(
-        "<command name='mount_drive' id='{}'/>",
-        attr(id)
-    ))
+    wrap(&format!("<command name='mount_drive' id='{}'/>", attr(id)))
 }
 
 /// `<command name='mount_iso_file' .../>`
@@ -313,7 +310,10 @@ pub fn gui_inactive() -> String {
 /// inner XML.
 pub fn config(inner: &str) -> String {
     let mut s = String::new();
-    let _ = write!(s, "<command name='config'><config>{inner}</config></command>");
+    let _ = write!(
+        s,
+        "<command name='config'><config>{inner}</config></command>"
+    );
     wrap(&s)
 }
 
@@ -332,10 +332,7 @@ pub fn set_video_setting(setting: VideoSetting, value: &str) -> String {
 
 /// Session exclusivity change, expressed as a `config` command.
 pub fn set_exclusivity(e: Exclusivity) -> String {
-    config(&format!(
-        "<session_exlusive  value='{}'/>",
-        e.as_str()
-    ))
+    config(&format!("<session_exlusive  value='{}'/>", e.as_str()))
 }
 
 #[cfg(test)]

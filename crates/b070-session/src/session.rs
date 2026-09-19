@@ -831,8 +831,22 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
     fn reads_the_capture_settings_the_device_sends() {
         let v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
         assert_eq!((v.width, v.height, v.refresh), (1360, 768, 60));
-        assert_eq!(v.hoffset, Knob { value: 368, min: 113, max: 431 });
-        assert_eq!(v.voffset, Knob { value: 24, min: 7, max: 26 });
+        assert_eq!(
+            v.hoffset,
+            Knob {
+                value: 368,
+                min: 113,
+                max: 431
+            }
+        );
+        assert_eq!(
+            v.voffset,
+            Knob {
+                value: 24,
+                min: 7,
+                max: 26
+            }
+        );
         assert_eq!(v.brightness.value, 49);
         assert_eq!(v.contrast.value, 50);
         assert_eq!(v.filter, VideoFilter::Low);
@@ -843,7 +857,14 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
     #[test]
     fn ranges_the_device_leaves_out_come_from_the_vendors_own_limits() {
         let v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
-        assert_eq!(v.phase, Knob { value: 4, min: 0, max: 31 });
+        assert_eq!(
+            v.phase,
+            Knob {
+                value: 4,
+                min: 0,
+                max: 31
+            }
+        );
         assert_eq!((v.brightness.min, v.brightness.max), (0, 100));
         assert_eq!((v.contrast.min, v.contrast.max), (0, 100));
     }
@@ -852,16 +873,26 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
     /// around wherever the device has it, rather than being locked.
     #[test]
     fn an_offset_without_a_range_still_gets_one() {
-        let v = parse_video_settings("<client_config><video_settings hoffset='200'/></client_config>")
-            .expect("a settings element");
-        assert_eq!(v.hoffset, Knob { value: 200, min: 136, max: 264 });
+        let v =
+            parse_video_settings("<client_config><video_settings hoffset='200'/></client_config>")
+                .expect("a settings element");
+        assert_eq!(
+            v.hoffset,
+            Knob {
+                value: 200,
+                min: 136,
+                max: 264
+            }
+        );
         assert!(!v.hoffset.is_fixed());
     }
 
     #[test]
     fn a_config_without_video_settings_yields_none() {
-        assert!(parse_video_settings("<client_config><connection userlevel='1'/></client_config>")
-            .is_none());
+        assert!(
+            parse_video_settings("<client_config><connection userlevel='1'/></client_config>")
+                .is_none()
+        );
     }
 
     /// Values outside the vendor's own slider range are clamped, not widened —
@@ -878,9 +909,27 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
 
     #[test]
     fn a_fixed_knob_is_recognised_as_having_nowhere_to_go() {
-        assert!(Knob { value: 5, min: 5, max: 5 }.is_fixed());
-        assert!(!Knob { value: 5, min: 4, max: 6 }.is_fixed());
-        assert_eq!(Knob { value: 5, min: 0, max: 10 }.clamp(99), 10);
+        assert!(Knob {
+            value: 5,
+            min: 5,
+            max: 5
+        }
+        .is_fixed());
+        assert!(!Knob {
+            value: 5,
+            min: 4,
+            max: 6
+        }
+        .is_fixed());
+        assert_eq!(
+            Knob {
+                value: 5,
+                min: 0,
+                max: 10
+            }
+            .clamp(99),
+            10
+        );
     }
 
     #[test]
@@ -905,7 +954,9 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
 
     #[test]
     fn a_config_without_servers_yields_none_rather_than_an_error() {
-        assert!(parse_servers("<client_config><connection userlevel='1'/></client_config>").is_empty());
+        assert!(
+            parse_servers("<client_config><connection userlevel='1'/></client_config>").is_empty()
+        );
         assert!(parse_servers("not xml at all").is_empty());
     }
 

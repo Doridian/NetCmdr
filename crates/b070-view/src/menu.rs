@@ -41,11 +41,7 @@ pub enum CursorMode {
 }
 
 impl CursorMode {
-    pub const ALL: [CursorMode; 3] = [
-        CursorMode::Arrow,
-        CursorMode::Crosshair,
-        CursorMode::Hidden,
-    ];
+    pub const ALL: [CursorMode; 3] = [CursorMode::Arrow, CursorMode::Crosshair, CursorMode::Hidden];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -108,7 +104,10 @@ pub enum Action {
     Power(PowerCommand),
 
     // Session
-    SwitchTarget { port: u32, name: String },
+    SwitchTarget {
+        port: u32,
+        name: String,
+    },
     RefreshTargets,
     SetExclusive(bool),
     Disconnect,
@@ -264,7 +263,10 @@ impl Menu {
 
     /// Drop the note once its time is up; true if the bar changed.
     pub fn expire_note(&mut self) -> bool {
-        let done = self.note.as_ref().is_some_and(|n| Instant::now() >= n.until);
+        let done = self
+            .note
+            .as_ref()
+            .is_some_and(|n| Instant::now() >= n.until);
         if done {
             self.note = None;
         }
@@ -326,10 +328,7 @@ impl Menu {
 
             ui.separator();
             if ui
-                .add(
-                    egui::Button::new("Release held keys")
-                        .shortcut_text("auto on focus loss"),
-                )
+                .add(egui::Button::new("Release held keys").shortcut_text("auto on focus loss"))
                 .on_hover_text(
                     "Send a key-up for every modifier, in case the target thinks \
                      one is still down.",
@@ -490,8 +489,7 @@ impl Menu {
                         } else {
                             format!("{verb} {target}.\n\n{warning}")
                         };
-                        pending =
-                            Some((format!("{verb}?"), detail, verb, Action::Power(command)));
+                        pending = Some((format!("{verb}?"), detail, verb, Action::Power(command)));
                         ui.close();
                     }
                 }
@@ -532,7 +530,10 @@ impl Menu {
                     }
                 }
                 ui.separator();
-                if ui.add_enabled(!self.busy, egui::Button::new("Reload list")).clicked() {
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Reload list"))
+                    .clicked()
+                {
                     out.push(Action::RefreshTargets);
                     ui.close();
                 }
@@ -627,11 +628,8 @@ impl Menu {
                 };
 
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{}×{} at {} Hz",
-                        v.width, v.height, v.refresh
-                    ))
-                    .weak(),
+                    egui::RichText::new(format!("{}×{} at {} Hz", v.width, v.height, v.refresh))
+                        .weak(),
                 );
                 ui.add_space(6.0);
 
@@ -987,8 +985,7 @@ fn noise_bar(ui: &mut egui::Ui, noise: Noise) -> egui::Response {
     const WIDTH: f32 = 42.0;
     const HEIGHT: f32 = 7.0;
 
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(WIDTH, HEIGHT), egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(WIDTH, HEIGHT), egui::Sense::hover());
     let painter = ui.painter();
     let rounding = egui::CornerRadius::same((HEIGHT / 2.0) as u8);
     painter.rect_filled(rect, rounding, ui.visuals().extreme_bg_color);
@@ -1073,9 +1070,15 @@ mod tests {
         let ctx = egui::Context::default();
         let mut m = menu();
         m.video = Some(settings());
-        m.noise = Some(Noise { level: 3, changes: 40 });
+        m.noise = Some(Noise {
+            level: 3,
+            changes: 40,
+        });
         m.show_video_adjust = true;
-        assert!(frame(&mut m, &ctx).is_empty(), "drawing alone asks for nothing");
+        assert!(
+            frame(&mut m, &ctx).is_empty(),
+            "drawing alone asks for nothing"
+        );
         assert!(m.show_video_adjust, "the window stayed open");
     }
 
@@ -1131,7 +1134,11 @@ mod tests {
         let ctx = egui::Context::default();
         let mut m = menu();
         let mut v = settings();
-        v.hoffset = Knob { value: 200, min: 200, max: 200 };
+        v.hoffset = Knob {
+            value: 200,
+            min: 200,
+            max: 200,
+        };
         m.video = Some(v);
         m.show_video_adjust = true;
         assert!(frame(&mut m, &ctx).is_empty());
@@ -1142,7 +1149,12 @@ mod tests {
     fn a_confirmation_yields_its_action_only_once_accepted() {
         let mut m = menu();
         assert!(!m.dialog_open());
-        m.confirm("Power off?", "detail", "Power off", Action::Power(PowerCommand::Down));
+        m.confirm(
+            "Power off?",
+            "detail",
+            "Power off",
+            Action::Power(PowerCommand::Down),
+        );
         assert!(m.dialog_open());
     }
 
@@ -1164,10 +1176,9 @@ mod tests {
             for changes in [0u32, 1, 2, 9999] {
                 let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| noise_meter(ui, Noise { level, changes }),
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            noise_meter(ui, Noise { level, changes })
+                        });
                     });
                 });
                 // Nothing here uploads textures, but the font atlas still
@@ -1192,7 +1203,10 @@ mod tests {
     fn the_meter_is_hidden_until_a_reading_arrives_and_while_switching() {
         let mut m = menu();
         assert!(m.noise.is_none());
-        m.noise = Some(Noise { level: 5, changes: 3 });
+        m.noise = Some(Noise {
+            level: 5,
+            changes: 3,
+        });
         assert!(m.noise.filter(|_| !m.switching).is_some());
         m.switching = true;
         assert!(m.noise.filter(|_| !m.switching).is_none());

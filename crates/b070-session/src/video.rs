@@ -1063,10 +1063,22 @@ mod tests {
             m.record(&noise_dib(120));
         }
         // Three frames at 10% inside one second reads as 30.
-        assert_eq!(m.take(), Some(Noise { level: 30, changes: 360 }));
+        assert_eq!(
+            m.take(),
+            Some(Noise {
+                level: 30,
+                changes: 360
+            })
+        );
         // Reporting resets the accumulators.
         m.last_report -= Duration::from_secs(1);
-        assert_eq!(m.take(), Some(Noise { level: 0, changes: 0 }));
+        assert_eq!(
+            m.take(),
+            Some(Noise {
+                level: 0,
+                changes: 0
+            })
+        );
     }
 
     #[test]
@@ -1086,7 +1098,13 @@ mod tests {
         m.last_report -= Duration::from_secs(1);
         // One tile of 1200 rounds to 0%, but something did change.
         m.record(&noise_dib(1));
-        assert_eq!(m.take(), Some(Noise { level: 1, changes: 1 }));
+        assert_eq!(
+            m.take(),
+            Some(Noise {
+                level: 1,
+                changes: 1
+            })
+        );
     }
 
     #[test]
@@ -1095,7 +1113,13 @@ mod tests {
         m.last_report -= Duration::from_secs(4);
         // 10% once, four seconds ago: a quiet target, not a spike.
         m.record(&noise_dib(120));
-        assert_eq!(m.take(), Some(Noise { level: 2, changes: 120 }));
+        assert_eq!(
+            m.take(),
+            Some(Noise {
+                level: 2,
+                changes: 120
+            })
+        );
     }
 
     #[test]
