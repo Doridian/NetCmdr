@@ -16,6 +16,5 @@ b070-mgmt = { path = "../b070-mgmt" }
 b070-proto = { path = "../b070-proto" }
 anyhow.workspace = true
 clap.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

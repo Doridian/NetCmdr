@@ -9,8 +9,9 @@ repository.workspace = true
 
 [dependencies]
 b070-proto = { path = "../b070-proto" }
+openssl = "0.10"
 quick-xml.workspace = true
-reqwest.workspace = true
-rustls.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]

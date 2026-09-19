@@ -63,3 +63,16 @@ the *dongle* link, not the network protocol.
 
 - `cfr` 0.152 (Java decompiler) — https://repo1.maven.org/maven2/org/benf/cfr/0.152/cfr-0.152.jar
 - `binutils` (`nm`, `readelf`, `c++filt`), `7z`, `poppler` (`pdftotext`)
+
+## Live device (2026-09-18)
+
+The current client and protocol were pulled directly from a B070-008-19-IP at
+`192.0.2.10` (firmware 2.1.1184), fetched over its TLS 1.0 HTTPS with
+`curl --tlsv1.0 --ciphers DEFAULT@SECLEVEL=0`:
+
+- `https://<device>/targets.jnlp` and the JARs it references (`app.jar`,
+  `plugin.jar`, `vendor.jar`, …) → `software/client-live/`
+- Live `POST /message.pv` request/response captures (sanitized: LAN addresses,
+  MAC, IPv6 and session tokens replaced with placeholders) →
+  `notes/analysis/live-fixtures/`
+- Device TLS certificate → `notes/analysis/device-cert-443.pem`

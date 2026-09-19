@@ -139,6 +139,55 @@ Full symbol and string dumps: `notes/analysis/libkvmipjproxy.symbols.txt`,
 
 ## 5. Protocols
 
+### 5.0 Hardware-verified update (2026-09-18) — READ THIS FIRST
+
+A live B070-008-19-IP (firmware **2.1.1184**, hardware family `108`, 8 ports)
+was analysed on 2026-09-18. Its own client and behaviour **supersede much of
+the reverse engineering below**, which was done against 2013 firmware and the
+native library `libkvmipjproxy.so`. Where they disagree, this section wins.
+
+Key corrections:
+
+1. **The current client is pure Java.** The 2017 firmware dropped the
+   `kvmipjproxy` native library and reimplemented the entire protocol in Java
+   (`com.minicom.plugin.*`). The client is served from the device at
+   `https://<ip>/targets.jnlp`; the JARs and 594 decompiled sources are under
+   `research/software/client-live/` and
+   `research/decompiled/app-live/`. `plugin.jar` now ships only virtual-media
+   helpers (`libvmproxy.so`, `usb_adapter.dll`), not the KVM proxy.
+
+2. **TLS is 1.0 only**, cipher `DHE-RSA-AES256-SHA`, self-signed SHA-1 cert
+   whose CN is the device serial (`D1214403`), regenerated every boot. rustls
+   cannot speak this; the Rust code uses OpenSSL with `SECLEVEL=0` and the
+   protocol pinned to TLS 1.0. The client itself verifies nothing
+   (`SocketUtils` installs a trust-all `X509TrustManager`).
+
+3. **Management is `POST /message.pv`, not `/config/`.** The old `/config/`
+   `client=*XML` endpoint (§5.2) is **404** on current firmware. See §5.2 for
+   the replacement, which is implemented and verified in `b070-mgmt`.
+
+4. **The session message is `KVMMsg`, authoritative in §5.4** — it replaces the
+   `ITCMsg`/`CommIO` framing that was guessed from the disassembly. The 32-byte
+   header's fields are now known exactly (they are *not* the "reserved" words
+   the RE assumed): server/client timestamps, `cmd_flag`, `command`, `id`,
+   `key_frame`. Full enums (`MagicNumber`, `CmdFlag`, `Cmd`, `SocketType`) are
+   transcribed in `crates/b070-proto/src/kvmmsg.rs`.
+
+5. **The session is four sockets, not one.** `SocketType` = cmd(0), kbmouse(1),
+   video(2), virtualmedia(3). Each opens with a **plaintext** handshake — write
+   `"<sessionId>#"`, then the 4-byte socket-type code, read it echoed back —
+   and only cmd and kbmouse then upgrade to TLS. **Video and virtual media run
+   unencrypted.** Virtual media is USB-over-IP carried in `KVMMsg` messages
+   (`Cmd.CLIENT_USB_MEDIA` / `TERMINATE_USB_MEDIA`), so the separate `CommIO`
+   framing is gone.
+
+6. **Video codec is LZW + YCbCr** (`com.minicom.plugin.LZW`,
+   `com.minicom.plugin.ycbcr`), pure Java — reversible without touching native
+   code. Not yet ported.
+
+Everything in §5.1, §5.3 and the parts of §5.4 describing `ITCMsg`/`CommIO`
+below is retained as the historical 2013 picture.
+
 ### 5.1 Session channel — TCP 900 (default)
 
 - TLS, OpenSSL, `AES256-SHA`. Configurable 800–65535; `config.xml` shows
@@ -185,44 +234,104 @@ vendor's `hight` typo — preserve it).
 
 ### 5.2 Management channel — HTTPS 443
 
-HTTPS only; plain HTTP is rejected. TLS 1.2 on current firmware.
+HTTPS only, **TLS 1.0**, `DHE-RSA-AES256-SHA`. Server is `Embedthis-Appweb/2.4.4`.
 
-The web UI talks to a single ISAPI endpoint:
+**Current firmware (verified live):** one endpoint, `POST /message.pv`, body is a
+`CMA_Message` XML document, response is a `PV_*` XML document (`Content-Type:
+text/plain`, `Content-Length`-framed). This is implemented in `b070-mgmt` and
+run against the device; captured request/response fixtures are in
+`research/notes/analysis/live-fixtures/`.
 
-```
-POST /config/
-Content-Type: application/x-www-form-urlencoded
-
-client=ConfigXML | AdminXML | SwitchXML | StatusXML | LogOFF | RPMDoReboot
-```
-
-Responses are XML documents wrapped as:
+Three verbs (`name=` on the `CMA_Message`):
 
 ```xml
-<CMA_Message id="k1" name="K1_CONFIG" number="2000">
-  <config_data config_id="..." value="update">
-    <proxyview ...>
-      <network_adapters>…</network_adapters>
-      <connection client_https_only="0" idle_time="10" ip_port="900 , 901 , 902" .../>
-      <targets><target name="Server1" port="1"/>…</targets>
-      <special_keys/>  <snmp .../>  <mouse .../>  <kvm_manager .../>
-    </proxyview>
-  </config_data>
-</CMA_Message>
+<!-- log in: returns SESSIONID used by every later request -->
+<CMA_Message name="CMA_AUTHORIZE"><user name="admin" password="access"/></CMA_Message>
+<!-- read: value = config | status | switch -->
+<CMA_Message name="CMA_REQUEST" SESSIONID="…"><request_data value="config" type="full"/></CMA_Message>
+<CMA_Message name="CMA_REQUEST" SESSIONID="…"><request_data value="status" type="full" changetime="0"/></CMA_Message>
+<!-- act -->
+<CMA_Message name="CMA_ACTION" SESSIONID="…"><action type="reboot"/></CMA_Message>
+<CMA_Message name="CMA_ACTION" SESSIONID="…"><action type="power" command="cycle|up|down" port="N"/></CMA_Message>
+<!-- log out: CMA_AUTHORIZE with a SESSIONID and no user element -->
 ```
 
-Reference copies of the live schemas are in
-`software/webui-3.0.5.583/config/`: `config.xml`, `admin.xml`, `status.xml`,
-`log.xml`, `SDF.xml`.
+The auth reply carries the session token and device facts:
 
-**[ASSUMED]** The write path is not visible in the recovered JS (forms use
-`.submit()` to server-side handlers). Needs confirmation on hardware.
+```xml
+<PV_reply status="ok" hardware="108" hasFastVM="true" hasGigaEthernet="true"
+          SESSIONID="…" SESSION_AAA_TYPE="3" port="900">
+  <reply_error description="no error" id="1000"/>
+</PV_reply>
+```
 
-### 5.4 Session framing — RECOVERED
+`SESSIONID` is the **same token** the session sockets' plaintext preamble needs
+(§5.4). `reply_error` id `1000` = success; `32004` = access denied; "Invalid
+session" means re-authenticate. Full request grammar and every `Fetch*`/`Save*`/
+`*Action` command are in
+`research/decompiled/app-live/com/minicom/app/config/controller/http/pv/`.
+The many attribute names are XStream-mangled on the wire (underscores doubled,
+etc.); `HttpUtils.replaceX*UnderlineTokens` lists every substitution.
 
-Recovered by disassembling `libkvmipjproxy.so`; raw listings in
-`notes/analysis/protocol-framing.disasm.txt`. **Not yet verified against
-hardware**, but the read path's own validation rules are explicit in the code.
+**Legacy firmware (2013, from the old web UI, now 404):** a single ISAPI
+endpoint `POST /config/` with `client=ConfigXML|AdminXML|SwitchXML|StatusXML|
+LogOFF|RPMDoReboot`, responses wrapped in `CMA_Message`/`config_data`. Reference
+schemas: `software/webui-3.0.5.583/config/`. Kept for sibling devices that may
+still run it, but not present on the current unit.
+
+### 5.4 Session framing
+
+#### 5.4.0 `KVMMsg` — AUTHORITATIVE (current firmware)
+
+Transcribed from the current client's own Java
+(`com.minicom.plugin.serialization.KVMMsgHeaderEncoder` / `KVMMSgHeaderDecoder`,
+`com.minicom.plugin.data.*`), implemented in `crates/b070-proto/src/kvmmsg.rs`.
+Every session channel (cmd, keyboard/mouse, video, virtual media) uses this one
+message.
+
+**Socket setup.** The client opens a TCP socket per `SocketType`
+(cmd=0, kbmouse=1, video=2, virtualmedia=3), and on each:
+
+1. writes `"<sessionId>#"` as ASCII (the `SESSIONID` from the HTTP login),
+2. writes the socket-type code as a 4-byte native-endian int,
+3. reads 4 bytes back and checks they equal the socket-type code,
+4. **only for cmd and kbmouse**, upgrades the socket to TLS
+   (`SocketType.uses_tls()`); video and virtual media continue in plaintext.
+
+Then messages flow, each a 32-byte header + `size`-byte payload:
+
+| Off | Size | Field | Notes |
+|----:|-----:|-------|-------|
+| 0  | u32 | magic | `ALX_TAG`=22222 (`0x56CE`), `ALX_HEARTBEAT`=77777, `ALX_BYE_MSG`=88888 |
+| 4  | u32 | size | payload length (heartbeat writes 0) |
+| 8  | u32 | server_timestamp | |
+| 12 | u32 | client_timestamp | |
+| 16 | u16 | version | 2 |
+| 18 | u16 | cmd_flag | `CmdFlag` 0–21 (KEYFRAME, PALETTE, RAW_DATA, BMP, GENERAL, …, XML=20, DISCONNECT=21) |
+| 20 | u32 | command | `Cmd` (VERIFY_USER=5, CONNECT=14, CONFIG_XML=71, CLIENT_USB_MEDIA=72, …) |
+| 24 | u32 | id | |
+| 28 | u8  | key_frame | 1 = video keyframe |
+| 29 | 3×u8 | padding | zero |
+
+Byte order is `ByteOrder.nativeOrder()`, i.e. **little-endian** on the x86
+client. The decoder skips resolving `command` when `cmd_flag == MOUSE_ACC` (that
+field then holds mouse data). The heartbeat variant reuses the timestamp fields
+and zeroes size/cmd_flag/command.
+
+Login on the cmd channel is `CmdFlag.RAW_DATA` + `Cmd.VERIFY_USER` with a
+semicolon-delimited payload ``MessageFormat " {0} ; {1} ; 0 ; 1 ; -1 ; {2}; {3}"``
+(user, password, switch_port, exclusive). Video is **LZW + YCbCr**
+(`com.minicom.plugin.LZW`, `com.minicom.plugin.ycbcr`). The full 90-value `Cmd`
+enum is in the decompiled `Cmd.java`; the actively-used subset is named in
+`kvmmsg.rs`.
+
+#### 5.4.1 `ITCMsg` / `CommIO` — LEGACY (2013 firmware, superseded)
+
+The rest of this section describes the framing reverse-engineered from
+`libkvmipjproxy.so` (2013). It is **superseded by `KVMMsg` above** on the
+current firmware and is retained for history and for sibling devices that may
+still run the old native client. Raw listings:
+`notes/analysis/protocol-framing.disasm.txt`.
 
 Two distinct framings exist. Both ride inside the TLS session.
 

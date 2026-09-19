@@ -1,86 +1,96 @@
-//! HTTPS management client for Tripp Lite NetCommander / Minicom Smart IP KVM switches.
+//! Management client for Tripp Lite NetCommander / Minicom Smart IP KVM switches.
 //!
-//! The device exposes a single ISAPI endpoint. Every request is a form POST to
-//! `/config/` whose body selects the document:
+//! Current-firmware protocol, verified against a live B070-008-19-IP
+//! (firmware 2.1.1184) on 2026-09-18. All management goes through a single
+//! endpoint over TLS 1.0:
 //!
 //! ```text
-//! POST /config/
-//! Content-Type: application/x-www-form-urlencoded
-//!
-//! client=ConfigXML
+//! POST https://<device>/message.pv
 //! ```
 //!
-//! Recovered from the firmware's own web UI (`common.js`,
-//! `RPMCONFIG.utils.XMLReq`) — see `research/notes/FINDINGS.md` §5.2.
+//! The body is a `CMA_Message` XML document. There are three verbs:
 //!
-//! Plain HTTP is rejected by the device; only HTTPS works. The shipped
-//! certificate is self-signed for `*.kvm.net`, so [`ClientBuilder::danger_accept_invalid_certs`]
-//! is on by default — see its documentation for what that costs you.
+//! | `name`          | purpose                          |
+//! |-----------------|----------------------------------|
+//! | `CMA_AUTHORIZE` | log in (get a `SESSIONID`) / log out |
+//! | `CMA_REQUEST`   | read config / status / switches  |
+//! | `CMA_ACTION`    | reboot, power control            |
+//!
+//! Authentication returns a `SESSIONID` that every subsequent request carries
+//! as an attribute. The client is synchronous — each call is one short
+//! request/response — see [`transport`] for why it uses OpenSSL directly rather
+//! than a normal HTTP client.
+//!
+//! The command bodies here are lifted verbatim from the decompiled device
+//! client (`com.minicom.app.config.controller.http.pv.*`), preserved under
+//! `research/decompiled/app-live/`.
 
 pub mod model;
+pub mod transport;
+
+pub use model::{
+    parse_auth_reply, parse_config, parse_status, AuthReply, DeviceConfig, NetworkAdapter,
+    PortStatus, Status, Target, User,
+};
+pub use transport::Endpoint;
 
 use std::time::Duration;
 
-pub use model::{
-    parse_config, parse_status, parse_switches, parse_users, Connection, DeviceConfig,
-    NetworkAdapter, Status, SwitchDef, Target, User,
-};
-
-/// The documents the `/config/` endpoint serves, keyed by the `client=` value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Resource {
-    /// Device configuration: network, connection, targets.
-    Config,
-    /// Local user accounts.
-    Admin,
-    /// Switch definition file.
-    Switch,
-    /// Runtime status: firmware version, last session.
-    Status,
-}
-
-impl Resource {
-    /// The `client=` value. Note `Status` carries the vendor's spaces —
-    /// the web UI sends `client = StatusXML`, and we reproduce it verbatim
-    /// rather than guess that the handler trims.
-    pub fn client_param(self) -> &'static str {
-        match self {
-            Resource::Config => "client=ConfigXML",
-            Resource::Admin => "client=AdminXML",
-            Resource::Switch => "client=SwitchXML",
-            Resource::Status => "client = StatusXML",
+/// XML-escape a value for a double-quoted attribute.
+///
+/// The stock client does no escaping — it concatenates strings — so a password
+/// containing `"` or `&` would break its request. We escape properly.
+fn attr(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
         }
     }
+    out
 }
 
-/// Actions the endpoint performs rather than documents it returns.
+/// Power actions for a target mapped to an IP-PDU outlet.
+///
+/// Strings match the device client's `PowerTargetHttpCmd` (`cycle`/`up`/`down`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    /// End the current session.
-    LogOff,
-    /// Reboot the device.
-    Reboot,
+pub enum PowerCommand {
+    Cycle,
+    Up,
+    Down,
 }
 
-impl Action {
-    pub fn client_param(self) -> &'static str {
+impl PowerCommand {
+    fn as_str(self) -> &'static str {
         match self {
-            Action::LogOff => "client=LogOFF",
-            Action::Reboot => "client=RPMDoReboot",
+            PowerCommand::Cycle => "cycle",
+            PowerCommand::Up => "up",
+            PowerCommand::Down => "down",
         }
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("HTTP transport: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("network I/O: {0}")]
+    Io(#[from] std::io::Error),
 
-    #[error("device returned HTTP {status} for {what}")]
-    Status {
-        status: reqwest::StatusCode,
-        what: &'static str,
-    },
+    #[error("TLS: {0}")]
+    Tls(String),
+
+    #[error("OpenSSL: {0}")]
+    OpenSsl(#[from] openssl::error::ErrorStack),
+
+    #[error("device returned HTTP {0}")]
+    HttpStatus(u16),
+
+    #[error("malformed HTTP response: {0}")]
+    MalformedHttp(&'static str),
 
     #[error("XML parse: {0}")]
     Xml(#[from] quick_xml::Error),
@@ -91,168 +101,164 @@ pub enum Error {
     #[error("XML encoding: {0}")]
     XmlEncoding(#[from] quick_xml::encoding::EncodingError),
 
-    #[error("invalid URL: {0}")]
-    Url(String),
+    #[error("login failed: {0}")]
+    LoginFailed(String),
+
+    #[error("not authenticated; call authenticate() first")]
+    NotAuthenticated,
+
+    #[error("device reported: {0}")]
+    Device(String),
 }
 
-/// Builder for [`Client`].
-pub struct ClientBuilder {
-    host: String,
-    port: u16,
-    accept_invalid_certs: bool,
-    timeout: Duration,
-    credentials: Option<(String, String)>,
-}
-
-impl ClientBuilder {
-    pub fn new(host: impl Into<String>) -> Self {
-        ClientBuilder {
-            host: host.into(),
-            port: b070_proto::DEFAULT_HTTPS_PORT,
-            // These devices ship a self-signed `*.kvm.net` certificate and have
-            // no way to be issued a trusted one for an IP address. Refusing it
-            // by default would make the client unusable out of the box; the
-            // session protocol itself is likewise unauthenticated. Set this to
-            // false once you have installed your own certificate on the device
-            // and are addressing it by the matching name.
-            accept_invalid_certs: true,
-            timeout: Duration::from_secs(15),
-            credentials: None,
-        }
-    }
-
-    pub fn port(mut self, port: u16) -> Self {
-        self.port = port;
-        self
-    }
-
-    /// Whether to accept the device's self-signed certificate. Defaults to
-    /// `true`; see [`ClientBuilder::new`].
-    pub fn danger_accept_invalid_certs(mut self, yes: bool) -> Self {
-        self.accept_invalid_certs = yes;
-        self
-    }
-
-    pub fn timeout(mut self, d: Duration) -> Self {
-        self.timeout = d;
-        self
-    }
-
-    /// HTTP Basic credentials.
-    ///
-    /// **[ASSUMED]** The web UI's own JavaScript posts no credentials, so the
-    /// device most likely authenticates with a session cookie set by a login
-    /// form we have not yet mapped. This hook exists so that once the real
-    /// scheme is confirmed on hardware there is a place to put it.
-    pub fn credentials(mut self, user: impl Into<String>, pass: impl Into<String>) -> Self {
-        self.credentials = Some((user.into(), pass.into()));
-        self
-    }
-
-    pub fn build(self) -> Result<Client, Error> {
-        let http = reqwest::Client::builder()
-            .danger_accept_invalid_certs(self.accept_invalid_certs)
-            .danger_accept_invalid_hostnames(self.accept_invalid_certs)
-            .timeout(self.timeout)
-            .build()?;
-        Ok(Client {
-            base: format!("https://{}:{}", self.host, self.port),
-            http,
-            credentials: self.credentials,
-        })
+impl From<openssl::ssl::HandshakeError<std::net::TcpStream>> for Error {
+    fn from(e: openssl::ssl::HandshakeError<std::net::TcpStream>) -> Self {
+        Error::Tls(e.to_string())
     }
 }
 
 /// A management client bound to one device.
+///
+/// Construct with [`Client::connect`], which also authenticates.
 pub struct Client {
-    base: String,
-    http: reqwest::Client,
-    credentials: Option<(String, String)>,
+    endpoint: Endpoint,
+    session_id: String,
+    /// Facts the device volunteered at login.
+    auth: AuthReply,
 }
 
 impl Client {
-    pub fn builder(host: impl Into<String>) -> ClientBuilder {
-        ClientBuilder::new(host)
+    /// Connect and authenticate in one step.
+    pub fn connect(host: &str, username: &str, password: &str) -> Result<Self, Error> {
+        Client::connect_with(host, b070_proto::DEFAULT_HTTPS_PORT, username, password, Duration::from_secs(20))
     }
 
-    /// The `https://host:port` this client talks to.
-    pub fn base_url(&self) -> &str {
-        &self.base
+    /// Connect and authenticate with an explicit port and timeout.
+    pub fn connect_with(
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+        timeout: Duration,
+    ) -> Result<Self, Error> {
+        let mut endpoint = Endpoint::new(host, port);
+        endpoint.timeout = timeout;
+
+        let body = format!(
+            "<CMA_Message name=\"CMA_AUTHORIZE\"><user name=\"{}\" password=\"{}\"/></CMA_Message>",
+            attr(username),
+            attr(password),
+        );
+        let xml = transport::post_message_pv(&endpoint, &body)?;
+        let reply = parse_auth_reply(&xml)?;
+
+        if !reply.is_ok() {
+            let msg = reply
+                .error
+                .as_ref()
+                .map(|(d, id)| format!("{d} (id {id})"))
+                .unwrap_or_else(|| "device rejected the login".to_string());
+            return Err(Error::LoginFailed(msg));
+        }
+        let session_id = reply
+            .session_id
+            .clone()
+            .ok_or_else(|| Error::LoginFailed("device returned no session id".into()))?;
+
+        Ok(Client {
+            endpoint,
+            session_id,
+            auth: reply,
+        })
     }
 
-    /// POST a raw `client=…` body to `/config/` and return the response body.
+    /// Facts the device reported at login (hardware family, capabilities, …).
+    pub fn auth_info(&self) -> &AuthReply {
+        &self.auth
+    }
+
+    /// The active session token. This is also what the KVM session socket's
+    /// preamble needs.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn request(&self, inner: &str) -> Result<String, Error> {
+        let body = format!(
+            "<CMA_Message name=\"CMA_REQUEST\" SESSIONID=\"{}\">{}</CMA_Message>",
+            attr(&self.session_id),
+            inner,
+        );
+        let xml = transport::post_message_pv(&self.endpoint, &body)?;
+        if let Some(err) = model::error_in(&xml) {
+            return Err(Error::Device(err));
+        }
+        Ok(xml)
+    }
+
+    fn action(&self, inner: &str) -> Result<String, Error> {
+        let body = format!(
+            "<CMA_Message name=\"CMA_ACTION\" SESSIONID=\"{}\">{}</CMA_Message>",
+            attr(&self.session_id),
+            inner,
+        );
+        let xml = transport::post_message_pv(&self.endpoint, &body)?;
+        if let Some(err) = model::error_in(&xml) {
+            return Err(Error::Device(err));
+        }
+        Ok(xml)
+    }
+
+    /// Fetch the full device configuration.
+    pub fn config(&self) -> Result<DeviceConfig, Error> {
+        let xml = self.request("<request_data value=\"config\" type=\"full\"/>")?;
+        parse_config(&xml)
+    }
+
+    /// Fetch runtime status (firmware, LAN, per-port state).
+    pub fn status(&self) -> Result<Status, Error> {
+        let xml =
+            self.request("<request_data value=\"status\" type=\"full\" changetime=\"0\"/>")?;
+        parse_status(&xml)
+    }
+
+    /// The configured KVM targets (ports and names).
+    pub fn targets(&self) -> Result<Vec<Target>, Error> {
+        Ok(self.config()?.targets)
+    }
+
+    /// Fetch a document as raw XML, for debugging or fields not yet modelled.
     ///
-    /// The trailing slash on `/config/` is mandatory — the web UI's own comment
-    /// says so.
-    pub async fn post_raw(&self, body: &'static str, what: &'static str) -> Result<String, Error> {
-        let url = format!("{}/config/", self.base);
-        tracing::debug!(%url, body, "POST /config/");
-
-        let mut req = self
-            .http
-            .post(&url)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .header(reqwest::header::CACHE_CONTROL, "no-cache,max-age=0")
-            .body(body);
-
-        if let Some((u, p)) = &self.credentials {
-            req = req.basic_auth(u, Some(p));
-        }
-
-        let resp = req.send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(Error::Status { status, what });
-        }
-        Ok(resp.text().await?)
+    /// `value` is the `request_data value=` selector, e.g. `"config"`,
+    /// `"status"`, `"switch"`.
+    pub fn fetch_raw(&self, value: &str) -> Result<String, Error> {
+        self.request(&format!("<request_data value=\"{}\"/>", attr(value)))
     }
 
-    /// Fetch one document as raw XML.
-    pub async fn fetch_raw(&self, r: Resource) -> Result<String, Error> {
-        let what = match r {
-            Resource::Config => "config",
-            Resource::Admin => "admin",
-            Resource::Switch => "switch",
-            Resource::Status => "status",
-        };
-        self.post_raw(r.client_param(), what).await
+    /// Power-control a target's IP-PDU outlet.
+    pub fn power(&self, port: u32, command: PowerCommand) -> Result<(), Error> {
+        self.action(&format!(
+            "<action type=\"power\" command=\"{}\" port=\"{}\"/>",
+            command.as_str(),
+            port,
+        ))?;
+        Ok(())
     }
 
-    /// Fetch and parse the device configuration.
-    pub async fn config(&self) -> Result<DeviceConfig, Error> {
-        parse_config(&self.fetch_raw(Resource::Config).await?)
+    /// Reboot the device. Drops every active session.
+    pub fn reboot(&self) -> Result<(), Error> {
+        self.action("<action type=\"reboot\"/>")?;
+        Ok(())
     }
 
-    /// Fetch and parse runtime status.
-    pub async fn status(&self) -> Result<Status, Error> {
-        parse_status(&self.fetch_raw(Resource::Status).await?)
-    }
-
-    /// Fetch and parse local user accounts.
-    pub async fn users(&self) -> Result<Vec<User>, Error> {
-        parse_users(&self.fetch_raw(Resource::Admin).await?)
-    }
-
-    /// Fetch and parse the switch definition file.
-    pub async fn switches(&self) -> Result<Vec<SwitchDef>, Error> {
-        parse_switches(&self.fetch_raw(Resource::Switch).await?)
-    }
-
-    /// The configured targets (KVM ports and their names).
-    pub async fn targets(&self) -> Result<Vec<Target>, Error> {
-        Ok(self.config().await?.targets)
-    }
-
-    /// Perform an action. Returns the device's raw response.
-    pub async fn perform(&self, a: Action) -> Result<String, Error> {
-        let what = match a {
-            Action::LogOff => "logoff",
-            Action::Reboot => "reboot",
-        };
-        self.post_raw(a.client_param(), what).await
+    /// Log out, ending the session on the device.
+    pub fn logout(self) -> Result<(), Error> {
+        let body = format!(
+            "<CMA_Message name=\"CMA_AUTHORIZE\" SESSIONID=\"{}\"></CMA_Message>",
+            attr(&self.session_id),
+        );
+        transport::post_message_pv(&self.endpoint, &body)?;
+        Ok(())
     }
 }
 
@@ -261,26 +267,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn client_params_match_the_web_ui_verbatim() {
-        // Straight out of common.js — including the spaces around '=' that the
-        // vendor's StatusXML call has and the others do not.
-        assert_eq!(Resource::Config.client_param(), "client=ConfigXML");
-        assert_eq!(Resource::Admin.client_param(), "client=AdminXML");
-        assert_eq!(Resource::Switch.client_param(), "client=SwitchXML");
-        assert_eq!(Resource::Status.client_param(), "client = StatusXML");
-        assert_eq!(Action::LogOff.client_param(), "client=LogOFF");
-        assert_eq!(Action::Reboot.client_param(), "client=RPMDoReboot");
+    fn escapes_credentials_in_auth_body() {
+        // Building the body must survive a password with XML metacharacters.
+        let body = format!(
+            "<CMA_Message name=\"CMA_AUTHORIZE\"><user name=\"{}\" password=\"{}\"/></CMA_Message>",
+            attr("ad\"min"),
+            attr("a&b<c"),
+        );
+        assert!(body.contains("name=\"ad&quot;min\""));
+        assert!(body.contains("password=\"a&amp;b&lt;c\""));
     }
 
     #[test]
-    fn builder_defaults_to_https_443() {
-        let c = Client::builder("10.0.0.5").build().unwrap();
-        assert_eq!(c.base_url(), "https://10.0.0.5:443");
-    }
-
-    #[test]
-    fn builder_honours_custom_port() {
-        let c = Client::builder("kvm.local").port(8443).build().unwrap();
-        assert_eq!(c.base_url(), "https://kvm.local:8443");
+    fn power_command_strings() {
+        assert_eq!(PowerCommand::Cycle.as_str(), "cycle");
+        assert_eq!(PowerCommand::Up.as_str(), "up");
+        assert_eq!(PowerCommand::Down.as_str(), "down");
     }
 }

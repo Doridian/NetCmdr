@@ -2,23 +2,22 @@
 
 Cross-platform client for the Tripp-Lite B070-008-19-IP KVM (and possibly others).
 
-The vendor ships a Windows-only client. This project aims to replace it.
+The vendor ships a Windows-only Java client. This project replaces it.
 
 ## Status
 
-**No hardware yet.** Everything here was derived from vendor firmware, the
-official Java/Windows client, and documentation. The management API is
-implemented and unit-tested against the device's own reference XML. The session
-protocol's framing is recovered but unverified against a real device.
+Verified against real hardware (a B070-008-19-IP on firmware **2.1.1184**).
 
-The device is a rebadged **Minicom Smart 116 IP** running **Windows CE on an
-Intel IXP425**. Its stock client is a Java Web Start app
-(`https://<ip>/targets.jnlp`) that is a thin Swing shim over a native JNI
-library — and that library already ships a **Linux i386 build**, which serves
-both as a reference implementation and as a possible short-term workaround.
+- **Management CLI works end to end.** `b070` reads config/status/targets/users
+  and can power-control and reboot, over the device's real `/message.pv` API.
+- **Session protocol is fully specified** (the current firmware's client is pure
+  Java, so the wire format is transcribed rather than guessed), but the video
+  client is not built yet.
 
-See [`research/notes/FINDINGS.md`](research/notes/FINDINGS.md) for the full
-analysis and [`research/SOURCES.md`](research/SOURCES.md) for provenance.
+The device is a rebadged **Minicom Smart 116 IP** running Windows CE on an Intel
+IXP425. See [`research/notes/FINDINGS.md`](research/notes/FINDINGS.md) §5.0 for
+the hardware-verified summary and [`research/SOURCES.md`](research/SOURCES.md)
+for provenance.
 
 ## What works today
 
@@ -28,62 +27,48 @@ cargo build --release
 
 ### `b070` — management CLI
 
-Talks to the device's HTTPS management API (`POST /config/`). Fully
-implemented; needs a device to point at.
-
 ```sh
-b070 --host 192.168.0.254 status
-b070 --host 192.168.0.254 config
-b070 --host 192.168.0.254 targets
-b070 --host 192.168.0.254 users
-b070 --host 192.168.0.254 switches
-b070 --host 192.168.0.254 fetch config      # raw XML
-b070 --host 192.168.0.254 reboot --confirm
+b070 --host 192.0.2.10 status     # firmware, LAN, per-port state (+ SIU detection)
+b070 --host 192.0.2.10 config     # device, network, session settings
+b070 --host 192.0.2.10 targets    # ports, names, which have an SIU attached
+b070 --host 192.0.2.10 users      # local accounts
+b070 --host 192.0.2.10 fetch config          # raw XML (config|status|switch|…)
+b070 --host 192.0.2.10 power cycle 3         # power-cycle target on port 3
+b070 --host 192.0.2.10 reboot --confirm
 ```
 
-Host, port, username and password can come from `B070_HOST`, `B070_PORT`,
-`B070_USER` and `B070_PASSWORD`.
-
-TLS verification is **off by default** — these devices ship a self-signed
-`*.kvm.net` certificate and cannot be issued a trusted one for a bare IP.
-Pass `--verify-tls` once you have installed your own.
+Credentials default to the factory `admin` / `access`; override with `--user` /
+`--password` or `B070_USER` / `B070_PASSWORD`. The device speaks **TLS 1.0** with
+a self-signed cert, so the client uses OpenSSL and does not verify it — treat the
+management network as trusted or tunnel it.
 
 ### `b070-capture` — session capture harness
 
-A TLS-intercepting proxy for the KVM session port. Point the stock Java client
-at it instead of the KVM; it records both plaintext directions and decodes
-`ITCMsg` frames live.
-
-```sh
-b070-capture --device 192.168.0.254 --listen 0.0.0.0:900 --out ./capture
-```
-
-This works because the vendor client does not verify certificates. Verified
-end-to-end against a synthetic device; not yet run against real hardware.
-
-**Captures contain credentials in cleartext.** Use only on a device you
-administer.
+A `KVMMsg` frame decoder and TLS proxy skeleton. **Needs rework** for the
+current firmware's session model (four sockets, a plaintext handshake, and TLS
+on only two of them — see the note at the top of the source). Kept for the
+decoder and as the basis for that rework.
 
 ## Protocols
 
 | Layer | Transport | Status |
 |---|---|---|
-| Management | HTTPS 443, `POST /config/`, XML | **Implemented** |
-| KVM session framing (`ITCMsg`) | TLS on TCP 900 | **Recovered**, unverified |
-| Virtual media framing (`CommIO`) | same TLS session, USB-over-IP + SCSI | **Recovered**, unverified |
-| Control commands | XML inside the session | **Recovered** (exact vendor strings) |
-| Tile video codec | inside session payloads | **Unknown** — YCbCr, 8 or 16 bpp |
-| Serial passthrough | SSH on TCP 4001/4002 | Documented, not implemented |
+| Management | `POST /message.pv`, TLS 1.0, `CMA_*`/`PV_*` XML | **Implemented, verified** |
+| Session framing (`KVMMsg`) | per-channel TCP 900, plaintext handshake ± TLS | **Specified** (`b070-proto`), not wired |
+| Control commands | `<commands>` facade → `KVMMsg` | **Recovered** |
+| Video codec | LZW + YCbCr, in session payloads | **Identified**, not ported |
+| Serial passthrough | SSH on 4001/4002 | Documented |
 
 ## Layout
 
 ```
 crates/
-  b070-proto/    ITCMsg + CommIO framing, XML command vocabulary
-  b070-mgmt/     HTTPS management client and XML models
+  b070-proto/    KVMMsg framing + enums (authoritative), command vocabulary
+  b070-mgmt/     /message.pv client and PV_* XML models (OpenSSL/TLS 1.0)
   b070-cli/      the `b070` binary
-  b070-capture/  the `b070-capture` binary
-research/        vendor firmware, extracted clients, disassembly, findings
+  b070-capture/  KVMMsg frame decoder + capture proxy skeleton
+research/        vendor firmware, extracted clients (2013 + live 2017),
+                 decompiled sources, disassembly, live fixtures, findings
 ```
 
 ## Likely applicable to
@@ -93,14 +78,7 @@ B072-032-IP2, and the Minicom Smart 108/116 IP originals.
 
 ## Next steps
 
-1. On arrival: pull the device's own client JARs from
-   `https://<ip>/targets.jnlp` and diff against
-   `research/software/client-3.0.5.583/` — the archived firmware is from 2013
-   and the unit is almost certainly newer.
-2. Confirm the management API's authentication scheme (the recovered web UI
-   posts no credentials, so there is a login step still unmapped).
-3. Run `b070-capture` against a real session and confirm the `ITCMsg` framing,
-   the three reserved header words, and what distinguishes message types 1/2/4.
-4. Reverse the tile codec, then build the viewer.
-5. Optionally: try running the stock Java client on Linux (needs a 32-bit JRE
-   plus 32-bit X11 libs) as an interim workaround and reference.
+1. Build the session client: open the four sockets with the plaintext handshake,
+   authenticate on the cmd channel (`VERIFY_USER`), decode the LZW+YCbCr video.
+2. Rework `b070-capture` for the real socket model to validate the above.
+3. A cross-platform viewer UI on top.

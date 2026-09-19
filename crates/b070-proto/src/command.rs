@@ -1,9 +1,10 @@
-//! The XML control vocabulary.
+//! The app-level `<commands>` control vocabulary.
 //!
-//! These are the exact documents the stock client hands to
-//! `KVMIPGate.setCommand()`. Every template here was lifted verbatim from the
-//! decompiled `com.minicom.app.video.controller.cmds.*` classes — see
-//! `research/decompiled/app/` and `research/notes/FINDINGS.md` §5.1.
+//! These are the documents the GUI hands to its plugin facade
+//! (`com.minicom.app.video.controller.cmds.*`, still present in the current
+//! firmware's client). The plugin re-encodes them as [`crate::kvmmsg`] messages
+//! on the wire — so these are the *facade* language, not the wire format. See
+//! `research/decompiled/app-live/` and `research/notes/FINDINGS.md` §5.1.
 //!
 //! Attribute spellings are the vendor's, typos included (`session_exlusive`),
 //! because the device parses them literally.

@@ -16,14 +16,16 @@ firmware/      Vendor firmware archives (2013-2014, HW v1) + extraction work
   work/          unpack.py (container parser), decoded device OS image,
                  out_client/ and out_config/ payloads
 software/
-  client-3.0.5.583/   Java Web Start client, recovered from firmware
+  client-3.0.5.583/       Java Web Start client, recovered from 2013 firmware
+  client-live/  CURRENT client, pulled live from the device (2017, pure Java)
   webui-3.0.5.583/    Device web UI (HTML/JS/XML) — documents the /config/ API
   native/             libkvmipjproxy.so (Linux i386) + kvmipjproxy.dll
   installers/         2017 Windows installers (install4j, payload not yet extracted; untracked)
-decompiled/    CFR output for app.jar and boot.jar (384 sources)
+decompiled/    CFR output: app/ + boot/ (2013), app-live/ (594 sources, current firmware)
 notes/
   FINDINGS.md        the writeup
-  analysis/          symbol + string dumps, vendor release notes
+  analysis/          symbol + string dumps, vendor release notes,
+                     device cert, and live-fixtures/ (captured /message.pv XML)
 ```
 
 ## Not tracked in git

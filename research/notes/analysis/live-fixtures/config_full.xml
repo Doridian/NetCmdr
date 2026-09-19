@@ -1,0 +1,77 @@
+<PV_Message name="PV_CONFIG">
+<config_data config_id="00/00/00 00:00:00 0">
+<proxyview name="D1214403
+" type="108" type_name="108" switch_ports="8" xmlversion="2">
+<connection idle_time="10" ip_port="900"/>
+<SSH enable="false" port1="4001" port2="4002"/>
+<security_policy pw_restrictions="false" forever="false" max_try="5" try_time="180" lock_time="1800" osd_password="false" aaa_order="3"/>
+<system_time day="18" hour="23" min="31" sec="37" month="9" year="2026"/>
+<kvm_manager enable="false" fixed_ip="true" ip=""/>
+<serial_devices>
+<serial_device name="Telnet 01" active="true" baud_rate="9600" data_bits="8" stop_bits="1" port="1" parity="N"/>
+<serial_device name="Telnet 02" active="true" baud_rate="9600" data_bits="8" stop_bits="1" port="2" parity="N"/>
+</serial_devices>
+<network_adapters>
+<network_adapter gateway="192.168.0.1" ip="192.168.0.10" mac="00:15:9D:00:00:00" subnet="255.255.255.0" use_static_ip="false" dns="192.168.0.1" staticdns="false" enableipv6="true" ipv6="fd00::10" subnetv6="64" gatewayv6="fe80::1" autoconfigv6="dhcp" staticdnsv6="fd00::1" dnsv6="fd00::1" name="adapter1"/>
+</network_adapters>
+<snmp enable_traps="false" mngr_ip="" community=""/>
+<users>
+<user name="admin" active="true" admin="true" userlevel="1" target_ports="1,2,3,4,5,6,7,8" vmtarget_ports="1,2,3,4,5,6,7,8" starget_ports="1,2"/>
+</users>
+<targets>
+<target name="Server 01" port="1"/>
+<target name="Server 02" port="2"/>
+<target name="Server 03" port="3"/>
+<target name="Server 04" port="4"/>
+<target name="Server 05" port="5"/>
+<target name="Server 06" port="6"/>
+<target name="Server 07" port="7"/>
+<target name="Server 08" port="8"/>
+</targets>
+<power>
+<pdu_types>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUM*NET series 16 outlets Switched PDU" outlets="16" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUM*NET series 24 outlets Switched PDU" outlets="24" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUM*NET series 8 outlets Switched PDU" outlets="8" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH15ATNET 8 outlets Switched PDU" outlets="8" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH15HVNET 8 outlets Switched PDU" outlets="8" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH15NET 16 outlets Switched PDU" outlets="16" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH20ATNET 16 outlets Switched PDU" outlets="16" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH20HVNET 8 outlets Switched PDU" outlets="8" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH20HVATNET 8 outlets Switched PDU" outlets="8" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH20NET 16 outlets Switched PDU" outlets="16" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH30ATNET 25 outlets Switched PDU" outlets="25" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH30HV19NET 14 outlets Switched PDU" outlets="14" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH30HVATNET 19 outlets Switched PDU" outlets="19" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH30HVNET 16 outlets Switched PDU" outlets="16" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH30NET 16 outlets Switched PDU" outlets="16" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMH32HVNET 16 outlets Switched PDU" outlets="16" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMV15NET 16 outlets Switched PDU" outlets="16" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMV20HVNET 24 outlets Switched PDU" outlets="24" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMV20HVNET2 8 outlets Switched PDU" outlets="8" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMV20NET 24 outlets Switched PDU" outlets="24" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMV30NET 24 outlets Switched PDU" outlets="24" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMV30HVNET 24 outlets Switched PDU" outlets="24" mode="snmp"/>
+<entry manufacturer="Tripp Lite" model="Tripp Lite PDUMV32HVNET 24 outlets Switched PDU" outlets="24" mode="snmp"/>
+<entry manufacturer="Eaton" model="Eaton Powerware ePDU 16 port SNMP" outlets="16" mode="snmp"/>
+<entry manufacturer="_APC" model="_APC Switched 8 port PDU SNMP" outlets="8" mode="snmp"/>
+<entry manufacturer="_APC" model="_APC Switched 16 port PDU SNMP" outlets="16" mode="snmp"/>
+<entry manufacturer="_APC" model="_APC Switched 24 port PDU SNMP" outlets="24" mode="snmp"/>
+<entry manufacturer="CyberSwitching" model="CyberSwitching PDU 8 port SNMP" outlets="8" mode="snmp"/>
+<entry manufacturer="CyberSwitching" model="CyberSwitching PDU 16 port SNMP" outlets="16" mode="snmp"/>
+<entry manufacturer="CyberSwitching" model="CyberSwitching PDU 24 port SNMP" outlets="24" mode="snmp"/>
+<entry manufacturer="ServerTech" model="Sentry Switched CDU 24 ports SNMP" outlets="24" mode="snmp"/>
+<entry manufacturer="ServerTech" model="Sentry Switched CDU Cascaded 48 ports SNMP" outlets="48" mode="snmp"/>
+<entry manufacturer="Geist" model="Geist 8 RCM-O v3 SNMP" outlets="8" mode="snmp"/>
+<entry manufacturer="Geist" model="Geist 16 RCM-O v3 SNMP" outlets="16" mode="snmp"/>
+<entry manufacturer="Geist" model="Geist 20 RCM-O v3 SNMP" outlets="20" mode="snmp"/>
+<entry manufacturer="Geist" model="Geist 24 RCM-O v3 SNMP" outlets="24" mode="snmp"/>
+<entry manufacturer="TAB" model="TAB 8 RCM-O v3 SNMP" outlets="8" mode="snmp"/>
+<entry manufacturer="TAB" model="TAB 16 RCM-O v3 SNMP" outlets="16" mode="snmp"/>
+<entry manufacturer="TAB" model="TAB 20 RCM-O v3 SNMP" outlets="20" mode="snmp"/>
+<entry manufacturer="TAB" model="TAB 24 RCM-O v3 SNMP" outlets="24" mode="snmp"/>
+</pdu_types>
+</power>
+</proxyview>
+</config_data>
+</PV_Message>

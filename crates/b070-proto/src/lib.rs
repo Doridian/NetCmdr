@@ -1,28 +1,28 @@
 //! Wire protocol types for Tripp Lite NetCommander / Minicom Smart IP KVM switches.
 //!
-//! Everything in this crate was derived by reverse engineering the vendor's
-//! Java client and its native library `libkvmipjproxy.so`. **None of it has
-//! been validated against real hardware yet.** Items the disassembly does not
-//! prove are marked `[ASSUMED]` in the doc comments; see
-//! `research/notes/FINDINGS.md` for the full derivation and
-//! `research/notes/analysis/protocol-framing.disasm.txt` for the raw listings.
+//! The [`kvmmsg`] module is **authoritative**: it is transcribed from the
+//! current firmware's own pure-Java client, pulled live from a device
+//! (firmware 2.1.1184) on 2026-09-18. See `research/notes/FINDINGS.md` §5.4 and
+//! the decompiled sources under `research/decompiled/app-live/`.
 //!
-//! Two framings ride inside the TLS session on TCP 900:
+//! The session runs four TCP connections (command, keyboard/mouse, video,
+//! virtual media — see [`kvmmsg::SocketType`]); each opens with a short
+//! plaintext handshake, two of them then upgrade to TLS, and all of them frame
+//! their traffic with the same [`kvmmsg::Header`].
 //!
-//! - [`itcmsg`] — the KVM session message (video, input, control).
-//! - [`commio`] — virtual media, which is USB-over-IP with a SCSI handler.
-//!
-//! [`command`] builds the XML control documents that the session carries.
+//! [`command`] builds the app-level `<commands>` control documents. On the
+//! current firmware these are the *facade* language the GUI hands to its plugin,
+//! which re-encodes them as [`kvmmsg`] messages on the wire; they are not
+//! themselves the wire format.
 
 pub mod command;
-pub mod commio;
-pub mod itcmsg;
+pub mod kvmmsg;
 
-/// Default TCP port for the KVM session channel.
+/// Default TCP port for the KVM session channels.
 ///
-/// Configurable on the device between 800 and 65535. The firmware's
-/// `config.xml` lists `ip_port="900 , 901 , 902"`; the web UI's JavaScript
-/// defaults to 902. Which of the three does what is not yet established.
+/// Configurable on the device. The live device reports `ip_port="900"` and its
+/// login reply advertises `port="900"`. Only 900 was found listening; 901/902
+/// (seen in older firmware config) were closed.
 pub const DEFAULT_SESSION_PORT: u16 = 900;
 
 /// Default HTTPS port for the management API.
@@ -39,19 +39,4 @@ pub const DEFAULT_SERIAL_SSH_PORTS: [u16; 2] = [4001, 4002];
 pub enum Error {
     #[error("need {need} bytes, have {got}")]
     Truncated { need: usize, got: usize },
-
-    #[error("bad ITCMsg magic {0:#010x}, expected 0x000056ce")]
-    BadMagic(u32),
-
-    #[error("unsupported ITCMsg version {0}, expected 2")]
-    BadVersion(u16),
-
-    #[error("unknown ITCMsg type {0}, expected 1..=4")]
-    BadMsgType(u16),
-
-    #[error("ITCMsg payload length is zero")]
-    EmptyPayload,
-
-    #[error("payload of {0} bytes exceeds the 16-bit CommIO length field")]
-    PayloadTooLarge(usize),
 }

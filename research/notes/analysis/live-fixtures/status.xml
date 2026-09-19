@@ -1,0 +1,29 @@
+<PV_Message name="PV_STATUS" number="2001" id="pv1-01">
+<PV_status name="D1214403
+" changetime="-240944">
+<code config_id="00/00/00 00:00:00 0" description="Operational, no faults" severity="OK" value="2001" password="normal" lan="on" lanone="on" lantwo="off" powerone="on" powertwo="off"/>
+<version firmware="Version 2.1.1184.1.0
+.0 Build()" kme="Not available" hardware="108" sdf="10.000000"/>
+<pxversions>
+<pxversion port="0" firmware="" MAC=""/>
+</pxversions>
+<ConfigReply current_configuration_id="00/00/00 00:00:00 0" errorDesc="no error" errorID="1000" status="ok"/>
+<request_list>
+<request name="log" log_pending="true" oldest_pending="18/09/2026 23:31:37" severity="alarm"/>
+</request_list>
+<status_list>
+<port number="1" user="" name="Server 01" type="kvm" vmactive="false" power="false" status="Available" ROCCType="VMROCC" MAC=""/>
+<port number="2" user="" name="Server 02" type="kvm" vmactive="false" power="false" status="Available" ROCCType="VMROCC" MAC=""/>
+<port number="3" user="" name="Server 03" type="kvm" vmactive="false" power="false" status="Off" ROCCType="none" MAC=""/>
+<port number="4" user="" name="Server 04" type="kvm" vmactive="false" power="false" status="Off" ROCCType="none" MAC=""/>
+<port number="5" user="" name="Server 05" type="kvm" vmactive="false" power="false" status="Off" ROCCType="none" MAC=""/>
+<port number="6" user="" name="Server 06" type="kvm" vmactive="false" power="false" status="Off" ROCCType="none" MAC=""/>
+<port number="7" user="" name="Server 07" type="kvm" vmactive="false" power="false" status="Off" ROCCType="none" MAC=""/>
+<port number="8" user="" name="Server 08" type="kvm" vmactive="false" power="false" status="Off" ROCCType="none" MAC=""/>
+</status_list>
+<telnet_status>
+<port number="1" user="" name="Telnet 01" type="telnet" vmactive="false" power="false" status="Off" ROCCType="NotScanned" MAC=""/>
+<port number="2" user="" name="Telnet 02" type="telnet" vmactive="false" power="false" status="Off" ROCCType="NotScanned" MAC=""/>
+</telnet_status>
+</PV_status>
+</PV_Message>

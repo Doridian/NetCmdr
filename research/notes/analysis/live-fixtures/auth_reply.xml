@@ -1,0 +1,5 @@
+<PV_Message name="PV_REPLY" number="2002" id="pv1-02">
+<PV_reply config_id="00/00/00 00:00:00 0" need_boot="false" status="ok" hardware="108" hasRemoteUsers="false" hasPSRedundancy="false" hasGigaEthernet="true" hasFastVM="true" SESSIONID="SESSION_TOKEN_REDACTED=" SESSION_AAA_TYPE="3" port="900">
+<reply_error description="no error" id="1000"/>
+</PV_reply>
+</PV_Message>

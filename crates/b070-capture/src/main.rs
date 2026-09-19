@@ -3,11 +3,21 @@
 //! Point the stock Java client at this instead of the KVM. It terminates the
 //! client's TLS with a generated certificate, opens its own TLS session to the
 //! real device, and writes every byte of both directions to disk while
-//! attempting to decode `ITCMsg` frames live.
+//! attempting to decode `KVMMsg` frames live.
 //!
-//! This works because the vendor client does not verify certificates: it ships
-//! a self-signed `*.kvm.net` cert and `ITCSecurityLayer::CreateCertificates()`
-//! generates its own on the fly.
+//! This works because the vendor client does not verify certificates
+//! (`com.minicom.plugin.socket.SocketUtils` installs a trust-all
+//! `X509TrustManager`).
+//!
+//! **Known limitation — needs rework for current firmware.** Live analysis of a
+//! device (firmware 2.1.1184) showed the session is not TLS-on-connect. Each of
+//! the four channels (`SocketType` cmd/kbmouse/video/virtualmedia) opens with a
+//! *plaintext* handshake — the client writes `"<sessionId>#"` then a 4-byte
+//! socket-type code and reads it back — and only the cmd and keyboard/mouse
+//! channels then upgrade to TLS; video and virtual media stay in the clear. So
+//! this proxy, which TLS-terminates immediately, matches none of them as-is. It
+//! is kept for the framing decoder and as the skeleton for that rework; see
+//! `research/decompiled/app-live/com/minicom/plugin/socket/KVMSocket.java`.
 //!
 //! ```text
 //! b070-capture --device 10.0.0.5 --listen 0.0.0.0:900 --out ./capture
@@ -26,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use b070_proto::itcmsg;
+use b070_proto::kvmmsg;
 use clap::Parser;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
@@ -251,7 +261,7 @@ async fn pump<R, W>(
     let _ = to.shutdown().await;
 }
 
-/// Decode as many whole `ITCMsg` frames as `buf` holds; return bytes consumed.
+/// Decode as many whole `KVMMsg` frames as `buf` holds; return bytes consumed.
 async fn decode_frames(
     buf: &[u8],
     label: &str,
@@ -262,36 +272,27 @@ async fn decode_frames(
     let mut lines = String::new();
 
     while pos < buf.len() {
-        match itcmsg::Message::parse(&buf[pos..]) {
+        match kvmmsg::Message::parse(&buf[pos..]) {
             Ok((msg, used)) => {
                 let h = msg.header;
                 lines.push_str(&format!(
-                    "{label} @{:#010x}  type={:?} len={} a={:#010x} b={:#010x} \
-                     r08={:#010x} r0c={:#010x} r1c={:#010x}  {}\n",
+                    "{label} @{:#010x}  magic={:?} flag={:?} cmd={:?} len={} id={} \
+                     kf={} sts={:#010x} cts={:#010x}  {}\n",
                     base_offset + pos as u64,
-                    h.msg_type,
-                    h.payload_len,
-                    h.param_a,
-                    h.param_b,
-                    h.reserved_08,
-                    h.reserved_0c,
-                    h.reserved_1c,
+                    h.magic,
+                    h.cmd_flag,
+                    h.command,
+                    h.size,
+                    h.id,
+                    h.key_frame,
+                    h.server_timestamp,
+                    h.client_timestamp,
                     hex_preview(&msg.payload, 48),
                 ));
                 pos += used;
             }
             // Not enough bytes yet — wait for more.
             Err(b070_proto::Error::Truncated { .. }) => break,
-            // Header did not validate. Either this direction is not ITCMsg
-            // framed, or we are out of sync; record it once and stop.
-            Err(e) => {
-                lines.push_str(&format!(
-                    "{label} @{:#010x}  UNDECODED: {e}  {}\n",
-                    base_offset + pos as u64,
-                    hex_preview(&buf[pos..], 32),
-                ));
-                break;
-            }
         }
     }
 
