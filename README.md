@@ -122,9 +122,19 @@ b070 reboot --confirm
 b070 fetch config               # raw XML (config|status|switch|…)
 ```
 
-The firmware-upgrade commands (`b070 upgrade`, `b070 siu upgrade`,
-`b070 siu versions`) are built from the vendor client's own request format but
-have **not been run against hardware**; everything else above has.
+Everything destructive takes `--confirm`, including `factory-reset`, which also
+takes `--keep-network` so the device comes back reachable.
+
+The two firmware commands (`b070 upgrade`, `b070 siu upgrade`) are the
+exception: they take **`--please-brick-my-device`** instead, and `--confirm`
+deliberately does not work on them. They are built from the vendor client's own
+request format and have **never been run against hardware** — nothing has
+confirmed the device accepts what they send, and a firmware write that is wrong
+or interrupted leaves hardware that cannot be recovered over the network. Do not
+use them without a way to reflash out of band. `b070 siu versions` is untested
+too, but only reads.
+
+Everything else above has been run against a live device.
 
 ### `b070-view` — KVM viewer
 

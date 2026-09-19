@@ -215,7 +215,7 @@ enum Command {
 
     /// Install a TLS certificate for the management server.
     Certificate(admin::CertificateArgs),
-    /// Upload device firmware and start the upgrade.
+    /// Upload device firmware and start the upgrade. UNTESTED — see its help.
     Upgrade(admin::UpgradeArgs),
     /// Progress of a device firmware upgrade.
     UpgradeStatus,
@@ -346,7 +346,7 @@ enum SiuCmd {
         #[arg(default_value = "all")]
         ports: String,
     },
-    /// Upload SIU firmware and start the upgrade.
+    /// Upload SIU firmware and start the upgrade. UNTESTED — see its help.
     Upgrade(admin::SiuUpgradeArgs),
     /// Progress of a SIU firmware upgrade.
     UpgradeStatus,

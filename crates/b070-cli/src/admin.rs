@@ -17,6 +17,23 @@ use clap::Args;
 
 use b070_mgmt::{Client, ConfigDoc};
 
+/// What both firmware commands refuse with.
+///
+/// These two are the only commands in the tool that have never been run against
+/// hardware — the request format is transcribed from the vendor client and
+/// nothing has confirmed the device accepts it. A firmware write that goes
+/// wrong is not recoverable over the network, so the gate is named for the
+/// outcome rather than for the ceremony, and `--confirm` deliberately does not
+/// work here: reaching for the flag that works everywhere else should not be
+/// enough to start one.
+const BRICK_WARNING: &str = "\
+this writes firmware, and it has never been run against hardware. The request \
+format is transcribed from the vendor's client and nothing has confirmed the \
+device accepts it, so it may well be wrong — and a firmware write that goes \
+wrong, or is interrupted, leaves hardware that does not come back and cannot \
+be recovered over the network. If you can reflash it out of band and you want \
+to find out, pass --please-brick-my-device.";
+
 /// Read a file as text, with the path in the error.
 fn read(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
@@ -251,17 +268,18 @@ pub struct UpgradeArgs {
     /// The firmware file from the vendor.
     pub file: PathBuf,
 
-    /// Required: an interrupted firmware write can leave the device unusable.
+    /// Required, and named for what it may do.
+    ///
+    /// This path has never been run against hardware: it is built from the
+    /// vendor client's request format alone. If the format is wrong, or power
+    /// or the network goes part-way through, the device does not come back.
     #[arg(long)]
-    pub confirm: bool,
+    pub please_brick_my_device: bool,
 }
 
 pub fn upgrade(client: &Client, a: &UpgradeArgs) -> Result<()> {
-    if !a.confirm {
-        bail!(
-            "refusing to upgrade without --confirm; losing power or the network part-way \
-             through can leave the device unbootable"
-        );
+    if !a.please_brick_my_device {
+        bail!("{}", BRICK_WARNING);
     }
     let image = read(&a.file)?;
     client
@@ -289,14 +307,18 @@ pub struct SiuUpgradeArgs {
     #[arg(long, value_name = "PORTS", default_value = "all")]
     pub ports: String,
 
-    /// Required: a SIU interrupted mid-write stops answering.
+    /// Required, and named for what it may do.
+    ///
+    /// This path has never been run against hardware: it is built from the
+    /// vendor client's request format alone. A SIU interrupted mid-write stops
+    /// answering, and it is not recoverable over the Cat5 link.
     #[arg(long)]
-    pub confirm: bool,
+    pub please_brick_my_device: bool,
 }
 
 pub fn siu_upgrade(client: &Client, a: &SiuUpgradeArgs, port_count: u32) -> Result<()> {
-    if !a.confirm {
-        bail!("refusing to upgrade without --confirm; an interrupted write can brick a SIU");
+    if !a.please_brick_my_device {
+        bail!("{}", BRICK_WARNING);
     }
     let ports = crate::args::parse_ports(&a.ports, port_count)?;
     if ports.is_empty() {
