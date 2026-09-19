@@ -1,15 +1,20 @@
-//! TLS 1.0 HTTP transport for the device's `/message.pv` endpoint.
+//! HTTPS transport for the device's `/message.pv` endpoint.
 //!
-//! The device (an Embedthis Appweb 2.4.x server on Windows CE) speaks **only
-//! TLS 1.0** with `DHE-RSA-AES256-SHA` and presents a self-signed, SHA-1-signed
-//! certificate regenerated on every boot. Modern TLS stacks refuse all of that:
-//! rustls has no TLS 1.0 at all, and a default OpenSSL build rejects the
-//! handshake at security level 2. So this module drives OpenSSL directly with
-//! the security level dropped to 0 and the protocol pinned to TLS 1.0 — the
-//! exact settings `curl --tlsv1.0 --ciphers DEFAULT@SECLEVEL=0` needs against
-//! this device.
+//! The device (an Embedthis Appweb 2.4.x server on Windows CE) speaks TLS 1.2
+//! and presents a self-signed, SHA-256-signed RSA-2048 certificate. Two things
+//! still keep it off a modern TLS stack:
 //!
-//! Verified against a live B070-008-19-IP (firmware 2.1.1184) on 2026-09-18.
+//! - It offers **no ECDHE suites at all** — only DHE and static RSA — and no
+//!   TLS 1.3, so rustls cannot complete a handshake with it in any
+//!   configuration. That is why this is OpenSSL rather than rustls.
+//! - Its DHE group is 1024-bit, which OpenSSL's default security level 2
+//!   rejects. Level 1 accepts it and keeps forward secrecy; the alternative,
+//!   excluding DHE to fall back to static RSA, would not.
+//!
+//! So: security level 1, and TLS 1.2 as the floor.
+//!
+//! Verified against a live B070-008-19-IP (firmware 2.2.1258.1.0) on
+//! 2026-09-19.
 //!
 //! HTTP is hand-rolled: the requests are a single POST with a small XML body,
 //! and the server honours `Connection: close`, so we read to EOF and split on
@@ -49,15 +54,12 @@ impl Endpoint {
 /// nothing to keep open between requests.
 pub fn post_message_pv(ep: &Endpoint, body: &str) -> Result<String, Error> {
     let mut builder = SslConnector::builder(SslMethod::tls_client())?;
-    // The device only offers TLS 1.0.
-    builder.set_min_proto_version(Some(SslVersion::TLS1))?;
-    builder.set_max_proto_version(Some(SslVersion::TLS1))?;
-    // SECLEVEL=0 re-enables the SHA-1 cert signature and the DHE-RSA-AES256-SHA
-    // cipher that a level-2 default would reject.
-    builder.set_cipher_list("DEFAULT@SECLEVEL=0")?;
-    // The certificate is self-signed and its CN is the device serial, so there
-    // is nothing to verify against and no name to match. The management channel
-    // is unauthenticated by design; treat the network as trusted or tunnel it.
+    builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
+    // SECLEVEL=1 accepts the device's 1024-bit DHE group; level 2 would not.
+    builder.set_cipher_list("DEFAULT@SECLEVEL=1")?;
+    // The certificate is self-signed, so there is nothing to verify it against.
+    // The management channel is unauthenticated by design; treat the network as
+    // trusted or tunnel it.
     builder.set_verify(SslVerifyMode::NONE);
     let connector = builder.build();
 

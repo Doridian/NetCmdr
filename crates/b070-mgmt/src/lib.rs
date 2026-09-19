@@ -1,8 +1,8 @@
 //! Management client for Tripp Lite NetCommander / Minicom Smart IP KVM switches.
 //!
 //! Current-firmware protocol, verified against a live B070-008-19-IP
-//! (firmware 2.1.1184) on 2026-09-18. All management goes through a single
-//! endpoint over TLS 1.0:
+//! (firmware 2.2.1258.1.0) on 2026-09-19. All management goes through a
+//! single endpoint over TLS:
 //!
 //! ```text
 //! POST https://<device>/message.pv

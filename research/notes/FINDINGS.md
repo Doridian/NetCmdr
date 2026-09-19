@@ -139,12 +139,23 @@ Full symbol and string dumps: `notes/analysis/libkvmipjproxy.symbols.txt`,
 
 ## 5. Protocols
 
-### 5.0 Hardware-verified update (2026-09-18) — READ THIS FIRST
+### 5.0 Hardware-verified update (2026-09-19) — READ THIS FIRST
 
-A live B070-008-19-IP (firmware **2.1.1184**, hardware family `108`, 8 ports)
-was analysed on 2026-09-18. Its own client and behaviour **supersede much of
+A live B070-008-19-IP (firmware **2.2.1258.1.0**, hardware family `108`, 8
+ports) was analysed on 2026-09-18 and re-verified on 2026-09-19 after a
+firmware update from 2.1.1184. Its own client and behaviour **supersede much of
 the reverse engineering below**, which was done against 2013 firmware and the
 native library `libkvmipjproxy.so`. Where they disagree, this section wins.
+
+The 2.1.1184 → 2.2.1258.1.0 update changed **only the TLS parameters** (point 2)
+and the client's version string (`J-9193` → `10106`). Decompiling the new
+`app.jar` and diffing it against the old one gives 40 differing files, all of
+which are recompilation artifacts (string-concatenation folding, generic casts)
+except the version constants and a gutted DES licence check
+(`CheckLicense.isValid()` now returns `true` unconditionally). `KVMSocket`,
+`SocketUtils`, `HttpCmd` and `SSLContextHandler` are unchanged, so **the wire
+protocol and the session model are identical**. The bundled XStream went 1.4.3 →
+1.4.10 and `targets.jnlp` gained `--add-opens` flags for JDK 9+.
 
 Key corrections:
 
@@ -156,11 +167,23 @@ Key corrections:
    `research/decompiled/app-live/`. `plugin.jar` now ships only virtual-media
    helpers (`libvmproxy.so`, `usb_adapter.dll`), not the KVM proxy.
 
-2. **TLS is 1.0 only**, cipher `DHE-RSA-AES256-SHA`, self-signed SHA-1 cert
-   whose CN is the device serial (`D1214403`), regenerated every boot. rustls
-   cannot speak this; the Rust code uses OpenSSL with `SECLEVEL=0` and the
-   protocol pinned to TLS 1.0. The client itself verifies nothing
-   (`SocketUtils` installs a trust-all `X509TrustManager`).
+2. **TLS on 2.2.1258.1.0 is 1.2** (1.0 and 1.1 are still accepted; there is no
+   1.3). Port 443 prefers `DHE-RSA-AES256-GCM-SHA384`; the session sockets on
+   port 900 negotiate `AES256-GCM-SHA384` (static RSA). The certificate is now
+   self-signed **SHA-256** RSA-2048 with `CN=kvm-rack` — the device hostname,
+   where 2.1.1184 used the serial (`D1214403`) and SHA-1. It carries a critical
+   SAN with the device's IPv4 and IPv6 addresses.
+
+   **rustls still cannot talk to this device**: it offers no ECDHE suite at all
+   (only DHE and static RSA) and no TLS 1.3, and rustls implements neither DHE
+   nor static RSA key exchange. So the Rust code stays on OpenSSL. The only
+   remaining concession is `SECLEVEL=1`, because the DHE group is 1024-bit and
+   OpenSSL's default level 2 requires 2048; level 1 keeps forward secrecy, where
+   excluding DHE to fall back on static RSA would not. Verification stays off —
+   the cert is self-signed, and the client itself verifies nothing either
+   (`SocketUtils` installs a trust-all `X509TrustManager`, and
+   `SSLContextHandler` a `DefaultTrustManager`; neither pins a version, so the
+   vendor client simply follows whatever the JRE negotiates).
 
 3. **Management is `POST /message.pv`, not `/config/`.** The old `/config/`
    `client=*XML` endpoint (§5.2) is **404** on current firmware. See §5.2 for
@@ -181,9 +204,11 @@ Key corrections:
    (`Cmd.CLIENT_USB_MEDIA` / `TERMINATE_USB_MEDIA`), so the separate `CommIO`
    framing is gone.
 
-6. **Video codec is LZW + YCbCr** (`com.minicom.plugin.LZW`,
-   `com.minicom.plugin.ycbcr`), pure Java — reversible without touching native
-   code. Not yet ported.
+6. **Video codec is LZW + a tile bitfield**, with RGB555, palette or YCbCr
+   pixels (`com.minicom.plugin.{LZW,ycbcr,video_impl}`), pure Java — reversible
+   without touching native code. **Now ported and verified against the device**;
+   see §5.4.1, which also covers keyboard and mouse. The live unit sends RGB555
+   over LZW.
 
 Everything in §5.1, §5.3 and the parts of §5.4 describing `ITCMsg`/`CommIO`
 below is retained as the historical 2013 picture.
@@ -197,8 +222,8 @@ below is retained as the historical 2013 picture.
 - Framing is **recovered** — see 5.4. Remaining unknowns there are three
   reserved header words and the tile codec inside the payload. Confirm by
   capture: the client does not pin certificates (it ships a `*.kvm.net`
-  self-signed cert), so a MITM proxy is straightforward — `b070-capture`
-  implements one.
+  self-signed cert), so a MITM proxy is straightforward. Note that such a proxy
+  must speak OpenSSL, not rustls — see §5.0 point 2.
 
 Control commands are XML strings handed to `setCommand()`; the native layer
 translates them onto the wire. Complete vocabulary recovered from the client:
@@ -234,7 +259,8 @@ vendor's `hight` typo — preserve it).
 
 ### 5.2 Management channel — HTTPS 443
 
-HTTPS only, **TLS 1.0**, `DHE-RSA-AES256-SHA`. Server is `Embedthis-Appweb/2.4.4`.
+HTTPS only, **TLS 1.2** (`DHE-RSA-AES256-GCM-SHA384`) on firmware 2.2.1258.1.0;
+2.1.1184 was TLS 1.0 / `DHE-RSA-AES256-SHA`. Server is `Embedthis-Appweb/2.4.4`.
 
 **Current firmware (verified live):** one endpoint, `POST /message.pv`, body is a
 `CMA_Message` XML document, response is a `PV_*` XML document (`Content-Type:
@@ -325,10 +351,92 @@ semicolon-delimited payload ``MessageFormat " {0} ; {1} ; 0 ; 1 ; -1 ; {2}; {3}"
 enum is in the decompiled `Cmd.java`; the actively-used subset is named in
 `kvmmsg.rs`.
 
-#### 5.4.1 `ITCMsg` / `CommIO` — LEGACY (2013 firmware, superseded)
+#### 5.4.1 Video, keyboard and mouse — IMPLEMENTED AND HARDWARE-VERIFIED (2026-09-18)
+
+Ported to `crates/b070-session/` and run against the live device: the viewer
+`b070-view` shows a target's screen and passes keyboard and mouse through.
+Transcribed from `com.minicom.plugin.{video_impl,LZW.decoder,ycbcr}`.
+
+**Video is tile-based.** A `CmdFlag::BMP` message on the video channel carries a
+bitfield with one bit per screen tile plus the pixels of only the changed tiles,
+stacked vertically into an image `tile_cx` wide. Message layout, read straight
+from the channel (the header's `size` does cover it, but the vendor's reader
+never checks):
+
+```
+i16 byte-order marker, little-endian:  0x4759 "YG" -> body is big-endian
+                                       0x5947 "GY" -> body is little-endian
+                                       anything else IS the compress method
+i16 compress method (AlxCompress)      [only when a marker was present]
+i32 compressed size
+i16 pixel format (AlxBmpFormat)
+i32 biHeaderSize                       4 -> an i32 frame count follows,
+                                       otherwise that many BITMAPINFOHEADER bytes
+u8[compressed size] pixel payload
+i16 tile_cx, tile_cy, source_cx, source_cy, idx_size, idx_size_comp
+u8[idx_size_comp] compressed tile bitfield
+```
+
+**Decoding has four stages**, in this order:
+
+1. *restore* — decompress the bitfield, then the pixels. Both the zlib and LZW
+   modes are **streaming across messages**; only an `_INIT`/`_START` method
+   restarts them. The zlib modes run the bitfield and the pixels through **one
+   shared inflate stream**, so inflating them out of order desynchronises it.
+   The bitfield is either raw, RLE (`0x00-0x7F` = that many + 1 literals,
+   `0x80-0xFF` = repeat the next byte `(b & 0x7F) + 2` times) or zlib.
+2. *post-uncompress* — palette lookup (`ALX_PACK_8`), RGB555 expansion
+   (`ALX_PACK_16`) or YCbCr conversion.
+3. *unpack* — blit each changed tile to its place, `tile_index / (width /
+   tile_cx)` giving its row.
+
+**Pixel order.** The framebuffer holds `0x00RRGGBB` per pixel. The vendor stores
+bytes B, G, R, x and reads them back with a little-endian `getInt` into a
+`TYPE_INT_RGB` image; its YCbCr converter also crosses R and B over and the
+caller crosses them back, so the two swaps cancel.
+
+**The LZW is unusual**: symbols are whole 32-bit pixels, not bytes, and the code
+width grows in place from 16 through 20 bits and then to a 32-bit escape mode,
+driven by in-band control words. The four hand-written per-width switch tables in
+`BufData` are all one LSB-first bit reader over the 32-bit input words. Input
+words are read big-endian and output written little-endian, so LZW frames arrive
+byte-swapped and the YCbCr stage skips its own swap for them.
+
+**What the live device actually sends** (firmware 2.2.1258.1.0, two targets, 1360x768
+and 1024x768): `ALX_PACK_16` (RGB555) with `ALX_LZW_STREAM_TCB_COMP_START` for
+the key frame then `..._CONT` for deltas, 8x8 tiles, typically 6-60 changed tiles
+per message at 100-1100 bytes. The YCbCr and palette paths are transcribed and
+unit-tested but **no hardware has produced one yet**; they presumably need a
+different colour-depth setting.
+
+**Keyboard and mouse** (`com.minicom.plugin.km_impl`) are 16-byte payloads of
+four little-endian 32-bit words on the kbmouse channel, as `CmdFlag::RAW_DATA`:
+
+| Class | Word 0 | Word 1 | Word 2 | Word 3 |
+|---|---|---|---|---|
+| Mouse (256) | 256 | type (`MouseMsgType`) | x, or wheel count | y |
+| Keyboard (257) | 257 | 769 up / 771 down | `scancode << 16`, `+ 0x01000000` if extended | modifier bits |
+| Settings (258) | 258 | e.g. 773 = Ctrl+Alt+Del | param 1 | param 2 |
+
+Mouse moves — and only moves — also set the header command to `MOUSE_MOVE` (76).
+Coordinates are **absolute in remote screen pixels**; button events send (0, 0)
+and rely on the last move. Modifier bits are scroll lock 1, num lock 2, caps lock
+4, shift 8, ctrl 16, alt 32. Scancodes are PC set 1; the vendor's table sends
+Pause as 0x45 unextended and Num Lock as 0x45 **extended**.
+
+Confirmed on hardware: typed characters echo on the target's console, and the
+session survives its 30-second heartbeat.
+
+**Video adjustment.** The device digitises analog VGA, so the captured image sits
+a few pixels off horizontally until adjusted. `CmdFlag::GENERAL` + `Cmd` 64
+(`VIDEO_AUTO`) starts the device's own auto-adjust, 65 stops it, and progress
+comes back as `RAW_DATA` + `Cmd` 19 with an `RPMAutoAdjStruct` (two i16s then a
+64-byte status string).
+
+#### 5.4.2 `ITCMsg` / `CommIO` — LEGACY (2013 firmware, superseded)
 
 The rest of this section describes the framing reverse-engineered from
-`libkvmipjproxy.so` (2013). It is **superseded by `KVMMsg` above** on the
+`libkvmipjproxy.so` (2013). It is **superseded by `KVMMsg` in §5.4.0** on the
 current firmware and is retained for history and for sibling devices that may
 still run the old native client. Raw listings:
 `notes/analysis/protocol-framing.disasm.txt`.

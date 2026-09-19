@@ -1,9 +1,10 @@
 //! Parsed representations of the device's `PV_*` management XML.
 //!
 //! The schema here is from **live captures** of a B070-008-19-IP on firmware
-//! 2.1.1184, saved under `research/notes/analysis/live-fixtures/`. This is the
-//! current (2017-era) firmware's protocol; the earlier `/config/` `CMA_Message`
-//! schema this crate first targeted is gone from shipping firmware.
+//! 2.1.1184, saved under `research/notes/analysis/live-fixtures/`, and re-checked
+//! against firmware 2.2.1258.1.0, which parses identically. The earlier
+//! `/config/` `CMA_Message` schema this crate first targeted is gone from
+//! shipping firmware.
 //!
 //! Parsing is deliberately lenient: unknown elements and attributes are ignored
 //! so that other hardware variants and firmware revisions still parse. Note the

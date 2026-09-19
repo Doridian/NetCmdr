@@ -1,6 +1,6 @@
 //! `b070` — command-line management for Tripp Lite NetCommander IP KVM switches.
 //!
-//! Talks to the device's `/message.pv` management API over TLS 1.0. It does not
+//! Talks to the device's `/message.pv` management API over HTTPS. It does not
 //! open a KVM video session; that is a separate protocol (see `b070-proto`).
 
 use anyhow::{Context, Result};

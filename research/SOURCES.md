@@ -64,9 +64,23 @@ the *dongle* link, not the network protocol.
 - `cfr` 0.152 (Java decompiler) — https://repo1.maven.org/maven2/org/benf/cfr/0.152/cfr-0.152.jar
 - `binutils` (`nm`, `readelf`, `c++filt`), `7z`, `poppler` (`pdftotext`)
 
-## Live device (2026-09-18)
+## Live device (2026-09-19, firmware 2.2.1258.1.0)
 
-The current client and protocol were pulled directly from a live B070-008-19-IP
+`research/software/client-live/`, `research/decompiled/app-live/` and
+`research/notes/analysis/device-cert-443.pem` hold the **2.2.1258.1.0** pull,
+made on 2026-09-19 with `curl -k --ciphers DEFAULT@SECLEVEL=1` (this firmware
+speaks TLS 1.2; only its 1024-bit DHE group needs the lowered security level).
+The equivalent 2.1.1184 files are in git history at commit `098fabf`.
+
+This firmware's `targets.jnlp` carries a `codebase` attribute holding the
+device's own address, which 2.1.1184's did not; it is sanitized to the example
+IP `192.0.2.10` here, as the `/message.pv` fixtures are. The device certificate
+is left byte-exact — its SAN contains the real address, and rewriting it would
+break the signature.
+
+## Live device (2026-09-18, firmware 2.1.1184)
+
+The current client and protocol were first pulled from a live B070-008-19-IP
 (firmware 2.1.1184) over its TLS 1.0 HTTPS with
 `curl --tlsv1.0 --ciphers DEFAULT@SECLEVEL=0`:
 

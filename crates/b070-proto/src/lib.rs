@@ -2,7 +2,8 @@
 //!
 //! The [`kvmmsg`] module is **authoritative**: it is transcribed from the
 //! current firmware's own pure-Java client, pulled live from a device
-//! (firmware 2.1.1184) on 2026-09-18. See `research/notes/FINDINGS.md` §5.4 and
+//! (firmware 2.2.1258.1.0) on 2026-09-19. See `research/notes/FINDINGS.md` §5.4
+//! and
 //! the decompiled sources under `research/decompiled/app-live/`.
 //!
 //! The session runs four TCP connections (command, keyboard/mouse, video,

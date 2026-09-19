@@ -1,0 +1,16 @@
+[package]
+name = "b070-session"
+description = "KVM session client (video, keyboard, mouse) for Tripp Lite NetCommander / Minicom Smart IP KVM switches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+b070-proto = { path = "../b070-proto" }
+openssl = "0.10"
+flate2 = "1"
+quick-xml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

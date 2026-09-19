@@ -1,7 +1,7 @@
 //! `KVMMsg` — the unified KVM session message.
 //!
 //! **Authoritative.** The layout, enums and encoding here are transcribed from
-//! the current firmware's own pure-Java client (firmware 2.1.1184, pulled live
+//! the current firmware's own pure-Java client (firmware 2.2.1258.1.0, pulled live
 //! from a B070-008-19-IP on 2026-09-18), namely
 //! `com.minicom.plugin.serialization.KVMMsgHeaderEncoder` / `KVMMSgHeaderDecoder`
 //! and `com.minicom.plugin.data.{KVMMsgHeader,MagicNumber,CmdFlag,Cmd,SocketType}`.
@@ -191,7 +191,10 @@ pub enum Cmd {
     Disconnect,
     Initialize,
     ChangeServer,
+    GoLocal,
     RefreshScreen,
+    VideoAuto,
+    VideoStopAdjust,
     ConfigXml,
     MsgCmdXml,
     ClientUsbMedia,
@@ -200,6 +203,7 @@ pub enum Cmd {
     OpenTtySession,
     CloseTtySession,
     TtyData,
+    MouseMove,
     Other(i32),
 }
 
@@ -212,7 +216,10 @@ impl Cmd {
             Cmd::Disconnect => 15,
             Cmd::Initialize => 16,
             Cmd::ChangeServer => 19,
+            Cmd::GoLocal => 40,
             Cmd::RefreshScreen => 53,
+            Cmd::VideoAuto => 64,
+            Cmd::VideoStopAdjust => 65,
             Cmd::ConfigXml => 71,
             Cmd::MsgCmdXml => 77,
             Cmd::ClientUsbMedia => 72,
@@ -221,6 +228,7 @@ impl Cmd {
             Cmd::OpenTtySession => 56,
             Cmd::CloseTtySession => 57,
             Cmd::TtyData => 58,
+            Cmd::MouseMove => 76,
             Cmd::Other(c) => c,
         }
     }
@@ -233,7 +241,10 @@ impl Cmd {
             15 => Cmd::Disconnect,
             16 => Cmd::Initialize,
             19 => Cmd::ChangeServer,
+            40 => Cmd::GoLocal,
             53 => Cmd::RefreshScreen,
+            64 => Cmd::VideoAuto,
+            65 => Cmd::VideoStopAdjust,
             71 => Cmd::ConfigXml,
             77 => Cmd::MsgCmdXml,
             72 => Cmd::ClientUsbMedia,
@@ -242,6 +253,7 @@ impl Cmd {
             56 => Cmd::OpenTtySession,
             57 => Cmd::CloseTtySession,
             58 => Cmd::TtyData,
+            76 => Cmd::MouseMove,
             other => Cmd::Other(other),
         }
     }
@@ -430,7 +442,11 @@ mod tests {
         assert_eq!(&b[8..12], &0xAABBCCDDu32.to_le_bytes(), "server ts @8");
         assert_eq!(&b[16..18], &[2, 0], "version @16");
         assert_eq!(&b[18..20], &20u16.to_le_bytes(), "cmd_flag XML=20 @18");
-        assert_eq!(&b[20..24], &71i32.to_le_bytes(), "command CONFIG_XML=71 @20");
+        assert_eq!(
+            &b[20..24],
+            &71i32.to_le_bytes(),
+            "command CONFIG_XML=71 @20"
+        );
         assert_eq!(&b[24..28], &0x11223344u32.to_le_bytes(), "id @24");
         assert_eq!(b[28], 1, "key_frame @28");
         assert_eq!(&b[29..32], &[0, 0, 0], "padding @29");
@@ -477,7 +493,11 @@ mod tests {
 
     #[test]
     fn message_stream_decode() {
-        let m = Message::new(CmdFlag::RawData, Cmd::VerifyUser, b" admin ; pw ; 0".to_vec());
+        let m = Message::new(
+            CmdFlag::RawData,
+            Cmd::VerifyUser,
+            b" admin ; pw ; 0".to_vec(),
+        );
         let bytes = m.to_bytes();
         let (back, n) = Message::parse(&bytes).unwrap();
         assert_eq!(back, m);
