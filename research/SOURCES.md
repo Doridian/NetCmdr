@@ -66,8 +66,8 @@ the *dongle* link, not the network protocol.
 
 ## Live device (2026-09-18)
 
-The current client and protocol were pulled directly from a B070-008-19-IP at
-`192.0.2.10` (firmware 2.1.1184), fetched over its TLS 1.0 HTTPS with
+The current client and protocol were pulled directly from a live B070-008-19-IP
+(firmware 2.1.1184) over its TLS 1.0 HTTPS with
 `curl --tlsv1.0 --ciphers DEFAULT@SECLEVEL=0`:
 
 - `https://<device>/targets.jnlp` and the JARs it references (`app.jar`,
