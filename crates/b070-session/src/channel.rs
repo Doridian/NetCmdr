@@ -1,104 +1,40 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! One session socket: the plaintext handshake, the optional TLS upgrade, and
-//! `KVMMsg` framing on top.
+//! `KVMMsg` framing over one session channel, whatever is carrying it.
 //!
-//! Transcribed from `com.minicom.plugin.socket.{KVMSocket,SocketUtils}`.
+//! The device's four channels all speak the same framing, so this is the layer
+//! both clients share: natively it sits on a TCP socket (see [`crate::tcp`]),
+//! and in a browser on a WebSocket relayed by `b070-bridge`. Nothing here knows
+//! which.
 //!
-//! A session is **four separate TCP connections** to the same port, one per
-//! [`SocketType`]. Each opens the same way:
-//!
-//! 1. write the management session id followed by `#`, as ASCII,
-//! 2. write the socket-type code as a 4-byte little-endian integer,
-//! 3. read 4 bytes back and check the device echoed the same code,
-//! 4. for the command and keyboard/mouse sockets only, start TLS.
-//!
-//! **Video and virtual media stay in the clear** — that is the device's design,
-//! not a shortcut taken here.
+//! The key property that makes one implementation serve both is that reading
+//! never blocks by contract. [`Channel::poll`] treats `WouldBlock` as "not yet",
+//! keeps whatever part of the message it already has, and resumes on the next
+//! call — so a transport that can only ever answer from what has already
+//! arrived, as a browser's is, needs no special handling.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
 
 use b070_proto::kvmmsg::{Header, Message, SocketType, HEADER_LEN};
-use openssl::ssl::{SslConnector, SslMethod, SslStream, SslVerifyMode, SslVersion};
 
 use crate::Error;
 
 /// Refuse to buffer a payload larger than this; a plausible frame is well under
 /// it, and a corrupt header must not turn into a huge allocation.
-const MAX_PAYLOAD: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_PAYLOAD: usize = 32 * 1024 * 1024;
 
-/// One session socket once its handshake is done: plaintext for video and
-/// virtual media, TLS for command and keyboard/mouse.
+/// A byte stream carrying one session channel.
 ///
-/// [`Channel`] puts `KVMMsg` framing on top of this. It is public in its own
-/// right because the handshake is where the TLS decision lives, so a relay that
-/// only needs to move bytes — the web bridge — can call [`connect_stream`] and
-/// then stay out of the protocol entirely.
-pub enum Stream {
-    Plain(TcpStream),
-    Tls(Box<SslStream<TcpStream>>),
+/// Implementors report "nothing available yet" as [`io::ErrorKind::WouldBlock`]
+/// rather than blocking, unless they are a socket the caller has deliberately
+/// put in blocking mode.
+pub trait Transport: Read + Write {
+    /// Close the stream, so a reader stops rather than waiting forever.
+    fn close(&self);
 }
 
-impl Stream {
-    fn tcp(&self) -> &TcpStream {
-        match self {
-            Stream::Plain(s) => s,
-            Stream::Tls(s) => s.get_ref(),
-        }
-    }
-
-    /// Set the read timeout, or clear it for blocking reads.
-    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.tcp().set_read_timeout(timeout)
-    }
-
-    /// Switch between blocking and non-blocking reads.
-    ///
-    /// A relay pumping both directions on one thread needs this; a reader that
-    /// can park on the socket wants a timeout instead.
-    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        self.tcp().set_nonblocking(nonblocking)
-    }
-
-    /// Close the underlying socket, unblocking a reader.
-    pub fn shutdown(&self) {
-        let _ = self.tcp().shutdown(std::net::Shutdown::Both);
-    }
-
-    /// A handle that can shut this stream down from another thread.
-    pub fn shutdown_handle(&self) -> io::Result<ShutdownHandle> {
-        Ok(ShutdownHandle(self.tcp().try_clone()?))
-    }
-}
-
-impl Read for Stream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Stream::Plain(s) => s.read(buf),
-            Stream::Tls(s) => s.read(buf),
-        }
-    }
-}
-
-impl Write for Stream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Stream::Plain(s) => s.write(buf),
-            Stream::Tls(s) => s.write(buf),
-        }
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Stream::Plain(s) => s.flush(),
-            Stream::Tls(s) => s.flush(),
-        }
-    }
-}
-
-/// Partially received message, so a read that times out mid-frame can be
-/// resumed rather than losing its place in the stream.
+/// Partially received message, so a read that stops mid-frame can be resumed
+/// rather than losing its place in the stream.
 #[derive(Default)]
 struct Incoming {
     header_buf: [u8; HEADER_LEN],
@@ -109,39 +45,29 @@ struct Incoming {
 }
 
 /// One connected session channel.
-pub struct Channel {
-    stream: Stream,
+pub struct Channel<T> {
+    stream: T,
     socket_type: SocketType,
     incoming: Incoming,
+    /// Bytes written but not yet accepted by the transport.
+    ///
+    /// A non-blocking transport can take a write only part way, and the
+    /// messages here are a protocol stream where a half-written one desyncs
+    /// everything after it. Queueing rather than calling `write_all` is what
+    /// makes a short write a delay instead of a corruption.
+    outgoing: Vec<u8>,
+    sent: usize,
 }
 
-impl Channel {
-    /// Open a channel and complete its handshake.
-    ///
-    /// `session_id` is the `SESSIONID` from the HTTPS login — the same token the
-    /// management API returns, which is also what the command channel sends as
-    /// its "password" when verifying the user.
-    pub fn connect(
-        host: &str,
-        port: u16,
-        session_id: &str,
-        socket_type: SocketType,
-        timeout: Duration,
-    ) -> Result<Self, Error> {
-        let stream = connect_stream(host, port, session_id, socket_type, timeout)?;
-        Ok(Channel {
-            stream,
-            socket_type,
-            incoming: Incoming::default(),
-        })
-    }
-
-    /// Wrap an already-handshaken stream in `KVMMsg` framing.
-    pub fn from_stream(stream: Stream, socket_type: SocketType) -> Self {
+impl<T: Transport> Channel<T> {
+    /// Put `KVMMsg` framing on an already-handshaken transport.
+    pub fn new(stream: T, socket_type: SocketType) -> Self {
         Channel {
             stream,
             socket_type,
             incoming: Incoming::default(),
+            outgoing: Vec::new(),
+            sent: 0,
         }
     }
 
@@ -149,32 +75,47 @@ impl Channel {
         self.socket_type
     }
 
-    /// Set the read timeout, or clear it for blocking reads.
-    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), Error> {
-        self.stream.set_read_timeout(timeout)?;
-        Ok(())
+    /// The transport underneath, for the platform-specific knobs on it.
+    pub fn transport(&self) -> &T {
+        &self.stream
     }
 
-    /// Send one message (header and payload in a single write, as the client
-    /// does — the device's reader expects them together).
+    /// Queue one message and push as much of it as the transport will take.
+    ///
+    /// Header and payload go out together, as the client does — the device's
+    /// reader expects them in one write.
     pub fn send(&mut self, msg: &Message) -> Result<(), Error> {
-        self.stream.write_all(&msg.to_bytes())?;
-        self.stream.flush()?;
-        Ok(())
+        self.outgoing.extend_from_slice(&msg.to_bytes());
+        self.flush_outgoing()
     }
 
-    /// Read one message, blocking until it is complete.
-    pub fn recv(&mut self) -> Result<Message, Error> {
-        loop {
-            if let Some(msg) = self.poll()? {
-                return Ok(msg);
+    /// Push whatever is still queued. A transport that will take no more right
+    /// now is not an error; the remainder waits for the next call.
+    pub fn flush_outgoing(&mut self) -> Result<(), Error> {
+        while self.sent < self.outgoing.len() {
+            match self.stream.write(&self.outgoing[self.sent..]) {
+                Ok(0) => return Err(Error::Closed),
+                Ok(n) => self.sent += n,
+                Err(e) if would_block(&e) => return Ok(()),
+                Err(e) => return Err(e.into()),
             }
+        }
+        self.outgoing.clear();
+        self.sent = 0;
+        match self.stream.flush() {
+            Ok(()) => Ok(()),
+            Err(e) if would_block(&e) => Ok(()),
+            Err(e) => Err(e.into()),
         }
     }
 
+    /// Whether anything is still waiting to go out.
+    pub fn has_pending_writes(&self) -> bool {
+        self.sent < self.outgoing.len()
+    }
+
     /// Read whatever is available. Returns `Ok(None)` if the current message is
-    /// still incomplete when the read timeout expires; the partial state is
-    /// kept, so calling again resumes it.
+    /// still incomplete; the partial state is kept, so calling again resumes it.
     pub fn poll(&mut self) -> Result<Option<Message>, Error> {
         if self.incoming.header.is_none() {
             let got = self.incoming.header_got;
@@ -214,234 +155,27 @@ impl Channel {
         Ok(Some(Message { header, payload }))
     }
 
-    /// Close the underlying socket, unblocking a reader.
-    pub fn shutdown(&self) {
-        self.stream.shutdown()
+    /// Read one message, retrying until it is complete.
+    ///
+    /// Only sensible on a transport that actually blocks; on a non-blocking one
+    /// this spins. The session's state machine polls instead.
+    pub fn recv(&mut self) -> Result<Message, Error> {
+        loop {
+            if let Some(msg) = self.poll()? {
+                return Ok(msg);
+            }
+        }
     }
 
-    /// A handle that can shut this channel down from another thread.
-    pub fn shutdown_handle(&self) -> Result<ShutdownHandle, Error> {
-        Ok(self.stream.shutdown_handle()?)
-    }
-}
-
-/// Lets another thread drop a channel's connection, which is how a blocked
-/// reader is woken for shutdown.
-pub struct ShutdownHandle(TcpStream);
-
-impl ShutdownHandle {
-    pub fn shutdown(&self) {
-        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    /// Close the underlying transport, unblocking a reader.
+    pub fn close(&self) {
+        self.stream.close();
     }
 }
 
-/// Open one session socket and complete the device's handshake.
-///
-/// This is the whole device-specific part of opening a channel, and the only
-/// place that decides whether TLS is started, so everything that talks to a
-/// session port goes through here — the framing client above and the web
-/// bridge alike. See the module docs for the four steps.
-///
-/// `session_id` is the `SESSIONID` from the HTTPS login — the same token the
-/// management API returns, which is also what the command channel sends as its
-/// "password" when verifying the user.
-pub fn connect_stream(
-    host: &str,
-    port: u16,
-    session_id: &str,
-    socket_type: SocketType,
-    timeout: Duration,
-) -> Result<Stream, Error> {
-    let tcp = TcpStream::connect((host, port))?;
-    tcp.set_nodelay(true).ok();
-    tcp.set_read_timeout(Some(timeout))?;
-    tcp.set_write_timeout(Some(timeout))?;
-
-    let mut plain = tcp;
-    plain.write_all(format!("{session_id}#").as_bytes())?;
-    let code = socket_type.code();
-    plain.write_all(&code.to_le_bytes())?;
-    plain.flush()?;
-
-    let mut echo = [0u8; 4];
-    plain.read_exact(&mut echo)?;
-    let echoed = i32::from_le_bytes(echo);
-    if echoed != code {
-        return Err(Error::Handshake {
-            expected: code,
-            got: echoed,
-        });
-    }
-
-    let stream = if socket_type.uses_tls() {
-        Stream::Tls(Box::new(start_tls(host, plain)?))
-    } else {
-        Stream::Plain(plain)
-    };
-
-    tracing::debug!(?socket_type, tls = socket_type.uses_tls(), "channel open");
-    Ok(stream)
-}
-
-fn would_block(e: &io::Error) -> bool {
+pub(crate) fn would_block(e: &io::Error) -> bool {
     matches!(
         e.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
     )
-}
-
-/// Start TLS on an already-handshaken socket.
-///
-/// The session sockets negotiate TLS 1.2 with `AES256-GCM-SHA384`. The only
-/// concession the device still needs is security level 1, because the DHE group
-/// it offers on port 443 is 1024-bit and one connector is used for both.
-///
-/// The certificate is self-signed, so there is no trust anchor to check it
-/// against. The vendor's own client installs a trust-all `X509TrustManager`
-/// here, so this is no weaker than the stock client — but it does mean the
-/// session is only as private as the network it crosses.
-fn start_tls(host: &str, tcp: TcpStream) -> Result<SslStream<TcpStream>, Error> {
-    let mut builder = SslConnector::builder(SslMethod::tls_client())?;
-    builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
-    builder.set_cipher_list("DEFAULT@SECLEVEL=1")?;
-    builder.set_verify(SslVerifyMode::NONE);
-    let connector = builder.build();
-
-    let mut cfg = connector.configure()?;
-    cfg.set_verify_hostname(false);
-    cfg.set_use_server_name_indication(false);
-    cfg.connect(host, tcp)
-        .map_err(|e| Error::Tls(e.to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use b070_proto::kvmmsg::{Cmd, CmdFlag};
-    use std::net::TcpListener;
-
-    /// Stand in for the device: complete the handshake, then play a script of
-    /// bytes back at the client.
-    fn fake_device(script: Vec<u8>, expect_type: SocketType) -> (String, u16) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            // "<session>#" then the 4-byte type code.
-            let mut buf = [0u8; 64];
-            let n = sock.read(&mut buf).unwrap();
-            let text = String::from_utf8_lossy(&buf[..n]).to_string();
-            assert!(text.starts_with("sess#"), "preamble was {text:?}");
-            let code = if n >= 9 {
-                i32::from_le_bytes(buf[5..9].try_into().unwrap())
-            } else {
-                let mut c = [0u8; 4];
-                sock.read_exact(&mut c).unwrap();
-                i32::from_le_bytes(c)
-            };
-            assert_eq!(code, expect_type.code());
-            sock.write_all(&code.to_le_bytes()).unwrap();
-            sock.write_all(&script).unwrap();
-            // Hold the socket open so the client sees EOF only when we drop it.
-            std::thread::sleep(Duration::from_millis(200));
-        });
-        (addr.ip().to_string(), addr.port())
-    }
-
-    #[test]
-    fn handshake_and_framing_round_trip() {
-        let msg = Message::new(CmdFlag::Bmp, Cmd::Undefined, vec![1, 2, 3, 4]);
-        let (host, port) = fake_device(msg.to_bytes(), SocketType::Video);
-
-        let mut ch = Channel::connect(
-            &host,
-            port,
-            "sess",
-            SocketType::Video,
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        assert_eq!(ch.recv().unwrap(), msg);
-    }
-
-    #[test]
-    fn a_mismatched_echo_is_rejected() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 64];
-            let _ = sock.read(&mut buf).unwrap();
-            sock.write_all(&99i32.to_le_bytes()).unwrap();
-        });
-        let result = Channel::connect(
-            &addr.ip().to_string(),
-            addr.port(),
-            "sess",
-            SocketType::Video,
-            Duration::from_secs(5),
-        );
-        assert!(matches!(result, Err(Error::Handshake { got: 99, .. })));
-    }
-
-    /// A message split across two reads must resume where it left off.
-    #[test]
-    fn a_partial_message_resumes() {
-        let msg = Message::new(CmdFlag::Bmp, Cmd::Undefined, vec![9; 100]);
-        let bytes = msg.to_bytes();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 64];
-            let _ = sock.read(&mut buf).unwrap();
-            sock.write_all(&SocketType::Video.code().to_le_bytes())
-                .unwrap();
-            sock.write_all(&bytes[..20]).unwrap();
-            sock.flush().unwrap();
-            std::thread::sleep(Duration::from_millis(150));
-            sock.write_all(&bytes[20..]).unwrap();
-            std::thread::sleep(Duration::from_millis(200));
-        });
-
-        let mut ch = Channel::connect(
-            &addr.ip().to_string(),
-            addr.port(),
-            "sess",
-            SocketType::Video,
-            Duration::from_millis(30),
-        )
-        .unwrap();
-        // Poll until the whole message arrives; the early polls time out.
-        let mut timed_out = false;
-        let got = loop {
-            match ch.poll().unwrap() {
-                Some(m) => break m,
-                None => timed_out = true,
-            }
-        };
-        assert!(
-            timed_out,
-            "the split write should have made a poll time out"
-        );
-        assert_eq!(got, msg);
-    }
-
-    #[test]
-    fn an_oversized_header_is_rejected() {
-        let mut header = Header::new(CmdFlag::Bmp, Cmd::Undefined, 0)
-            .encode()
-            .to_vec();
-        header[4..8].copy_from_slice(&(MAX_PAYLOAD as u32 + 1).to_le_bytes());
-        let (host, port) = fake_device(header, SocketType::Video);
-        let mut ch = Channel::connect(
-            &host,
-            port,
-            "sess",
-            SocketType::Video,
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        assert!(matches!(ch.recv(), Err(Error::OversizedMessage(_))));
-    }
 }

@@ -33,17 +33,27 @@
 //! Virtual media (the fourth channel) is not implemented.
 
 pub mod channel;
+pub mod core;
 pub mod input;
 pub mod lzw;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod session;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tcp;
+pub mod time;
 pub mod video;
 pub mod ycbcr;
 
-pub use channel::{connect_stream, Channel, Stream};
-pub use input::{Input, Modifiers, MouseButton};
-pub use session::{
-    parse_servers, parse_video_settings, Event, Knob, Server, Session, SessionConfig, VideoSettings,
+pub use channel::{Channel, Transport};
+pub use core::{
+    parse_servers, parse_video_settings, Event, Knob, Server, SessionConfig, SessionCore,
+    VideoSettings,
 };
+pub use input::{Input, Modifiers, MouseButton};
+#[cfg(not(target_arch = "wasm32"))]
+pub use session::Session;
+#[cfg(not(target_arch = "wasm32"))]
+pub use tcp::{connect_stream, ShutdownHandle, Stream, TcpChannel};
 pub use video::{Framebuffer, Noise, Rect, SharedFrame, VideoDecoder};
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +64,7 @@ pub enum Error {
     #[error("TLS error: {0}")]
     Tls(String),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("OpenSSL error: {0}")]
     OpenSsl(#[from] openssl::error::ErrorStack),
 

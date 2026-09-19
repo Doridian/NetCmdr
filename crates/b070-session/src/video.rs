@@ -35,8 +35,8 @@
 //! vendor's client ends up with too: it stores bytes B, G, R, x and then reads
 //! them back with a little-endian `getInt` into a `TYPE_INT_RGB` image.
 
+use crate::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use flate2::{Decompress, FlushDecompress};
 
