@@ -23,7 +23,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::keys::scancode;
 use crate::macros::{self, KeyMacro};
-use crate::menu::{Action, CursorMode, Menu, Scaling};
+use crate::menu::{Action, CursorMode, Menu, Scaling, NOTE_LINGER, WORKING_LINGER};
 use crate::mgmt::{self, Mgmt};
 use crate::render::{Renderer, Screen};
 
@@ -186,8 +186,19 @@ impl App {
         }
     }
 
+    /// Say what just happened, in the bar. The line goes away on its own.
     fn note(&mut self, text: impl Into<String>) {
-        self.menu.status = text.into();
+        self.menu.note(text, NOTE_LINGER);
+        self.dirty = true;
+    }
+
+    /// Say what the device is doing, for work we start and cannot see finish.
+    ///
+    /// Progress from the device renews the line, so an adjustment that keeps
+    /// reporting keeps its note; one that goes quiet loses it a few seconds
+    /// later rather than leaving the bar stuck on it.
+    fn working(&mut self, text: impl Into<String>) {
+        self.menu.note(text, WORKING_LINGER);
         self.dirty = true;
     }
 
@@ -224,11 +235,11 @@ impl App {
 
             Action::SyncPointer => self.send(Input::MouseQuickSync),
             Action::CalibrateMouse => match self.session.calibrate_mouse() {
-                Ok(()) => self.note("calibrating the mouse…"),
+                Ok(()) => self.working("calibrating the mouse…"),
                 Err(e) => self.failed("calibrate", e),
             },
             Action::AlignMouse => match self.session.align_mouse() {
-                Ok(()) => self.note("aligning the mouse…"),
+                Ok(()) => self.working("aligning the mouse…"),
                 Err(e) => self.failed("align", e),
             },
             Action::SetCursorMode(mode) => {
@@ -237,11 +248,11 @@ impl App {
             }
 
             Action::RefreshVideo => match self.session.refresh_screen() {
-                Ok(()) => self.note("refreshing…"),
+                Ok(()) => self.working("refreshing…"),
                 Err(e) => self.failed("refresh", e),
             },
             Action::AutoAdjustVideo => match self.session.auto_adjust_video() {
-                Ok(()) => self.note("adjusting video…"),
+                Ok(()) => self.working("adjusting video…"),
                 Err(e) => self.failed("auto adjust", e),
             },
             Action::StopAutoAdjust => match self.session.stop_auto_adjust() {
@@ -258,7 +269,7 @@ impl App {
                 // Picking `auto` runs the adjustment rather than setting
                 // anything, so say what actually happened.
                 Ok(()) if filter == b070_proto::command::VideoFilter::Auto => {
-                    self.note("adjusting video…")
+                    self.working("adjusting video…")
                 }
                 Ok(()) => self.note(format!("filter = {}", filter.as_str())),
                 Err(e) => self.failed("filter", e),
@@ -280,7 +291,7 @@ impl App {
             Action::Power(command) => {
                 let port = self.menu.current_port;
                 self.mgmt.send(mgmt::Request::Power { port, command });
-                self.note("sending power command…");
+                self.working("sending power command…");
             }
 
             Action::SwitchTarget { port, name } => match self.session.change_target(&name, port) {
@@ -303,7 +314,7 @@ impl App {
                         name: name.clone(),
                         since: Instant::now(),
                     });
-                    self.note(format!("switching to {name}…"));
+                    self.working(format!("switching to {name}…"));
                 }
                 Err(e) => self.failed("switch target", e),
             },
@@ -399,7 +410,7 @@ impl App {
             self.menu.switching = false;
             // "switching to X…" has stopped being true; whatever happens next
             // writes its own note.
-            self.menu.status.clear();
+            self.menu.clear_note();
             self.screen.blank();
             self.dirty = true;
         }
@@ -477,7 +488,7 @@ impl App {
                 }
                 Ok(Event::Gui(msg)) if !msg.is_empty() => {
                     tracing::info!(%msg, "device message");
-                    self.note(msg);
+                    self.working(msg);
                 }
                 Ok(Event::Gui(_)) => {}
                 Ok(Event::ConfigXml(xml)) => self.on_config(&xml),
@@ -903,6 +914,9 @@ impl ApplicationHandler for App {
             self.finish_switch();
             self.note("target switch not confirmed; showing video anyway");
         }
+
+        // A note that has run its time takes the bar back to the resolution.
+        self.dirty |= self.menu.expire_note();
 
         if self.dirty || self.egui_ctx.has_requested_repaint() {
             if let Some(r) = &self.renderer {

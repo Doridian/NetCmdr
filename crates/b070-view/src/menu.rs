@@ -20,6 +20,8 @@
 //! viewer keeps up to date. Anything that needs confirming goes through
 //! [`Menu::confirm`] instead of calling straight through.
 
+use std::time::{Duration, Instant};
+
 use b070_mgmt::{PowerCommand, Target};
 use b070_proto::command::{VideoFilter, VideoSetting};
 use b070_session::{Knob, Noise, VideoSettings};
@@ -120,6 +122,27 @@ struct Confirm {
     action: Action,
 }
 
+/// How long a note stays in the bar before the bar goes back to resting on the
+/// resolution and the target.
+///
+/// A result has been read by the time this is up; anything longer is a line
+/// that outlives what it describes.
+pub const NOTE_LINGER: Duration = Duration::from_secs(4);
+
+/// How long a note about work still in flight stays, when nothing announces
+/// that the work has finished.
+///
+/// The device reports progress while it adjusts the video or calibrates the
+/// mouse, and every report renews the note, so this is only the backstop for a
+/// run that goes quiet — the vendor's own protocol has no "done" message.
+pub const WORKING_LINGER: Duration = Duration::from_secs(10);
+
+/// A line in the bar, and when it stops being shown.
+struct Note {
+    text: String,
+    until: Instant,
+}
+
 /// The menu bar and its state.
 ///
 /// The public fields are what the bar draws; the viewer owns this struct and
@@ -142,7 +165,9 @@ pub struct Menu {
     /// until a fresh config document replaces it.
     pub video: Option<VideoSettings>,
     /// The right-hand note in the bar: device messages, command results.
-    pub status: String,
+    ///
+    /// Private because every note expires; see [`Menu::note`].
+    note: Option<Note>,
     /// A management request is in flight.
     pub busy: bool,
     /// A target change is in flight, so what we know about the picture — its
@@ -175,7 +200,7 @@ impl Menu {
             remote: None,
             noise: None,
             video: None,
-            status: String::new(),
+            note: None,
             busy: false,
             switching: false,
             host,
@@ -216,6 +241,34 @@ impl Menu {
 
         self.dialogs(&ctx, &mut actions);
         actions
+    }
+
+    /// Put a line in the bar for `linger`, replacing whatever was there.
+    ///
+    /// Notes always expire. The bar's resting state is the resolution, the
+    /// noise meter and the target, and those are what it is watched for; a
+    /// note that stayed would hide a live reading behind something that has
+    /// already happened.
+    pub fn note(&mut self, text: impl Into<String>, linger: Duration) {
+        self.note = Some(Note {
+            text: text.into(),
+            until: Instant::now() + linger,
+        });
+    }
+
+    /// Take the note down now, for a caller that knows it has stopped being
+    /// true before its time is up.
+    pub fn clear_note(&mut self) {
+        self.note = None;
+    }
+
+    /// Drop the note once its time is up; true if the bar changed.
+    pub fn expire_note(&mut self) -> bool {
+        let done = self.note.as_ref().is_some_and(|n| Instant::now() >= n.until);
+        if done {
+            self.note = None;
+        }
+        done
     }
 
     /// Queue a confirmation before an action; see [`Action::Power`] callers.
@@ -525,8 +578,8 @@ impl Menu {
         if self.busy {
             ui.add(egui::Spinner::new().size(12.0));
         }
-        if !self.status.is_empty() {
-            ui.label(egui::RichText::new(&self.status).weak());
+        if let Some(note) = &self.note {
+            ui.label(egui::RichText::new(&note.text).weak());
             ui.separator();
         }
         if let Some((w, h)) = self.remote.filter(|_| !self.switching) {
@@ -997,6 +1050,22 @@ mod tests {
         // delta and epaint panics if one is dropped.
         out.textures_delta.clear();
         actions
+    }
+
+    #[test]
+    fn a_note_expires_and_the_bar_goes_back_to_the_resolution() {
+        let mut m = menu();
+        m.note("adjusting video…", Duration::ZERO);
+        assert!(m.note.is_some(), "the note went up");
+        assert!(m.expire_note(), "its time was up");
+        assert!(m.note.is_none(), "and the bar is back to resting");
+        assert!(!m.expire_note(), "nothing left to expire");
+
+        // A note still within its time stays: an adjustment run that keeps
+        // reporting keeps its line.
+        m.note("adjusting video…", WORKING_LINGER);
+        assert!(!m.expire_note());
+        assert!(m.note.is_some());
     }
 
     #[test]

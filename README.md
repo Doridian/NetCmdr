@@ -129,6 +129,12 @@ usually settle it. Only the raw changed-tile count comes off the wire — the
 percentage is computed here, exactly as the vendor's native library computes it
 (see `research/notes/FINDINGS.md` §5.4.1).
 
+Command results and the device's own messages appear to the left of that
+reading and then clear themselves — a few seconds for something that has
+happened, longer for work still running, which each progress report renews. The
+device never says an auto-adjust or a calibration has finished, so the bar times
+those out rather than sitting on the last thing it was told.
+
 ## Protocols
 
 | Layer | Transport | Status |
