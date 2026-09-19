@@ -4,7 +4,7 @@
 //! (`com.minicom.app.video.controller.cmds.*`, still present in the current
 //! firmware's client). The plugin re-encodes them as [`crate::kvmmsg`] messages
 //! on the wire — so these are the *facade* language, not the wire format. See
-//! `research/decompiled/app-live/` and `research/notes/FINDINGS.md` §5.1.
+//! `research/notes/FINDINGS.md` §5.1.
 //!
 //! Attribute spellings are the vendor's, typos included (`session_exlusive`),
 //! because the device parses them literally.

@@ -21,9 +21,9 @@
 //! request/response — see [`transport`] for why it uses OpenSSL directly rather
 //! than a normal HTTP client.
 //!
-//! The command bodies here are lifted verbatim from the decompiled device
-//! client (`com.minicom.app.config.controller.http.pv.*`), preserved under
-//! `research/decompiled/app-live/`.
+//! The request bodies here match the ones the device's own client sends
+//! (`com.minicom.app.config.controller.http.pv.*`), byte for byte, because the
+//! device's parser is literal about them.
 
 pub mod model;
 pub mod transport;

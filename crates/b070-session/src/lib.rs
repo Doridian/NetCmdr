@@ -2,8 +2,7 @@
 //! live video, keyboard and mouse.
 //!
 //! Everything here is transcribed from the current firmware's own Java client
-//! (firmware 2.2.1258.1.0, pulled live from a B070-008-19-IP), whose sources are
-//! preserved under `research/decompiled/app-live/`. See
+//! (firmware 2.2.1258.1.0, pulled live from a B070-008-19-IP). See
 //! `research/notes/FINDINGS.md` §5.4 for the protocol write-up.
 //!
 //! ```no_run

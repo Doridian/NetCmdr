@@ -32,7 +32,9 @@ Smart 108/116 IP and the Tripp Lite B072-xxx-IP models are directly applicable.
 
 The IP module is a **Windows CE** system on an **Intel IXP425 (ARM XScale)**.
 
-Recovered from the decoded firmware payload (`firmware/work/device-arm-firmware.bin`):
+Recovered from the decoded firmware payload (`device-arm-firmware.bin`, the
+second container's OS image — [`../README.md`](../README.md) has the extraction
+steps):
 
 - Bootloader banner: `******* IXDP4XX System Initialization *******`, `CPU ID = IXP425 A0`
 - Windows CE kernel (`NKNoKitl`), `filesys.exe`, `gwes.exe`, `device.exe`, `coredll.dll`
@@ -91,7 +93,7 @@ The client is **Java Web Start**, served by the device itself:
 https://<kvm-ip>/targets.jnlp
 ```
 
-`ui.jnlp` template (`software/client-3.0.5.583/ui.jnlp`) requests:
+The `ui.jnlp` template in the 2013 firmware's client requests:
 `boot.jar`, `app.jar`, `vendor.jar`, `miglayout15-swing.jar`, `jnlp.jar`,
 `xstream-1.3.1.jar`, `xpp3_min-1.1.4c.jar`, and `plugin.jar` as a
 `<nativelib>`. Main class `com.minicom.app.video.ui.ShowLogin`.
@@ -132,8 +134,8 @@ i.e. a tile-based codec, not a full-frame stream.
 
 Statically linked: **OpenSSL** (cipher string `AES256-SHA`) and **zlib 1.2.5**.
 
-Full symbol and string dumps: `notes/analysis/libkvmipjproxy.symbols.txt`,
-`notes/analysis/libkvmipjproxy.strings.txt`.
+Reproduce the symbol and string dumps with `nm -D --defined-only` piped through
+`c++filt`, and `strings -a`, over `libkvmipjproxy.so`.
 
 ---
 
@@ -162,9 +164,8 @@ Key corrections:
 1. **The current client is pure Java.** The 2017 firmware dropped the
    `kvmipjproxy` native library and reimplemented the entire protocol in Java
    (`com.minicom.plugin.*`). The client is served from the device at
-   `https://<ip>/targets.jnlp`; the JARs and 594 decompiled sources are under
-   `research/software/client-live/` and
-   `research/decompiled/app-live/`. `plugin.jar` now ships only virtual-media
+   `https://<ip>/targets.jnlp`; its JARs decompile to 594 sources with CFR (see
+   [`../README.md`](../README.md)). `plugin.jar` now ships only virtual-media
    helpers (`libvmproxy.so`, `usb_adapter.dll`), not the KVM proxy.
 
 2. **TLS on 2.2.1258.1.0 is 1.2** (1.0 and 1.1 are still accepted; there is no
@@ -334,15 +335,16 @@ The auth reply carries the session token and device facts:
 `SESSIONID` is the **same token** the session sockets' plaintext preamble needs
 (§5.4). `reply_error` id `1000` = success; `32004` = access denied; "Invalid
 session" means re-authenticate. Full request grammar and every `Fetch*`/`Save*`/
-`*Action` command are in
-`research/decompiled/app-live/com/minicom/app/config/controller/http/pv/`.
+`*Action` command are in the client's
+`com.minicom.app.config.controller.http.pv` package.
 The many attribute names are XStream-mangled on the wire (underscores doubled,
 etc.); `HttpUtils.replaceX*UnderlineTokens` lists every substitution.
 
 **Legacy firmware (2013, from the old web UI, now 404):** a single ISAPI
 endpoint `POST /config/` with `client=ConfigXML|AdminXML|SwitchXML|StatusXML|
 LogOFF|RPMDoReboot`, responses wrapped in `CMA_Message`/`config_data`. Reference
-schemas: `software/webui-3.0.5.583/config/`. Kept for sibling devices that may
+schemas are in the 2013 web UI, under `config/` in the firmware's first
+container. Kept for sibling devices that may
 still run it, but not present on the current unit.
 
 ### 5.4 Session framing
@@ -478,7 +480,7 @@ client's Advanced Video dialog shows a "Noise / Level" progress bar, and nothing
 on the wire is named "noise": the device supplies only `idx_size`, the
 changed-tile count in every video message header, and the *client* turns it into
 the reading. The whole calculation is `KVMClientProxy::SetNoiseLevel(bool)` at
-`0x440c0` in `research/software/native/libkvmipjproxy.so`, called once per
+`0x440c0` in the 2013 native library `libkvmipjproxy.so`, called once per
 decoded frame:
 
 ```
@@ -514,8 +516,8 @@ substring `statistics noise_level` and routes it to the dialog's `JProgressBar`.
 The rest of this section describes the framing reverse-engineered from
 `libkvmipjproxy.so` (2013). It is **superseded by `KVMMsg` in §5.4.0** on the
 current firmware and is retained for history and for sibling devices that may
-still run the old native client. Raw listings:
-`notes/analysis/protocol-framing.disasm.txt`.
+still run the old native client. It was read off disassembly of the serialize
+and deserialize routines named below.
 
 Two distinct framings exist. Both ride inside the TLS session.
 
@@ -648,8 +650,8 @@ Recommended order: **B** now → **A** on arrival → capture traffic → **C**.
 1. Hardware revision and firmware version. Archived firmware here is HW v1
    (`3.0.5.583`, 2013). The 2018 manual documents TLS 1.2, IPv6, RADIUS/LDAP —
    clearly newer. The device serves its own current client at
-   `https://<ip>/targets.jnlp`; **pull those JARs first** and diff against
-   `software/client-3.0.5.583/`.
+   `https://<ip>/targets.jnlp`; **pull those JARs first** and diff against the 2013
+   client recovered from firmware.
 2. Does the newer `plugin.jar` still ship `libkvmipjproxy.so`, and is it still i386?
 3. Exact session framing on TCP 900 and the tile codec.
 4. The `/config/` write path.
@@ -659,7 +661,8 @@ Recommended order: **B** now → **A** on arrival → capture traffic → **C**.
 
 ## 9. Known gaps in this research
 
-- The 2017 Windows installers (`software/installers/`) are **install4j**
+- The 2017 Windows installers (the `.exe` files inside the vendor's non-browser
+  client archive) are **install4j**
   packages; their payload is neither raw deflate, zlib, nor LZMA-alone, so the
   bundled jars were not extracted. Easiest route is to run the installer under
   Wine and copy the `user/` directory out. The 2013 client recovered from

@@ -1,16 +1,25 @@
 /target
 
-# Derived research artifacts — kept locally, not tracked, because they are
-# byte-identical to or mechanically reproducible from material that IS tracked.
-# See research/README.md for how to regenerate each one.
-
-# Byte-identical to the .exe inside the two tracked software/*.zip archives.
-/research/software/installers/
-
-# Plain `unzip` output of the tracked firmware/*.zip archives.
+# Vendor material — firmware images, client JARs and native libraries,
+# decompiled or disassembled output, manuals, datasheets, device certificates.
+# All of it is copyrighted and none of it is redistributed from this repo; it
+# is only ever a local input to the write-up in research/notes/FINDINGS.md.
+# research/SOURCES.md says where to get it, research/README.md how to unpack it.
+/research/datasheets/
+/research/decompiled/
+/research/manuals/
+/research/patents/
+/research/software/
+/research/firmware/*.zip
 /research/firmware/extracted/
-
-# Output of firmware/work/unpack.py; curated copies are tracked under
-# research/software/client-3.0.5.583/ and research/software/webui-3.0.5.583/.
+/research/firmware/work/*.bin
 /research/firmware/work/out_client/
 /research/firmware/work/out_config/
+/research/notes/analysis/*.pem
+/research/notes/analysis/*.cer
+/research/notes/analysis/*.disasm.txt
+/research/notes/analysis/*.strings.txt
+/research/notes/analysis/*.symbols.txt
+/research/notes/analysis/*.dynsym-demangled.txt
+/research/notes/analysis/ghidra-*.txt
+/research/notes/analysis/*ReadMe*.txt

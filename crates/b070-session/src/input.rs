@@ -1,7 +1,6 @@
 //! Keyboard and mouse messages.
 //!
-//! Transcribed from `com.minicom.plugin.km_impl.*`
-//! (`research/decompiled/app-live/`).
+//! Transcribed from `com.minicom.plugin.km_impl.*`.
 //!
 //! Every input event is a 16-byte payload of four little-endian 32-bit words —
 //! a message class followed by three parameters — carried on the keyboard/mouse

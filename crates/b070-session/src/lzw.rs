@@ -2,7 +2,7 @@
 //!
 //! Transcribed from the current firmware's own client
 //! (`com.minicom.plugin.LZW.decoder.{CLZWExpander,BufData,LZW_dictionary,
-//! LZW_params,LZWStack}`), preserved under `research/decompiled/app-live/`.
+//! LZW_params,LZWStack}`).
 //!
 //! Two things make this variant unusual:
 //!

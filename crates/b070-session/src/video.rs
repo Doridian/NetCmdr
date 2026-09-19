@@ -2,8 +2,7 @@
 //! tile blit into the framebuffer.
 //!
 //! Transcribed from `com.minicom.plugin.video_impl.{VideoPayloadReader,
-//! VideoServiceImpl,VideoModel}` and `com.minicom.plugin.data.DibSection`
-//! (`research/decompiled/app-live/`).
+//! VideoServiceImpl,VideoModel}` and `com.minicom.plugin.data.DibSection`.
 //!
 //! # How a frame arrives
 //!
@@ -316,7 +315,7 @@ pub struct Noise {
 /// Accumulates [`Noise`] over one-second intervals.
 ///
 /// Transcribed from `KVMClientProxy::SetNoiseLevel(bool)` in the vendor's
-/// native client library (`research/software/native/libkvmipjproxy.so`,
+/// native client library (`libkvmipjproxy.so`,
 /// `0x440c0`), which is where the number is computed — the device sends only
 /// the per-frame changed-tile count that feeds it. Per frame the vendor adds
 /// that count as a percentage of the tiles on screen; once a second it divides

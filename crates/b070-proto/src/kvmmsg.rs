@@ -5,7 +5,6 @@
 //! from a B070-008-19-IP on 2026-09-18), namely
 //! `com.minicom.plugin.serialization.KVMMsgHeaderEncoder` / `KVMMSgHeaderDecoder`
 //! and `com.minicom.plugin.data.{KVMMsgHeader,MagicNumber,CmdFlag,Cmd,SocketType}`.
-//! Sources are preserved under `research/decompiled/app-live/`.
 //!
 //! This supersedes the earlier `ITCMsg`/`CommIO` framing that was reverse
 //! engineered from the 2013 native library `libkvmipjproxy.so`: the 2017

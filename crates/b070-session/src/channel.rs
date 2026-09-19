@@ -1,8 +1,7 @@
 //! One session socket: the plaintext handshake, the optional TLS upgrade, and
 //! `KVMMsg` framing on top.
 //!
-//! Transcribed from `com.minicom.plugin.socket.{KVMSocket,SocketUtils}`
-//! (`research/decompiled/app-live/`).
+//! Transcribed from `com.minicom.plugin.socket.{KVMSocket,SocketUtils}`.
 //!
 //! A session is **four separate TCP connections** to the same port, one per
 //! [`SocketType`]. Each opens the same way:

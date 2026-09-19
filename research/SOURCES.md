@@ -1,5 +1,9 @@
 # Sources
 
+Where each piece of vendor material came from. None of it is redistributed
+here — see [`README.md`](README.md) — so this is the list to work from if you
+want to redo the analysis.
+
 All material collected 2026-09-16. Eaton has retired the Tripp Lite support
 site — every `tripplite.eaton.com/support/*` URL now 302s to an
 "Eaton acquires Tripp Lite" landing page. Files on `assets.tripplite.com` are
@@ -66,17 +70,15 @@ the *dongle* link, not the network protocol.
 
 ## Live device (2026-09-19, firmware 2.2.1258.1.0)
 
-`research/software/client-live/`, `research/decompiled/app-live/` and
-`research/notes/analysis/device-cert-443.pem` hold the **2.2.1258.1.0** pull,
-made on 2026-09-19 with `curl -k --ciphers DEFAULT@SECLEVEL=1` (this firmware
-speaks TLS 1.2; only its 1024-bit DHE group needs the lowered security level).
-The equivalent 2.1.1184 files are in git history at commit `098fabf`.
+The client JARs, the 594 sources CFR produces from them and the device's TLS
+certificate were pulled on 2026-09-19 with
+`curl -k --ciphers DEFAULT@SECLEVEL=1` (this firmware speaks TLS 1.2; only its
+1024-bit DHE group needs the lowered security level). §5.0 of
+[`notes/FINDINGS.md`](notes/FINDINGS.md) is what came out of them.
 
-This firmware's `targets.jnlp` carries a `codebase` attribute holding the
-device's own address, which 2.1.1184's did not; it is sanitized to the example
-IP `192.0.2.10` here, as the `/message.pv` fixtures are. The device certificate
-is left byte-exact — its SAN contains the real address, and rewriting it would
-break the signature.
+Note when re-pulling: this firmware's `targets.jnlp` carries a `codebase`
+attribute holding the device's own address, which 2.1.1184's did not, and the
+certificate's SAN holds it too.
 
 ## Live device (2026-09-18, firmware 2.1.1184)
 
@@ -85,8 +87,8 @@ The current client and protocol were first pulled from a live B070-008-19-IP
 `curl --tlsv1.0 --ciphers DEFAULT@SECLEVEL=0`:
 
 - `https://<device>/targets.jnlp` and the JARs it references (`app.jar`,
-  `plugin.jar`, `vendor.jar`, …) → `software/client-live/`
-- Live `POST /message.pv` request/response captures (sanitized: LAN addresses,
-  MAC, IPv6 and session tokens replaced with placeholders) →
-  `notes/analysis/live-fixtures/`
-- Device TLS certificate → `notes/analysis/device-cert-443.pem`
+  `plugin.jar`, `vendor.jar`, …)
+- Live `POST /message.pv` request/response captures — these *are* kept, in
+  `notes/analysis/live-fixtures/`, sanitized: LAN addresses, MAC, IPv6 and
+  session tokens replaced with placeholders
+- The device's TLS certificate

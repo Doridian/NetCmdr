@@ -177,17 +177,23 @@ crates/
   b070-session/  the KVM session: channels, login, video codec, input
   b070-cli/      the `b070` binary
   b070-view/     the `b070-view` viewer (winit + egui on OpenGL)
-research/        vendor firmware, extracted clients (2013 + live 2017),
-                 decompiled sources, disassembly, live fixtures, findings
+research/        the protocol write-up, provenance for the vendor material it
+                 was derived from, and the live fixtures the tests parse
 ```
+
+No vendor material is redistributed here: no firmware images, client JARs,
+decompiled sources, manuals or datasheets. The protocol was recovered from
+them, and the recovery is what
+[`research/notes/FINDINGS.md`](research/notes/FINDINGS.md) records;
+[`research/SOURCES.md`](research/SOURCES.md) says where each original came from
+so the work can be redone.
 
 ## Development
 
 Standard cargo: `cargo build`, `cargo test --workspace`. Formatting is plain
 rustfmt defaults, pinned in `rustfmt.toml` so the style does not drift with the
 toolchain; `cargo fmt --all --check` and `cargo clippy --workspace
---all-targets` are both clean and expected to stay that way. Nothing under
-`research/` is ours, so no formatter touches it.
+--all-targets` are both clean and expected to stay that way.
 
 ## Likely applicable to
 

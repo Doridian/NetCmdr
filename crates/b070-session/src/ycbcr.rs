@@ -1,7 +1,7 @@
 //! YCbCr → RGB conversion for the video stream.
 //!
 //! Transcribed from `com.minicom.plugin.ycbcr.YCbCrToRGB` in the current
-//! firmware's client (`research/decompiled/app-live/`).
+//! firmware's client.
 //!
 //! The frame grabber packs each 32-bit word as two luma samples plus a shared
 //! chroma pair. The low bit of each luma byte (word bits 0 and 16) is stolen to

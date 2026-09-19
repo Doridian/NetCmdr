@@ -1,46 +1,36 @@
 # research/
 
-Collected vendor material and reverse-engineering artifacts for the Tripp Lite
-B070-008-19-IP (NetCommander IP Cat5 KVM).
+Reverse-engineering notes for the Tripp Lite B070-008-19-IP (NetCommander IP
+Cat5 KVM).
 
-**Start with [`notes/FINDINGS.md`](notes/FINDINGS.md).** Provenance and
-download URLs are in [`SOURCES.md`](SOURCES.md).
+**Start with [`notes/FINDINGS.md`](notes/FINDINGS.md)** — the protocol write-up
+the crates are built from. [`SOURCES.md`](SOURCES.md) records where every piece
+of vendor material came from, so the analysis can be redone from the originals.
 
 ```
-datasheets/    B070-008-19-IP datasheet
-manuals/       Owner's manual (B070-016-19-IP2, 2018), Minicom Smart 108/116 IP
-               guide (the OEM original), NetCommander-AXS documentation
-patents/       US 9,417,720 notes
-firmware/      Vendor firmware archives (2013-2014, HW v1) + extraction work
-  extracted/     unzipped vendor archives
-  work/          unpack.py (container parser), decoded device OS image,
-                 out_client/ and out_config/ payloads
-software/
-  client-3.0.5.583/       Java Web Start client, recovered from 2013 firmware
-  client-live/  CURRENT client, pulled live from the device (2017, pure Java)
-  webui-3.0.5.583/    Device web UI (HTML/JS/XML) — documents the /config/ API
-  native/             libkvmipjproxy.so (Linux i386) + kvmipjproxy.dll
-  installers/         2017 Windows installers (install4j, payload not yet extracted; untracked)
-decompiled/    CFR output: app/ + boot/ (2013), app-live/ (594 sources, current firmware)
-notes/
-  FINDINGS.md        the writeup
-  analysis/          symbol + string dumps, vendor release notes,
-                     device cert, and live-fixtures/ (captured /message.pv XML)
+notes/FINDINGS.md               the write-up
+notes/analysis/live-fixtures/   captured /message.pv XML, sanitized
+                                (b070-mgmt's tests parse these)
+firmware/work/unpack.py         parser for the firmware's file containers
+SOURCES.md                      provenance and download URLs
 ```
 
-## Not tracked in git
+## No vendor material is tracked here
 
-Some directories here exist locally but are deliberately untracked (see the
-repo's `.gitignore`), because they duplicate material that *is* tracked. The
-originals are what matter; these are regenerated in seconds:
+This repository carries none of the vendor's own files: no firmware images, no
+client JARs, no decompiled or disassembled output, no manuals or datasheets.
+All of it is copyrighted, and it was only ever input to the analysis that
+`notes/FINDINGS.md` records — the write-up is what the crates are built from,
+and it is enough to work from on its own.
 
-| Untracked | Regenerate with |
-|---|---|
-| `software/installers/` | `unzip software/*.zip` — the `.exe` files are byte-identical to the archive contents |
-| `firmware/extracted/` | `for f in firmware/*.zip; do unzip -o "$f" -d firmware/extracted; done` |
-| `firmware/work/out_client/`, `out_config/` | `cd firmware/work && python3 unpack.py` (curated copies are tracked under `software/client-3.0.5.583/` and `software/webui-3.0.5.583/`) |
+`.gitignore` keeps the working directories for that material (`software/`,
+`decompiled/`, `firmware/*.zip`, `manuals/`, …) out of git, so a local copy can
+sit here without ever being committed.
 
 ## Reproducing the firmware extraction
+
+Fetch the firmware archives from the URLs in [`SOURCES.md`](SOURCES.md) into
+`firmware/`, then:
 
 ```sh
 cd firmware
@@ -52,9 +42,19 @@ python3 unpack.py          # parses the two file containers
 
 `unpack.py` expects the gzip members already split out of `ip_fw.bin` as
 `m1.bin` and `m2.bin`; `notes/FINDINGS.md` §3 documents the container layout.
+It writes `out_config/` (the 2013 device web UI) and `out_client/` (the 2013
+Java Web Start client, plus the `kvmipjproxy` native library inside
+`plugin.jar`).
 
-## Licensing note
+## Recovering the current client
 
-Everything under `software/`, `firmware/` and `decompiled/` is vendor
-copyrighted material, retained here for interoperability research. Do not
-redistribute it as part of any client that ships from this repo.
+The device serves its own client, which on current firmware is pure Java and is
+the authoritative reference for the session protocol:
+
+```sh
+curl -k --ciphers DEFAULT@SECLEVEL=1 https://<device>/targets.jnlp
+# then fetch each JAR the JNLP names, and decompile:
+java -jar cfr.jar --outputdir decompiled/app-live app.jar
+```
+
+`SOURCES.md` lists the CFR build used.

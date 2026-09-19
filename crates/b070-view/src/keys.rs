@@ -6,8 +6,7 @@
 //! after the US layout position, which is exactly the set-1 code space.
 //!
 //! Checked against the vendor client's own table (`JVKEYTOSCAN` in
-//! `research/decompiled/app-live/com/minicom/plugin/km_impl/`), including its
-//! two oddities: Pause sends 0x45 unextended while Num Lock sends 0x45
+//! `com.minicom.plugin.km_impl`), including its two oddities: Pause sends 0x45 unextended while Num Lock sends 0x45
 //! extended, and Print Screen sends 0x37 extended.
 
 use winit::keyboard::KeyCode;

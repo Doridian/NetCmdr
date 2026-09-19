@@ -3,8 +3,7 @@
 //! Transcribed from `com.minicom.plugin.kvm_impl.KVMFacadeImpl`,
 //! `com.minicom.plugin.config_impl.{ConnectCommandHandler,
 //! ConfigurationServiceImpl,KeepAliveTask}` and
-//! `com.minicom.app.targets.ui.frame.TargetsTable`
-//! (`research/decompiled/app-live/`).
+//! `com.minicom.app.targets.ui.frame.TargetsTable`.
 //!
 //! # Connecting
 //!
