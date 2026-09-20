@@ -1,6 +1,6 @@
 # The bridge's container image comes out of the flake, not out of a Dockerfile:
 # `.#netcmdr-bridge-image-<arch>` is the static binary and nothing else, so
-# there is nothing here for buildx to build. That is why this does not use the
+# there is nothing here for buildx to do. That is why this does not use the
 # shared docker.yml template, and why it is not named docker.yml — a central
 # deploy of that template would land on top of it.
 #
@@ -74,38 +74,45 @@ jobs:
           username: forgejo
           password: ${{ steps.jwt.outputs.jwt }}
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
-      # For `imagetools` below, which is a buildx subcommand. Nothing here
-      # builds with buildx, so the builder this creates goes unused; it is the
-      # plugin itself that is wanted, and the runner image does not carry it.
-      - name: Set up Docker Buildx
-        uses: https://data.forgejo.org/docker/setup-buildx-action@v4
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
-      # One moving tag and nothing else, as before, except that it now names a
-      # manifest list over both architectures. The two images are pushed under
-      # that tag first and the list replaces it: a list can only name manifests
-      # the registry already holds, and this tag is the only name published, so
-      # for the length of the push it points at one architecture at a time.
+      # One moving tag and nothing else, as before, except that it now names an
+      # index over both architectures. The two images are pushed under that tag
+      # first and the index replaces it: an index can only name manifests the
+      # registry already holds, and this tag is the only name published, so for
+      # the length of the push it points at one architecture at a time.
       #
-      # The list is assembled by `docker buildx imagetools`, not by `docker
-      # manifest`. The two do the same job here, but `docker manifest` is the
-      # one piece of the CLI that talks to the registry itself rather than
-      # handing the work to the daemon, and it does not read the credentials
-      # `docker/login-action` leaves behind: both images push, and the list
-      # naming them comes back `unauthorized: authentication required`.
-      # imagetools authenticates the way everything else here does.
+      # The index is put there by regctl, after `docker manifest` and `docker
+      # buildx imagetools` both reached the registry unauthenticated — `denied`
+      # and `unauthorized` from the first, `insufficient_scope` from the second
+      # — while the `docker push` two lines above them, in the same shell with
+      # the same config, authenticated fine. That is the asymmetry to know
+      # about: a push is the daemon's work and the CLI hands it the
+      # credentials, whereas an index is the client's own, and neither client
+      # picked up what docker/login-action left behind. This registry answers
+      # an unauthenticated caller with a token whose scope is empty rather than
+      # with a refusal, which is where `insufficient_scope` comes from. regctl
+      # is handed the credential outright, so there is nothing for it to
+      # discover, and `index create --digest` names manifests already in the
+      # repository instead of copying anything into it.
       - name: Push the image
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
+        env:
+          REGISTRY_TOKEN: ${{ steps.jwt.outputs.jwt }}
         run: |
           dockertag='git.foxden.network/${{ steps.repository_case.outputs.lowercase }}:${{ vars.OCI_TAG || 'latest' }}'
           amd64='${{ steps.image.outputs.name }}:${{ steps.image.outputs.amd64 }}'
           arm64='${{ steps.image.outputs.name }}:${{ steps.image.outputs.arm64 }}'
           # Each image by the digest the registry gave it, read back off the
           # image as soon as it is pushed rather than scraped out of what
-          # `docker push` printed.
+          # `docker push` printed. The digest alone is enough: the index lands
+          # in the repository they were just pushed to.
           digests=()
           for image in "$amd64" "$arm64"; do
             docker tag "$image" "$dockertag"
             docker push "$dockertag"
-            digests+=("$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")")
+            repodigest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")"
+            digests+=(--digest "${repodigest##*@}")
           done
-          docker buildx imagetools create -t "$dockertag" "${digests[@]}"
+          regctl="$(nix build --no-link --print-out-paths 'nixpkgs#regclient')/bin/regctl"
+          printf '%s' "$REGISTRY_TOKEN" |
+            "$regctl" registry login git.foxden.network --user forgejo --pass-stdin
+          "$regctl" index create "$dockertag" "${digests[@]}"
