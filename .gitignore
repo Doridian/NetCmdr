@@ -1,5 +1,8 @@
 /target
 
+# Bytecode from the tools/ scripts.
+__pycache__/
+
 # The built web client; `tools/build-web.sh` regenerates it.
 /crates/b070-web/dist/
 

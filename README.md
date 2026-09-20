@@ -257,14 +257,36 @@ result:
 
 | | size |
 |---|---|
-| raw | 5.7 MiB |
-| gzip | 2.0 MiB |
-| brotli | **1.6 MiB** |
+| raw | 4.3 MiB |
+| gzip | 1.3 MiB |
+| brotli | **914 KiB** |
 
 `wasm-opt -Oz` is worth about 8% of that, rather than the usual much larger
 figure, because the `web` profile in the workspace manifest already builds with
-`opt-level = "z"`, fat LTO and one codegen unit. Most of what is left is not
-code: roughly 1.7 MiB is the fonts egui bundles.
+`opt-level = "z"`, fat LTO and one codegen unit.
+
+#### Fonts
+
+egui rasterises glyphs into a texture atlas itself, so the module has to carry
+real font files. The fonts installed on the machine are not reachable from
+WebAssembly — `queryLocalFonts()` is Chromium-only, wants a secure context and
+asks the person's permission — and the page's CSS reaches nothing egui draws.
+
+Carrying egui's four stock faces whole cost 1.3 MiB, close to a quarter of the
+module and 673 KiB of the brotli download, to draw a login form, a menu bar and
+one submenu arrow. So `default_fonts` is off and `crates/b070-web/fonts` holds
+three faces cut down to what can actually appear: ASCII, Latin-1 and the
+punctuation the viewer uses, plus the four triangles and the warning sign that
+egui's own widgets draw. That is 42 KiB rather than 1.4 MiB. Each face's licence
+sits beside it, which is what the Ubuntu, Hack and MIT terms ask for.
+
+Regenerate them after bumping egui, in case upstream has changed faces:
+
+```sh
+pip install fonttools
+cargo fetch              # the originals come from the epaint_default_fonts crate
+tools/subset-fonts.py
+```
 
 Two things a browser does differently, both of them the keyboard's fault:
 

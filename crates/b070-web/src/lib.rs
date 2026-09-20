@@ -12,6 +12,7 @@
 //! relays for it, because the device's TLS is one no browser can negotiate.
 
 mod connect;
+mod fonts;
 mod keyboard;
 mod link;
 mod net;
@@ -334,7 +335,12 @@ pub async fn start() -> Result<(), JsValue> {
         .start(
             canvas,
             eframe::WebOptions::default(),
-            Box::new(|_cc| Ok(Box::new(app))),
+            Box::new(|cc| {
+                // `default_fonts` is off, so the context starts with no fonts
+                // at all: see `fonts`.
+                fonts::install(&cc.egui_ctx);
+                Ok(Box::new(app))
+            }),
         )
         .await
 }
