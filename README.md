@@ -2,7 +2,7 @@
 
 Cross-platform client for the Tripp-Lite B070-008-19-IP KVM (and possibly others).
 
-The vendor ships a Windows-only Java client. This project replaces it.
+The vendor ships a Java client. This project replaces it.
 
 ## Status
 
