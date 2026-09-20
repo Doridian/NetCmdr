@@ -153,6 +153,9 @@ pub struct Menu {
     pub current_port: u32,
     pub current_name: String,
     pub exclusive: bool,
+    /// Whether the host can be resized at all. A browser tab cannot, so the
+    /// menu does not offer it there rather than offering something inert.
+    pub resizable: bool,
     pub cursor: CursorMode,
     pub scaling: Scaling,
     /// Remote resolution, once the first frame has arrived.
@@ -196,6 +199,7 @@ impl Menu {
             current_port,
             current_name: format!("Port {current_port}"),
             exclusive: true,
+            resizable: true,
             cursor: CursorMode::Arrow,
             scaling: Scaling::Fit,
             remote: None,
@@ -442,15 +446,17 @@ impl Menu {
                 }
             }
 
-            ui.separator();
-            let enabled = self.remote.is_some();
-            let label = match self.remote {
-                Some((w, h)) => format!("Resize window to {w}×{h}"),
-                None => "Resize window to remote size".to_string(),
-            };
-            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                out.push(Action::ResizeToRemote);
-                ui.close();
+            if self.resizable {
+                ui.separator();
+                let enabled = self.remote.is_some();
+                let label = match self.remote {
+                    Some((w, h)) => format!("Resize window to {w}×{h}"),
+                    None => "Resize window to remote size".to_string(),
+                };
+                if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                    out.push(Action::ResizeToRemote);
+                    ui.close();
+                }
             }
         })
         .inner

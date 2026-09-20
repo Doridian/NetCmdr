@@ -6,6 +6,7 @@ members = [
     "crates/b070-session",
     "crates/b070-bridge",
     "crates/b070-ui",
+    "crates/b070-web",
     "crates/b070-cli",
     "crates/b070-view",
 ]

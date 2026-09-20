@@ -127,6 +127,8 @@ pub struct Viewer<S: SessionLink, M: MgmtLink> {
     quitting: bool,
     /// What the last frame's menu asked for, acted on after the pass.
     actions: Vec<Action>,
+    /// Why the session ended, once it has.
+    end_reason: Option<String>,
     /// Cached from the last frame so input routing needs no egui context.
     ui_wants_keyboard: bool,
     pixels_per_point: f32,
@@ -155,6 +157,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             sized_once: false,
             quitting: false,
             actions: Vec::new(),
+            end_reason: None,
             ui_wants_keyboard: false,
             pixels_per_point: 1.0,
         }
@@ -186,6 +189,20 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
     fn failed(&mut self, what: &str, e: impl std::fmt::Display) {
         tracing::warn!(error = %e, "{what} failed");
         self.note(format!("{what} failed: {e}"));
+    }
+
+    /// Why the session ended, if it has. The device gives a reason for most of
+    /// the ways a session can stop, and it is the only explanation a user gets.
+    pub fn end_reason(&self) -> Option<&str> {
+        self.end_reason.as_deref()
+    }
+
+    /// The session underneath.
+    ///
+    /// The web client drives its own session state machine and needs to pump
+    /// it once a frame; natively a thread does that and this goes unused.
+    pub fn session_mut(&mut self) -> &mut S {
+        &mut self.session
     }
 
     /// What the window should be called.
@@ -464,6 +481,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                 Event::ConfigXml(xml) => self.on_config(&xml, host),
                 Event::Disconnected(reason) => {
                     tracing::info!(%reason, "session ended");
+                    self.end_reason = Some(reason);
                     return false;
                 }
             }
@@ -568,6 +586,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             }
         }
 
+        self.menu.resizable = host.resizable();
         let actions = self.menu.show(ui);
         self.actions.extend(actions);
         self.video_rect = draw_screen(ui, &self.screen, self.menu.scaling, waiting.as_ref());

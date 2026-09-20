@@ -15,9 +15,10 @@ Verified against real hardware (a B070-008-19-IP on firmware **2.2.1258.1.0**).
 - **The KVM session works end to end.** `b070-view` opens a window on a target's
   screen with keyboard and mouse passed through: live video decoded from the
   device's own LZW + tile codec, verified against hardware.
-- **A browser can reach the device.** `b070-bridge` terminates the device's
-  un-negotiable TLS and relays both the management API and the session sockets
-  over WebSockets. The web client that will use it is next.
+- **The viewer runs in a browser.** `b070-bridge` terminates the device's
+  un-negotiable TLS and relays for `b070-web`, which is the same viewer
+  compiled to WebAssembly — the device's LZW video decoded in the browser and
+  drawn by the same code the desktop window uses.
 
 Virtual media (the session's fourth channel) is not implemented.
 
@@ -231,6 +232,38 @@ happened, longer for work still running, which each progress report renews. The
 device never says an auto-adjust or a calibration has finished, so the bar times
 those out rather than sitting on the last thing it was told.
 
+### `b070-web` — the viewer in a browser
+
+```sh
+tools/build-web.sh                                     # build into crates/b070-web/dist
+b070-bridge --host 192.0.2.10 --static-dir crates/b070-web/dist
+```
+
+Then open <http://127.0.0.1:8080>, and log in with the same credentials the
+desktop client takes. Everything is the same viewer: the menu bar, the target
+switch, the manual video adjustment and the noise meter are `b070-ui`, compiled
+once for the desktop and once for WebAssembly. The device's LZW and tile codec
+is decoded in the browser, from the bytes the device itself sent — the bridge
+re-encodes nothing.
+
+Building it needs the `wasm32-unknown-unknown` target and a `wasm-bindgen` that
+matches the `wasm-bindgen` crate in `Cargo.lock`; the script says so, with the
+version, if it is missing.
+
+Two things a browser does differently, both of them the keyboard's fault:
+
+- **Keys are read from `KeyboardEvent.code`, not from egui.** `egui::Key` cannot
+  name 25 of this device's 106 keys — the whole numeric keypad, all three lock
+  keys, Print Screen, Pause, Context Menu and Meta — and the keyboard channel's
+  modifier word carries the lock states explicitly. So the page listens for keys
+  itself, in the capture phase, ahead of the framework.
+- **Some combinations cannot be taken from the browser.** Ctrl+W, Ctrl+T, Ctrl+N
+  and F11 stay the browser's whatever a page asks. They are on the Keyboard
+  menu, which is where a desktop window manager's claims are handled too.
+
+`b070-web` compiles to nothing on a desktop target, so `cargo test --workspace`,
+clippy and rustfmt still cover the repository in one pass.
+
 ### `b070-bridge` — the web bridge
 
 ```sh
@@ -285,9 +318,7 @@ All of this has been run against a live device: a management login, the TLS
 command channel answering with its `CONFIG_XML`, and video decoding to the same
 picture the native viewer produces.
 
-The web client this exists to serve is not written yet. The bridge is the piece
-that had to come first, because it is what makes a browser client possible at
-all.
+The client it serves is [`b070-web`](#b070-web--the-viewer-in-a-browser).
 
 ## Protocols
 
@@ -339,6 +370,8 @@ crates/
                  over `b070-ui` (winit + egui on OpenGL)
   b070-bridge/   the `b070-bridge` WebSocket and HTTPS bridge, so a browser can
                  speak a protocol its TLS stack cannot
+  b070-web/      the browser client: WebSockets, `fetch` and raw DOM keys,
+                 over `b070-ui` (eframe on WebGL)
 research/        the protocol write-up, provenance for the vendor material it
                  was derived from, and the live fixtures the tests parse
 ```
@@ -378,14 +411,12 @@ B072-032-IP2, and the Minicom Smart 108/116 IP originals.
 
 ## Next steps
 
-1. The web client: `b070-bridge` serves it and relays the protocol for it, but
-   the WebAssembly build of the viewer itself is still to come.
-2. Virtual media: the fourth channel is USB-over-IP with a SCSI command handler.
-3. Exercise the YCbCr and palette video paths. The live device sends RGB555
+1. Virtual media: the fourth channel is USB-over-IP with a SCSI command handler.
+2. Exercise the YCbCr and palette video paths. The live device sends RGB555
    (`ALX_PACK_16`) with LZW; the other formats are ported from the vendor's
    client and unit-tested, but no hardware has produced one yet.
-4. Serial passthrough (`OPEN_TTY_SESSION` on the command channel).
-5. Cascade configuration — the `switch`/`switch_id`/`switch_ports` fields that
+3. Serial passthrough (`OPEN_TTY_SESSION` on the command channel).
+4. Cascade configuration — the `switch`/`switch_id`/`switch_ports` fields that
    describe an analog KVM hanging off a port. The live unit has no cascade and
    answers the `switch` document with nothing, so there is nothing to verify
    against.

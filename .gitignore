@@ -1,5 +1,8 @@
 /target
 
+# The built web client; `tools/build-web.sh` regenerates it.
+/crates/b070-web/dist/
+
 # Vendor material — firmware images, client JARs and native libraries,
 # decompiled or disassembled output, manuals, datasheets, device certificates.
 # All of it is copyrighted and none of it is redistributed from this repo; it
