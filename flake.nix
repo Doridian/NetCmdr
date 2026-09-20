@@ -204,7 +204,7 @@
         };
 
         # The bridge, with the client above baked into it. The build script
-        # reads $netcmdr_WEB_DIST, so the binary is the whole service: there is
+        # reads $NETCMDR_WEB_DIST, so the binary is the whole service: there is
         # nothing to deploy, mount or point it at beside the executable.
         bridge = pkgs.rustPlatform.buildRustPackage {
           pname = "netcmdr-bridge";
@@ -219,7 +219,7 @@
             "netcmdr-bridge"
           ];
 
-          env.netcmdr_WEB_DIST = "${web}";
+          env.NETCMDR_WEB_DIST = "${web}";
 
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.openssl ];
