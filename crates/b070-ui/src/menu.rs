@@ -140,10 +140,27 @@ pub const NOTE_LINGER: Duration = Duration::from_secs(4);
 /// run that goes quiet — the vendor's own protocol has no "done" message.
 pub const WORKING_LINGER: Duration = Duration::from_secs(10);
 
+/// Work a note is waiting on, where the device's answer can be recognised.
+///
+/// The vendor's protocol has no "done" message, but some work is answered by
+/// something else arriving, and a line that has been answered should come down
+/// then rather than sit out the rest of its linger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Work {
+    /// A target change, ended by the device reporting the target it is on.
+    Switch,
+    /// An automatic adjustment, ended by the fresh capture settings it sends.
+    VideoAdjust,
+    /// A full repaint, ended by the next picture that arrives.
+    Repaint,
+}
+
 /// A line in the bar, and when it stops being shown.
 struct Note {
     text: String,
     until: Instant,
+    /// What would take this line down before its time, if anything can.
+    work: Option<Work>,
 }
 
 /// The menu bar and its state.
@@ -260,7 +277,47 @@ impl Menu {
         self.note = Some(Note {
             text: text.into(),
             until: Instant::now() + linger,
+            work: None,
         });
+    }
+
+    /// Put a line in the bar for work whose end can be recognised.
+    ///
+    /// See [`Menu::work_done`], which is what takes it down early.
+    pub fn note_work(&mut self, text: impl Into<String>, linger: Duration, work: Work) {
+        self.note = Some(Note {
+            text: text.into(),
+            until: Instant::now() + linger,
+            work: Some(work),
+        });
+    }
+
+    /// Re-word the note and give it its time again, without changing what it
+    /// is waiting on.
+    ///
+    /// This is for progress the device sends about work already announced: the
+    /// words are its own, but the line is still the one that was put up when
+    /// the work started.
+    pub fn renew_note(&mut self, text: impl Into<String>, linger: Duration) {
+        let work = self.note.as_ref().and_then(|n| n.work);
+        self.note = Some(Note {
+            text: text.into(),
+            until: Instant::now() + linger,
+            work,
+        });
+    }
+
+    /// Take the note down if it was waiting on `work`; true if the bar changed.
+    ///
+    /// Whatever the user has done since has replaced the line, and untagged
+    /// lines are about something else entirely — neither is this work's to
+    /// take down.
+    pub fn work_done(&mut self, work: Work) -> bool {
+        let done = self.note.as_ref().is_some_and(|n| n.work == Some(work));
+        if done {
+            self.note = None;
+        }
+        done
     }
 
     /// Take the note down now, for a caller that knows it has stopped being
@@ -1073,6 +1130,47 @@ mod tests {
         m.note("adjusting video…", WORKING_LINGER);
         assert!(!m.expire_note());
         assert!(m.note.is_some());
+    }
+
+    /// A line about work the device answers comes down on the answer, and only
+    /// on its own answer.
+    #[test]
+    fn the_answer_to_a_piece_of_work_takes_its_line_down() {
+        let mut m = menu();
+        m.note_work("adjusting video…", WORKING_LINGER, Work::VideoAdjust);
+        assert!(!m.work_done(Work::Switch), "not this line's answer");
+        assert!(m.note.is_some());
+        assert!(m.work_done(Work::VideoAdjust), "the bar changed");
+        assert!(m.note.is_none());
+        assert!(!m.work_done(Work::VideoAdjust), "nothing left to take down");
+
+        // An untagged line is about something else, and nothing the device
+        // answers gets to clear it.
+        m.note("released held keys", NOTE_LINGER);
+        assert!(!m.work_done(Work::VideoAdjust));
+        assert!(m.note.is_some());
+    }
+
+    /// Progress from the device re-words the line without costing the work its
+    /// ending; anything the user does next replaces the line outright.
+    #[test]
+    fn progress_keeps_what_the_line_is_waiting_on() {
+        let mut m = menu();
+        m.note_work("adjusting video…", WORKING_LINGER, Work::VideoAdjust);
+        m.renew_note("video adjust: phase", WORKING_LINGER);
+        assert_eq!(
+            m.note.as_ref().map(|n| n.text.as_str()),
+            Some("video adjust: phase")
+        );
+        assert!(
+            m.work_done(Work::VideoAdjust),
+            "still the adjustment's line"
+        );
+
+        m.note_work("adjusting video…", WORKING_LINGER, Work::VideoAdjust);
+        m.note("sent Ctrl+Alt+Delete", NOTE_LINGER);
+        assert!(!m.work_done(Work::VideoAdjust), "the bar has moved on");
+        assert!(m.note.is_some(), "and that line is left alone");
     }
 
     #[test]

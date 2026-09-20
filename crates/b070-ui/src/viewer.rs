@@ -19,7 +19,7 @@ use b070_session::{Event, Input, Modifiers, MouseButton};
 
 use crate::key::PhysicalKey;
 use crate::macros::{self, KeyMacro};
-use crate::menu::{Action, Menu, Scaling, NOTE_LINGER, WORKING_LINGER};
+use crate::menu::{Action, Menu, Scaling, Work, NOTE_LINGER, WORKING_LINGER};
 use crate::platform::{Host, MgmtLink, MgmtReply, SessionLink};
 use crate::screen::Screen;
 
@@ -185,6 +185,23 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         self.dirty = true;
     }
 
+    /// The same, for work whose end we *can* recognise: the line comes down
+    /// when [`Menu::work_done`] is told that answer arrived, and the linger is
+    /// only the backstop for an answer that never comes.
+    fn working_on(&mut self, text: impl Into<String>, work: Work) {
+        self.menu.note_work(text, WORKING_LINGER, work);
+        self.dirty = true;
+    }
+
+    /// Progress in the device's own words, about work already announced.
+    ///
+    /// Unlike [`Viewer::working`] this keeps whatever the line was waiting on,
+    /// so a report mid-adjustment does not cost the adjustment its ending.
+    fn progress(&mut self, text: impl Into<String>) {
+        self.menu.renew_note(text, WORKING_LINGER);
+        self.dirty = true;
+    }
+
     /// Report a command that failed, without taking the session down with it.
     fn failed(&mut self, what: &str, e: impl std::fmt::Display) {
         tracing::warn!(error = %e, "{what} failed");
@@ -246,30 +263,33 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             }
 
             Action::RefreshVideo => match self.session.refresh_screen() {
-                Ok(()) => self.working("refreshing…"),
+                Ok(()) => self.working_on("refreshing…", Work::Repaint),
                 Err(e) => self.failed("refresh", e),
             },
             Action::AutoAdjustVideo => match self.session.auto_adjust_video() {
-                Ok(()) => self.working("adjusting video…"),
+                Ok(()) => self.working_on("adjusting video…", Work::VideoAdjust),
                 Err(e) => self.failed("auto adjust", e),
             },
             Action::StopAutoAdjust => match self.session.stop_auto_adjust() {
                 Ok(()) => self.note("stopped adjusting"),
                 Err(e) => self.failed("stop adjusting", e),
             },
+            // The control that sent this is on screen showing the value, and
+            // the picture answers for itself, so a note would only read the
+            // knob back. Say something only when the device refuses.
             Action::SetVideoNumber(setting, value) => {
-                match self.session.set_video_number(setting, value) {
-                    Ok(()) => self.note(format!("{} = {value}", setting.as_str())),
-                    Err(e) => self.failed(setting.as_str(), e),
+                if let Err(e) = self.session.set_video_number(setting, value) {
+                    self.failed(setting.as_str(), e);
                 }
             }
             Action::SetVideoFilter(filter) => match self.session.set_video_filter(filter) {
                 // Picking `auto` runs the adjustment rather than setting
-                // anything, so say what actually happened.
+                // anything: that is work with no visible start, so it is worth
+                // a line where an ordinary filter change is not.
                 Ok(()) if filter == b070_proto::command::VideoFilter::Auto => {
-                    self.working("adjusting video…")
+                    self.working_on("adjusting video…", Work::VideoAdjust)
                 }
-                Ok(()) => self.note(format!("filter = {}", filter.as_str())),
+                Ok(()) => {}
                 Err(e) => self.failed("filter", e),
             },
             Action::SetScaling(mode) => {
@@ -306,7 +326,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                         name: name.clone(),
                         since: Instant::now(),
                     });
-                    self.working(format!("switching to {name}…"));
+                    self.working_on(format!("switching to {name}…"), Work::Switch);
                 }
                 Err(e) => self.failed("switch target", e),
             },
@@ -399,9 +419,10 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
     fn finish_switch(&mut self) {
         if self.switching.take().is_some() {
             self.menu.switching = false;
-            // "switching to X…" has stopped being true; whatever happens next
-            // writes its own note.
-            self.menu.clear_note();
+            // "switching to X…" has stopped being true, whether the device
+            // confirmed it or the wait ran out. Anything the user has done
+            // since owns the bar instead, so only that line is taken down.
+            self.menu.work_done(Work::Switch);
             self.screen.blank();
             self.dirty = true;
         }
@@ -440,6 +461,8 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                     if self.switching.is_none() {
                         self.no_signal = false;
                         self.screen.mark(rect);
+                        // A picture arriving is all the answer a refresh gets.
+                        self.menu.work_done(Work::Repaint);
                         self.dirty = true;
                     }
                 }
@@ -475,7 +498,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                 }
                 Event::Gui(msg) if !msg.is_empty() => {
                     tracing::info!(%msg, "device message");
-                    self.working(msg);
+                    self.progress(msg);
                 }
                 Event::Gui(_) => {}
                 Event::ConfigXml(xml) => self.on_config(&xml, host),
@@ -498,6 +521,10 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         // here supersedes anything the adjustment window has been told.
         if let Some(video) = b070_session::parse_video_settings(xml) {
             self.menu.video = Some(video);
+            // Which makes this document the automatic adjustment's answer —
+            // the protocol has no "done" message, and this is the only thing
+            // that arrives when one finishes.
+            self.menu.work_done(Work::VideoAdjust);
             self.dirty = true;
         }
 
@@ -567,6 +594,12 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         {
             tracing::warn!("target switch was never confirmed; showing video again");
             self.finish_switch();
+        }
+        // Nothing else drives a note off the bar: a session that goes quiet
+        // draws no frames and answers nothing, and the line would otherwise
+        // sit there until something unrelated replaced it.
+        if self.menu.expire_note() {
+            self.dirty = true;
         }
         true
     }
