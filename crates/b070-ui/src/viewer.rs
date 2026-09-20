@@ -121,6 +121,14 @@ pub struct Viewer<S: SessionLink, M: MgmtLink> {
     /// settings, and nothing announces that they have gone — so this is what
     /// lets the bar say so when it happens.
     aligned: Option<String>,
+    /// Config documents still expected as answers to this client's own stored
+    /// writes.
+    ///
+    /// The device publishes one after every write it keeps, and publishing one
+    /// is otherwise how it announces that it has re-derived the capture for
+    /// itself — which is the thing that throws a session's corrections away.
+    /// Counting our own keeps the one from being read as the other.
+    own_config: u32,
 
     /// A target change asked for but not yet confirmed by the device.
     switching: Option<Switch>,
@@ -159,6 +167,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             screen: Screen::new(),
             align: None,
             aligned: None,
+            own_config: 0,
             remote: None,
             video_rect: egui::Rect::NOTHING,
             pointer_over_video: false,
@@ -293,6 +302,20 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             Action::SetVideoNumber(setting, value) => {
                 if let Err(e) = self.session.set_video_number(setting, value) {
                     self.failed(setting.as_str(), e);
+                }
+            }
+            Action::StoreVideoNumbers(changes) => {
+                let Some(video) = self.menu.video.clone() else {
+                    self.note("the device has not reported its capture settings yet");
+                    return;
+                };
+                self.expect_own_config();
+                match self.session.store_video_settings(&video, &changes) {
+                    // The device answers a stored write with a fresh config and
+                    // an overlay with silence, so there is nothing to say yet:
+                    // `on_config` is where this is either confirmed or not.
+                    Ok(()) => self.working_on("saving to the device…", Work::VideoAdjust),
+                    Err(e) => self.failed("save", e),
                 }
             }
             Action::SetVideoFilter(filter) => match self.session.set_video_filter(filter) {
@@ -496,8 +519,9 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         let Some(mut aligner) = self.align.take() else {
             return;
         };
-        // The device's own view of the knobs, which is always its defaults:
-        // it never folds a client's sets back into the config it publishes.
+        // The device's own view of the knobs, which is what it has stored: it
+        // never folds a session set back into the config it publishes. It is
+        // also where a stored write takes its gains from.
         let Some(video) = self.menu.video.clone() else {
             self.note("the device stopped reporting its capture settings");
             return;
@@ -521,10 +545,11 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                     aligner.abort(format!("could not set {}: {e}", setting.as_str()));
                 }
             }
-            AlignStep::AutoAdjust => {
-                self.progress("restoring the device's own setting…");
-                if let Err(e) = self.session.auto_adjust_video() {
-                    aligner.abort(format!("could not restore the device's setting: {e}"));
+            AlignStep::Store(changes) => {
+                self.progress("saving the capture position…");
+                self.expect_own_config();
+                if let Err(e) = self.session.store_video_settings(&video, &changes) {
+                    aligner.abort(format!("could not save the capture position: {e}"));
                 }
             }
             AlignStep::Wait => {}
@@ -548,6 +573,11 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         // so it has to ask for the repaints that keep it being polled.
         self.dirty = true;
         self.align = Some(aligner);
+    }
+
+    /// A stored write is going out; the config document it draws back is ours.
+    fn expect_own_config(&mut self) {
+        self.own_config += 1;
     }
 
     /// The device has re-derived its own capture settings, so any correction
@@ -656,13 +686,20 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             // the protocol has no "done" message, and this is the only thing
             // that arrives when one finishes.
             self.menu.work_done(Work::VideoAdjust);
-            // An alignment asks for that adjustment itself, to reach the one
-            // value a session cannot set; this is what ends its wait.
-            match &mut self.align {
-                Some(aligner) => aligner.config_arrived(),
+            // A document answering this client's own stored write is not the
+            // device having second thoughts about the capture — it is the
+            // acknowledgement that the write landed.
+            if self.own_config > 0 {
+                self.own_config -= 1;
+                // An alignment writes as part of its run and has its own
+                // progress line; saying this over it would only flicker.
+                if self.align.is_none() {
+                    self.note("saved to the device");
+                }
+            } else {
                 // Otherwise the device re-derived the offsets on its own
-                // account, which puts them back to its table's figures.
-                None => self.align_lost("the device re-adjusted its capture"),
+                // account, and whatever this session had set is gone with them.
+                self.align_lost("the device re-adjusted its capture");
             }
             self.dirty = true;
         }
@@ -1016,6 +1053,8 @@ mod tests {
         events: Vec<Event>,
         sets: Vec<(VideoSetting, i32)>,
         auto_adjusts: u32,
+        /// Every stored write, as the knobs it carried.
+        stores: Vec<Vec<(VideoSetting, i32)>>,
     }
 
     impl FakeSession {
@@ -1067,6 +1106,14 @@ mod tests {
         }
         fn set_video_number(&mut self, setting: VideoSetting, value: i32) -> Result<(), Error> {
             self.sets.push((setting, value));
+            Ok(())
+        }
+        fn store_video_settings(
+            &mut self,
+            _: &b070_session::VideoSettings,
+            changes: &[(VideoSetting, i32)],
+        ) -> Result<(), Error> {
+            self.stores.push(changes.to_vec());
             Ok(())
         }
         fn set_video_filter(&mut self, _: VideoFilter) -> Result<(), Error> {
@@ -1150,8 +1197,8 @@ mod tests {
         );
     }
 
-    /// The device answers its own adjustment with a config document, and an
-    /// alignment asks for that adjustment itself — so while one is running the
+    /// The device answers a stored write with a config document, and an
+    /// alignment writes as part of its run — so while one is running the
     /// document is its answer and not news of a correction being lost.
     #[test]
     fn a_config_mid_run_belongs_to_the_run() {
@@ -1164,6 +1211,29 @@ mod tests {
         assert!(
             v.aligned.is_some(),
             "the run is not news of its own undoing"
+        );
+    }
+
+    /// The same document answers a save made from the adjustment window, and
+    /// that one is not news of anything being lost either.
+    #[test]
+    fn a_config_answering_a_save_is_not_a_correction_lost() {
+        let mut v = viewer(FakeSession::with_picture());
+        v.on_config(VIDEO_XML, &FakeHost);
+        v.aligned = Some("hoffset 368 → 364".into());
+
+        v.act(
+            Action::StoreVideoNumbers(vec![(VideoSetting::HOffset, 364)]),
+            &FakeHost,
+        );
+        assert_eq!(v.session.stores, vec![vec![(VideoSetting::HOffset, 364)]]);
+
+        v.on_config(VIDEO_XML, &FakeHost);
+        assert!(v.aligned.is_some(), "nothing was lost; it was saved");
+        assert!(
+            v.menu.note_text().is_some_and(|n| n.contains("saved")),
+            "the bar says so: {:?}",
+            v.menu.note_text()
         );
     }
 
@@ -1182,7 +1252,7 @@ mod tests {
     }
 
     /// A mode change invalidates every measurement, and the capture is left on
-    /// a probe value — so the abort hands it back to the device.
+    /// a probe value — so the abort writes it back.
     #[test]
     fn a_mode_change_abandons_a_run_and_restores_the_capture() {
         let mut v = viewer(FakeSession::with_picture());
@@ -1197,7 +1267,11 @@ mod tests {
             height: 768,
         });
         v.poll(&FakeHost);
-        assert_eq!(v.session.auto_adjusts, 1, "the probe was handed back");
+        assert_eq!(
+            v.session.stores,
+            vec![vec![(VideoSetting::HOffset, 368)]],
+            "the probe was written back"
+        );
 
         v.poll(&FakeHost);
         assert!(v.align.is_none(), "the run is over");
@@ -1228,7 +1302,11 @@ mod tests {
             &FakeHost,
         );
         v.poll(&FakeHost);
-        assert_eq!(v.session.auto_adjusts, 1, "the probe was handed back");
+        assert_eq!(
+            v.session.stores,
+            vec![vec![(VideoSetting::HOffset, 368)]],
+            "the probe was written back"
+        );
 
         v.poll(&FakeHost);
         assert!(v.align.is_none());

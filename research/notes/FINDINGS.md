@@ -609,9 +609,9 @@ session survives its 30-second heartbeat.
 a few pixels off horizontally until adjusted. `CmdFlag::GENERAL` + `Cmd` 64
 (`VIDEO_AUTO`) starts the device's own auto-adjust, 65 stops it, and progress
 comes back as `RAW_DATA` + `Cmd` 19 with an `RPMAutoAdjStruct` (two i16s then a
-64-byte status string). What that adjustment does and does not fix — it
-re-derives the phase but *reverts* the capture position — is measured under
-"Analog capture position" below.
+64-byte status string). What it fixes — the phase, and the
+capture position too, as long as no client set is outstanding when it runs — is
+measured under "Analog capture position" below.
 
 **The "noise" meter is computed client-side from a wire field.** The stock
 client's Advanced Video dialog shows a "Noise / Level" progress bar, and nothing
@@ -691,17 +691,29 @@ One probe and one addition, not a search. Every probe point tried agrees:
 **A set whose value equals the device's own default is silently dropped.** Four
 reproductions across both axes, and six spellings of the number (`0368`, ` 368`,
 `368.0`, `+368`, `368 `) — so the filter is numeric and device-side. The device
-compares against its *stored* config, which a client's sets never update, so the
-default value is unreachable for the rest of the session and the config document
-keeps reporting the default no matter what has been set.
+compares against its *stored* config, which an overlay set does not update, so
+the default value is unreachable for the rest of the session and the config
+document keeps reporting the stored figure no matter what has been set. A write
+that carries both gains (below) updates the stored figure itself and so has no
+unreachable value.
 
-**The automatic adjustment reverts both offsets to the stored default.** It does
-not leave them alone, which is what §5.4.1's earlier note and the README both
-said: that observation came from a session in which nothing had been moved. It
-also re-derives the phase and **persists** it — it moved port 2's `phase` from
-16 to 20, and that survived new logins. It takes ~6.5 s, sends no `gui` progress
-at all, and its only signal is a single `CONFIG_XML`. So it is simultaneously
-the thing that undoes a correction and the only route back to a default value.
+**The automatic adjustment measures the capture position correctly — but only
+from a clean session.** Run with no client set outstanding, it finds the same
+`hoffset` this section measures by hand and writes it to the stored table:
+368 → **364** on target 1, with `phase` 4 → 8, and a fresh login reads it back.
+Run a second time from 380 it lands on 364 again, so it converges rather than
+drifting. It takes ~6.5 s, sends no `gui` progress at all, and its only signal
+is a single `CONFIG_XML` — which is also the acknowledgement that something was
+stored.
+
+**A client set outstanding poisons it.** With `hoffset` overlaid at 352 — a
+value confirmed at the picture — the adjustment produced **380** and stored
+that. The device measures against the capture window the overlay moved but
+corrects against its own stored figure, and the two errors add. This is the
+confound behind the earlier reading of this section, which had it *reverting*
+offsets to the table: every one of those runs followed a manual set in the same
+session. **Anything driving these knobs must let the session's overlay go — by
+reconnecting — before asking for an adjustment.**
 
 **A set reaches the picture in 0.5–1.6 s**, variably. Anything driving these
 knobs has to watch the framebuffer rather than sleep a fixed amount.
@@ -713,55 +725,81 @@ only be *range-checked*, not validated: on port 2, whose console leaves the top
 of the screen empty, the vertical probe read 41 blank rows and produced 64 — past
 `voffset_max` of 31, and refused on that ground alone.
 
-**Corrections die on logout and on a target switch**, the latter because the
-device re-announces its defaults along with the new port's config.
+**Overlay corrections die on logout and on a target switch**, the latter
+because the device re-announces its stored figures along with the new port's
+config. A committed write (below) survives both.
 
-#### Nothing on the session channel makes a setting stick — HARDWARE-TESTED (2026-09-20)
+#### What makes a video setting stick — HARDWARE-TESTED (2026-09-20)
 
-The device's own automatic adjustment writes its result into the stored config
-(it moved a target's `phase` permanently), so a path from a session to the
-stored video-mode table exists. **No command a client can send takes it.** The
-vendor's vocabulary has no save, and the signals that look like one are not:
+A `<video_settings>` write is committed to the device's stored config **exactly
+when the element carries both `brightness` and `contrast`.** Anything else is a
+session overlay: it reaches the picture, it is forgotten at logout, and the
+config document keeps reporting the stored value.
 
-| Sent while the knob held a value known to have reached the picture | Stored value afterwards |
-|---|---|
-| nothing (control) | unchanged |
-| `CmdFlag::General` + `Cmd::VideoStopAdjust` (65) | unchanged |
-| `<video_settings manual_adjust_dlg='open'/>` … `<command name='gui' active='false'/>` | unchanged |
-| `<video_settings manual_adjust_dlg='open'/>` … `<video_settings manual_adjust_dlg='close'/>` | unchanged |
-| all three of the above together | unchanged |
-| `<command name='disconnect'/>` | unchanged |
+The device says which it did. A committed write is answered with a fresh
+`CONFIG_XML` push carrying the new value; an overlay draws no response at all.
+That push is the only acknowledgement there is, and it is worth waiting for.
 
-Method: log in, set `hoffset` to 352 and confirm the picture answers with
-exactly the 12 blank columns the measurement predicts, set it to 364, send one
-candidate signal, drop the session, log in again and read `<video_settings>`.
-Target 1 (1360×768@60, stored `hoffset` 368), firmware 2.2.1258.1.0. Every set
-was confirmed at the picture first, so these are real negatives rather than
-sets the device dropped.
+Measured by writing an `hoffset` one unit at a time, dropping the session and
+reading `<video_settings>` back on a fresh login (target 1, 1360×768@60,
+firmware 2.2.1258.1.0):
 
-Two details worth keeping:
+| `<config><video_settings .../></config>` sent | Pushed back | Survives a new login |
+|---|---|---|
+| every attribute the device itself reports | yes | **yes** |
+| `brightness contrast voffset hoffset phase filter` | yes | **yes** |
+| `brightness contrast voffset hoffset phase` | yes | **yes** |
+| `brightness contrast hoffset` | yes | **yes** |
+| `brightness hoffset` | no | no |
+| `voffset hoffset phase` | no | no |
+| `hoffset phase` | no | no |
+| `cx cy fq hoffset` (the mode, named) | no | no |
+| `hoffset` alone | no | no |
 
-- **Only the `disconnect` drew any response at all.** The device honoured it
-  and closed the connection; the other five it accepted and ignored in
-  silence. So 65 is what its provenance says it is — the `state='end'` half of
-  `auto_video_adjust`, which aborts a *running* adjustment — and not a commit.
-  `manual_adjust_dlg` and `gui active` likewise only gate what the stock client
-  draws.
-- **`brightness` behaves exactly like the two offsets**: set 49 → 30, the
-  measured black level moved 11 → 0, and the next login read 49 again. The
-  session overlay covers the whole `<video_settings>` element, not just the two
-  knobs with the drop-if-equal-to-default filter. Client sets have no route
-  into the stored table for *any* knob.
+So it is not the whole document, not the mode identity, and not the number of
+attributes — it is those two gain knobs. Presumably the firmware parses the
+element into a fixed record and treats a missing gain as "this is not a
+configuration".
 
-The remaining candidate is the config backup, and it is behind a key: the blob
-is OpenSSL salted-base64 ciphertext (§5.2.3), so reading the stored video table
-out of it means recovering the passphrase from firmware. Until then, a
-correction is per session and a client that wants it back has to re-apply it —
-which is what the viewer does.
+**This is what the stock client does, and why it was missed.** Its Advanced
+Video dialog applies each slider live through `AdvancedVideoCmd`, which sends
+one attribute — the overlay path, which is what was reverse-engineered. Its
+**OK** button goes somewhere else entirely:
+`AdvancedVideoDlg.saveData()` → `FetchDataWorker.saveConfiguration(XVideoSettings)`
+→ `sendXConfigToDevice()`, which re-serialises the *entire* `XConfig` it fetched
+at open — servers, performance, video settings, mouse settings, macros, device —
+as `<commands><command name='config'><config>…</config></command></commands>`.
+Both gains ride along in it, so OK commits. Cancel simply never sends it.
+
+`ConfigModel.getConfig()` is where that document comes from: the client keeps
+the last `<client_config>` the device pushed, renamed to `<config>`, and hands a
+copy of it to the dialog. A client that wants to write one knob should do the
+same — take the pushed config, change the attribute, send the element back with
+`brightness` and `contrast` on it.
+
+An earlier round of this experiment concluded the opposite — that nothing a
+client can send reaches the stored table — because every candidate it tried was
+a *signal* sent alongside a one-attribute set (`Cmd::VideoStopAdjust` 65, the
+`manual_adjust_dlg='open'`/`gui active='false'` bracket, its symmetric
+`manual_adjust_dlg='close'`, a graceful `disconnect`). None of those is a
+commit, and that part stands: 65 is the `state='end'` half of
+`auto_video_adjust`, which aborts a running adjustment, and `manual_adjust_dlg`
+and `gui active` only gate what the stock client draws. The commit was never in
+the signal; it was in the element.
+
+The config backup (§5.2.3) is therefore no longer the only route to the stored
+table, and does not need its passphrase recovered to correct a capture position.
 
 `crates/b070-session/src/align.rs` implements the measurement and the state
 machine that drives it; `b070-view --align` and the viewer's *Video → Re-align
-capture* are the two front ends.
+capture* are the two front ends. A run probes with session sets and ends in one
+stored write carrying every axis it touched — the answer where it has one, the
+figure the device started with where it does not — so a correction outlives the
+session and an abandoned run cannot leave a probe behind. Verified against the
+rig on 2026-09-20: from a deliberately wrong stored 372/20 on target 1, a
+verified run wrote 364/25, and a fresh login read them back.
+`Session::store_video_settings` is the write; the viewer's *Save to device*
+in the manual adjustment window is the same thing by hand.
 
 #### 5.4.2 `ITCMsg` / `CommIO` — LEGACY (2013 firmware, superseded)
 

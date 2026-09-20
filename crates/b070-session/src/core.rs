@@ -210,10 +210,11 @@ impl Knob {
 ///
 /// The device pushes these as `<video_settings …/>` inside the client config,
 /// at login and again whenever it has re-derived them — after an auto-adjust,
-/// or after the target changes video mode. They are *per session*: a value set
-/// through [`Session::set_video_setting`] applies at once but is gone on the
-/// next login, which is why the device's own defaults are what a fresh session
-/// starts from.
+/// after a stored write, or after the target changes video mode. They are what
+/// the device has *stored*: a value set through [`Session::set_video_setting`]
+/// applies to the picture at once but never appears here and is gone at the
+/// next login, where one written through [`VideoSettings::stored_write`] both
+/// appears here and survives.
 ///
 /// Mirrors `com.minicom.app.video.data.xml.cfg.XVideoSettings`, minus the
 /// `scale` and `blacklevel` fields, which that class carries but the vendor's
@@ -235,6 +236,40 @@ pub struct VideoSettings {
     /// this one; the vendor's dialog fixes it at 0–31.
     pub phase: Knob,
     pub filter: VideoFilter,
+}
+
+impl VideoSettings {
+    /// Build the `<video_settings>` element the device *stores*, from these
+    /// settings plus the caller's changes.
+    ///
+    /// The device commits the element only when it carries both gains (see
+    /// [`b070_proto::command::store_video_settings`]), so this puts them in —
+    /// taken from the device's own last report, so a caller that only wants to
+    /// move a capture offset does not have to know about the rule, and cannot
+    /// change a gain by accident.
+    pub fn stored_write(&self, changes: &[(VideoSetting, i32)]) -> String {
+        let mut values: Vec<(VideoSetting, String)> = vec![
+            (VideoSetting::Brightness, self.brightness.value.to_string()),
+            (VideoSetting::Contrast, self.contrast.value.to_string()),
+        ];
+        // The filter rides along the way it does in the vendor's own document,
+        // so that a write meant to last does not quietly drop it back to what
+        // the device had. `Auto` is the exception, because it is not a value:
+        // it is a request to run the adjustment, and storing it is not a thing
+        // the device can do.
+        if self.filter != VideoFilter::Auto {
+            values.push((VideoSetting::Filter, self.filter.as_str().to_string()));
+        }
+        for (setting, value) in changes {
+            match values.iter_mut().find(|(s, _)| s == setting) {
+                Some(slot) => slot.1 = value.to_string(),
+                None => values.push((*setting, value.to_string())),
+            }
+        }
+        let borrowed: Vec<(VideoSetting, &str)> =
+            values.iter().map(|(s, v)| (*s, v.as_str())).collect();
+        b070_proto::command::store_video_settings(&borrowed)
+    }
 }
 
 /// Pull `<video_settings>` out of a client config document.
@@ -390,6 +425,13 @@ pub mod outbound {
     }
     pub fn set_video_setting(setting: VideoSetting, value: &str) -> Message {
         config_xml(&b070_proto::command::set_video_setting(setting, value))
+    }
+    /// A write the device keeps, from [`VideoSettings::stored_write`].
+    pub fn store_video_settings(
+        current: &VideoSettings,
+        changes: &[(VideoSetting, i32)],
+    ) -> Message {
+        config_xml(&current.stored_write(changes))
     }
     pub fn change_target(name: &str, port: u32) -> Message {
         xml(&b070_proto::command::change_port(name, &port.to_string()))
@@ -721,6 +763,16 @@ impl<T: Transport> SessionCore<T> {
     pub fn set_video_number(&mut self, setting: VideoSetting, value: i32) -> Result<(), Error> {
         self.set_video_setting(setting, &value.to_string())
     }
+    /// Write knobs into the device's stored configuration, where they survive
+    /// the session. `current` is the device's own last report, which supplies
+    /// the two gains the device requires before it will store anything.
+    pub fn store_video_settings(
+        &mut self,
+        current: &VideoSettings,
+        changes: &[(VideoSetting, i32)],
+    ) -> Result<(), Error> {
+        self.send(&outbound::store_video_settings(current, changes))
+    }
     /// [`VideoFilter::Auto`] is not a value the device accepts: the vendor's
     /// client answers that choice by running the automatic adjustment, which
     /// picks a filter itself, and so does this.
@@ -787,6 +839,46 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
         assert_eq!(v.brightness.value, 49);
         assert_eq!(v.contrast.value, 50);
         assert_eq!(v.filter, VideoFilter::Low);
+    }
+
+    /// A stored write is the device's own element with the caller's changes in
+    /// it: both gains, because without them the device only overlays it, and
+    /// the filter, because the vendor's document carries one too.
+    #[test]
+    fn a_stored_write_is_the_devices_element_with_the_change_in_it() {
+        let v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
+        let xml = v.stored_write(&[(VideoSetting::HOffset, 364)]);
+
+        assert_eq!(
+            xml,
+            "<commands><command name='config'><config><video_settings \
+             brightness='49' contrast='50' filter='low' hoffset='364'/>\
+             </config></command></commands>"
+                .replace("             ", "")
+        );
+    }
+
+    /// `auto` is a request to run the adjustment rather than a value, so it is
+    /// the one filter a stored write must not carry.
+    #[test]
+    fn a_stored_write_never_carries_the_automatic_filter() {
+        let mut v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
+        v.filter = VideoFilter::Auto;
+
+        assert!(!v
+            .stored_write(&[(VideoSetting::HOffset, 364)])
+            .contains("filter"));
+    }
+
+    /// A change to a gain replaces it rather than being sent twice, or the
+    /// device would read whichever came last and the element would be a lie.
+    #[test]
+    fn a_stored_write_carries_each_knob_once() {
+        let v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
+        let xml = v.stored_write(&[(VideoSetting::Brightness, 30)]);
+
+        assert!(xml.contains("brightness='30'"), "{xml}");
+        assert_eq!(xml.matches("brightness=").count(), 1, "{xml}");
     }
 
     /// The device reports no range for the phase, and the two it does report

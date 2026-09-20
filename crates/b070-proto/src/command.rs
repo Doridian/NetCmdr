@@ -76,7 +76,8 @@ impl MousePointer {
 /// These are the seven settings behind the stock client's Advanced Video
 /// dialog (`AdvancedVideoCmd`, whose integer constants these mirror). Each is
 /// set on its own, as a single attribute of a `<video_settings>` element —
-/// see [`set_video_setting`].
+/// see [`set_video_setting`] for a set that lasts the session, and
+/// [`store_video_settings`] for one the device keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoSetting {
     Brightness,
@@ -319,17 +320,53 @@ pub fn config(inner: &str) -> String {
     wrap(&s)
 }
 
-/// Set one analog video knob, as a `config` command.
+/// Set one analog video knob for the rest of the session, as a `config`
+/// command.
 ///
 /// One attribute per command is the vendor's own granularity: its Advanced
 /// Video dialog sends a fresh document for every slider release and every
 /// spinner click, rather than the whole `<video_settings>` element.
+///
+/// A write this small is an **overlay**: it reaches the picture, the device
+/// keeps reporting its stored figure, and the next login has forgotten it.
+/// [`store_video_settings`] is the one that lasts.
 pub fn set_video_setting(setting: VideoSetting, value: &str) -> String {
-    config(&format!(
-        "<video_settings {}='{}'/>",
-        setting.as_str(),
-        attr(value)
-    ))
+    video_settings(&[(setting, value)])
+}
+
+/// Write analog video knobs into the device's stored configuration.
+///
+/// The device commits a `<video_settings>` element to its own config — where it
+/// survives the session, a target switch and the next login — **exactly when
+/// the element carries both `brightness` and `contrast`**. Anything else is an
+/// overlay ([`set_video_setting`]). Not the whole document, not the video mode
+/// named, not the number of attributes: those two gains. Hardware-measured, one
+/// attribute set at a time; `research/notes/FINDINGS.md` §5.4 has the table.
+///
+/// This is what the stock client's Advanced Video **OK** button does, by
+/// accident of implementation: `FetchDataWorker.sendXConfigToDevice()` returns
+/// the entire config document it fetched when the dialog opened, gains and all,
+/// while the sliders behind it send one attribute each.
+///
+/// The device answers a committed write with a fresh `CONFIG_XML` push, and an
+/// overlay with nothing at all, so the push is the acknowledgement.
+///
+/// Callers are expected to include [`VideoSetting::Brightness`] and
+/// [`VideoSetting::Contrast`]; without them the device silently treats this as
+/// an overlay. `b070_session::Session::store_video_settings` adds them from the
+/// device's own report so that a caller cannot forget.
+pub fn store_video_settings(values: &[(VideoSetting, &str)]) -> String {
+    video_settings(values)
+}
+
+/// `<config><video_settings …/></config>` with whatever attributes are given.
+fn video_settings(values: &[(VideoSetting, &str)]) -> String {
+    let mut inner = String::from("<video_settings");
+    for (setting, value) in values {
+        let _ = write!(inner, " {}='{}'", setting.as_str(), attr(value));
+    }
+    inner.push_str("/>");
+    config(&inner)
 }
 
 /// Session exclusivity change, expressed as a `config` command.
@@ -398,6 +435,23 @@ mod tests {
             set_video_setting(VideoSetting::HOffset, "364"),
             "<commands><command name='config'><config>\
              <video_settings hoffset='364'/></config></command></commands>"
+        );
+    }
+
+    /// The two gains are what makes the device store the element rather than
+    /// overlay it, so a stored write is not a stored write without them.
+    #[test]
+    fn a_stored_write_carries_both_gains() {
+        let xml = store_video_settings(&[
+            (VideoSetting::Brightness, "49"),
+            (VideoSetting::Contrast, "50"),
+            (VideoSetting::HOffset, "364"),
+        ]);
+        assert_eq!(
+            xml,
+            "<commands><command name='config'><config>\
+             <video_settings brightness='49' contrast='50' hoffset='364'/>\
+             </config></command></commands>"
         );
     }
 

@@ -10,7 +10,7 @@
 
 use b070_mgmt::{PowerCommand, Target};
 use b070_proto::command::{VideoFilter, VideoSetting};
-use b070_session::{Error, Event, Input, SharedFrame};
+use b070_session::{Error, Event, Input, SharedFrame, VideoSettings};
 
 /// The KVM session.
 ///
@@ -31,6 +31,13 @@ pub trait SessionLink {
     fn auto_adjust_video(&mut self) -> Result<(), Error>;
     fn stop_auto_adjust(&mut self) -> Result<(), Error>;
     fn set_video_number(&mut self, setting: VideoSetting, value: i32) -> Result<(), Error>;
+    /// Write knobs into the device's stored config, gains and all, from its own
+    /// last report. See `b070_session::Session::store_video_settings`.
+    fn store_video_settings(
+        &mut self,
+        current: &VideoSettings,
+        changes: &[(VideoSetting, i32)],
+    ) -> Result<(), Error>;
     fn set_video_filter(&mut self, filter: VideoFilter) -> Result<(), Error>;
     fn change_target(&mut self, name: &str, port: u32) -> Result<(), Error>;
     fn calibrate_mouse(&mut self) -> Result<(), Error>;

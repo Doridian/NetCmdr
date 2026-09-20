@@ -75,17 +75,21 @@ struct Args {
     /// Run the device's automatic video adjustment on connect.
     ///
     /// The device digitises analog VGA; this re-centres and re-sharpens the
-    /// captured image for the target's current video mode.
+    /// captured image for the target's current video mode and stores the
+    /// result. Its answer is only a good one from a session in which nothing
+    /// has been set by hand — it measures against a capture window an earlier
+    /// set has already moved, and corrects against its own stored figure.
     #[arg(long)]
     auto_adjust: bool,
 
     /// Align the capture window with the target's picture on connect.
     ///
-    /// Measures where the picture actually starts and moves the device's
-    /// sampling offsets onto it. This is the correction --auto-adjust cannot
-    /// make: that one restores the figures in the device's own video-mode
-    /// table, which is the very thing that is wrong for a mode the table has no
-    /// right entry for. Needs something on screen to measure against.
+    /// Measures where the picture actually starts, moves the device's sampling
+    /// offsets onto it and writes them to the device, where they stay. The
+    /// device's own --auto-adjust measures the same thing on its own terms;
+    /// this one is measured here, from the picture, and checked against the
+    /// range the device declares. Needs something on screen to measure
+    /// against.
     #[arg(long)]
     align: bool,
 
@@ -208,9 +212,6 @@ fn align_capture(session: &Session, opts: align::Options) -> Result<()> {
                             "device capture settings"
                         );
                         video = Some(v);
-                        if let Some(a) = &mut aligner {
-                            a.config_arrived();
-                        }
                     }
                 }
                 Ok(Event::Resolution { width, height }) => {
@@ -263,9 +264,9 @@ fn align_capture(session: &Session, opts: align::Options) -> Result<()> {
                 tracing::debug!(setting = setting.as_str(), value, "setting");
                 session.set_video_number(setting, value)?;
             }
-            AlignStep::AutoAdjust => {
-                tracing::info!("running the device's own adjustment to restore a default");
-                session.auto_adjust_video()?;
+            AlignStep::Store(changes) => {
+                tracing::info!(?changes, "writing the capture position to the device");
+                session.store_video_settings(v, &changes)?;
             }
             AlignStep::Wait => {}
             AlignStep::Done(report) => {

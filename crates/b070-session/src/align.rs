@@ -7,8 +7,10 @@
 //! one), and both come from a video-mode table inside the firmware. Where the
 //! target's timing differs from that table — 1360×768 is one such mode — the
 //! capture window sits off the active area and an edge of the picture is cut
-//! off. The device's own automatic adjustment does not fix this: it *restores*
-//! the table value, which is the thing that is wrong.
+//! off. The device's own automatic adjustment measures the same thing this
+//! does and is usually right, but it is the device's measurement, taken on the
+//! device's terms; this one is taken here, from the picture, and can be checked
+//! against the range the device itself declares.
 //!
 //! # The measurement
 //!
@@ -36,11 +38,12 @@
 //!   temporal noise. There is no metric that separates them; the range check
 //!   above is the guard, and [`has_content`] is what keeps an empty screen from
 //!   being measured at all.
-//! * **A set equal to the device's own default is silently dropped.** The
-//!   device compares against its stored config, which client sets never update,
-//!   so the default value is unreachable for the rest of the session. The only
-//!   way back to it is the device's own automatic adjustment, which is why
-//!   [`Step::AutoAdjust`] exists.
+//! * **A session set equal to the device's stored value is silently dropped.**
+//!   The device compares each one against its stored config, so a probe cannot
+//!   be put back by setting the figure it started from. The way back is a
+//!   *stored* write ([`Step::Store`]), which updates that stored config rather
+//!   than being measured against it — and which is also how an answer is made
+//!   to outlive the session.
 //! * **A set reaches the picture 0.5–1.6 s later**, variably. Nothing here
 //!   sleeps a fixed amount; it watches the picture instead.
 
@@ -73,9 +76,6 @@ const MIN_CONTENT_PIXELS: usize = 256;
 const SETTLE_QUIET: Duration = Duration::from_millis(250);
 /// How long to wait for it, before measuring whatever is on screen.
 const SETTLE_TIMEOUT: Duration = Duration::from_millis(4000);
-/// How long to wait for the device's own adjustment to answer. It takes about
-/// 6.5 s and its only signal is a fresh config document.
-const RESTORE_TIMEOUT: Duration = Duration::from_millis(12000);
 /// How long to wait for a picture worth measuring.
 ///
 /// A frame arrives as tiles, so the framebuffer is sized well before it is
@@ -322,8 +322,8 @@ pub enum Outcome {
     /// The knob was moved to `to`, leaving `blank` lanes at the leading edge —
     /// zero is what a correct answer gives.
     Corrected { to: i32, blank: usize },
-    /// The device's own default was already the right value. It cannot be set
-    /// while a session is open, so the device's own adjustment put it back.
+    /// The value the device was already holding was the right one; the probe
+    /// that proved it has been put back.
     AlreadyCorrect,
     /// Nothing was changed, and why not.
     Refused(String),
@@ -386,12 +386,17 @@ impl Report {
 /// What the caller should do next.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
-    /// Set this knob to this value, then go on polling.
+    /// Set this knob for the session — a probe. `Session::set_video_number`.
     Set(VideoSetting, i32),
-    /// Run the device's own automatic adjustment — the only way back to a
-    /// default value once a session has moved off it. Tell the aligner when its
-    /// config document arrives, with [`Aligner::config_arrived`].
-    AutoAdjust,
+    /// Write these knobs into the device's stored config:
+    /// `Session::store_video_settings(settings, &changes)`, which adds the two
+    /// gains the device requires before it will store anything.
+    ///
+    /// Every run ends with one of these. It is what puts a probed axis back
+    /// where it belongs — a session set of the value the device is already
+    /// holding would be dropped — and what makes a correction outlive the
+    /// session it was measured in.
+    Store(Vec<(VideoSetting, i32)>),
     /// Nothing to do yet; poll again with the next frame.
     Wait,
     /// Finished. The knobs are where they are going to stay.
@@ -437,27 +442,18 @@ enum Phase {
         axis: Axis,
         probe: i32,
     },
-    /// Both axes measured; work out what to set.
+    /// Both axes measured; work out what to write.
     Decide,
-    /// The device's own adjustment is restoring a default.
-    Restoring {
-        until: Instant,
-    },
-    /// Set the next answer, if there is one left.
-    Apply,
-    /// An answer is on screen; check the leading edge came out clean.
-    Confirm {
+    /// The stored write has landed; check the leading edges came out clean.
+    Confirm,
+    /// Start on the next axis waiting to be verified, if any.
+    NextVerify,
+    /// One below an answer is on screen; check exactly one lane went blank.
+    Verify {
         axis: Axis,
         answer: i32,
     },
-    /// One below the answer is on screen; check exactly one lane went blank.
-    Check {
-        axis: Axis,
-        answer: i32,
-    },
-    /// The answer has been put back after a check; carry on.
-    Resume,
-    /// Abandoned, and why. Whatever was moved is restored first.
+    /// Abandoned, and why. Whatever was moved is put back first.
     Abort {
         why: String,
     },
@@ -481,7 +477,7 @@ enum Phase {
 /// loop {
 ///     match aligner.poll(Instant::now(), fb, v) {
 ///         Step::Set(setting, value) => { /* session.set_video_number(setting, value) */ }
-///         Step::AutoAdjust => { /* session.auto_adjust_video() */ }
+///         Step::Store(changes) => { /* session.store_video_settings(v, &changes) */ }
 ///         Step::Wait => {}
 ///         Step::Done(report) => { println!("{}", report.summary()); break }
 ///         Step::Failed(why) => { println!("{why}"); break }
@@ -490,10 +486,12 @@ enum Phase {
 /// # }
 /// ```
 ///
-/// The knob values in the [`VideoSettings`] passed in are always the device's
-/// *defaults*, whatever has been set since: the device does not fold a client's
-/// sets back into the config it publishes. That is what makes the comparison at
-/// the end meaningful.
+/// The knob values in the [`VideoSettings`] passed in are what the device has
+/// *stored*: it never folds a session set back into the config it publishes, so
+/// they hold still under probing, which is what makes the comparison at the end
+/// meaningful. A [`Step::Store`] does change them — the device publishes a
+/// fresh config after one — so what each axis is reported against is captured
+/// when it is measured, not read back at the end.
 pub struct Aligner {
     opts: Options,
     phase: Phase,
@@ -502,13 +500,12 @@ pub struct Aligner {
     settle: Option<Settle>,
     /// What each axis was measured to be, in the order they were done.
     measured: Vec<AxisReport>,
-    /// Answers still to be set, oldest first.
-    pending: Vec<(Axis, i32)>,
-    /// Whether any knob has been moved off the device's default yet — a run
-    /// abandoned after that has to hand the knobs back.
-    moved: bool,
-    /// Set by [`Aligner::config_arrived`] while the device is restoring.
-    restored: bool,
+    /// Every axis a probe has moved, with the figure the device was holding
+    /// before it was touched. A run that ends — finished or abandoned — owes
+    /// each of these either its answer or that figure back.
+    touched: Vec<(Axis, i32)>,
+    /// Answers still to be stepped one below and checked, in [`Options::verify`].
+    to_verify: Vec<(Axis, i32)>,
 }
 
 impl Aligner {
@@ -519,9 +516,8 @@ impl Aligner {
             deadline: None,
             settle: None,
             measured: Vec::new(),
-            pending: Vec::new(),
-            moved: false,
-            restored: false,
+            touched: Vec::new(),
+            to_verify: Vec::new(),
         }
     }
 
@@ -530,19 +526,11 @@ impl Aligner {
         !matches!(self.phase, Phase::Done(_) | Phase::Failed(_))
     }
 
-    /// The device sent a fresh config document.
-    ///
-    /// That document is the only thing the device sends when its own adjustment
-    /// finishes, so it is what ends the wait for one.
-    pub fn config_arrived(&mut self) {
-        self.restored = true;
-    }
-
     /// Abandon the run.
     ///
-    /// Anything already moved is handed back to the device's own adjustment
-    /// first, so a run cut short does not leave the capture sitting on a probe
-    /// value. Keep polling until a terminal [`Step`] comes back.
+    /// Anything already moved is written back first, so a run cut short does
+    /// not leave the capture sitting on a probe value. Keep polling until a
+    /// terminal [`Step`] comes back.
     pub fn abort(&mut self, why: impl Into<String>) {
         if self.is_running() {
             self.settle = None;
@@ -561,15 +549,78 @@ impl Aligner {
         self.advance(now, fb, v)
     }
 
-    /// Emit a set, and start watching for the picture to follow it.
+    /// Emit a session set — a probe — and start watching for the picture to
+    /// follow it.
     ///
-    /// Nothing here ever asks for the device's own default: the device compares
-    /// a set against its stored config and silently drops one that matches, so
-    /// such a set would never land and the wait for it would only time out.
-    fn set(&mut self, now: Instant, fb: &Framebuffer, axis: Axis, value: i32) -> Step {
-        self.moved = true;
+    /// Nothing here ever asks for the value the device is holding: it compares
+    /// a session set against its stored config and silently drops one that
+    /// matches, so such a set would never land and the wait for it would only
+    /// time out. Putting a knob back is [`Aligner::store`]'s job.
+    fn set(
+        &mut self,
+        now: Instant,
+        fb: &Framebuffer,
+        v: &VideoSettings,
+        axis: Axis,
+        value: i32,
+    ) -> Step {
+        if !self.touched.iter().any(|(a, _)| *a == axis) {
+            self.touched.push((axis, axis.knob(v).value));
+        }
         self.settle = Some(Settle::new(now, axis, fb));
         Step::Set(axis.setting(), value)
+    }
+
+    /// Emit a stored write, and watch for the picture to follow it.
+    ///
+    /// One write carries every axis at once: the device takes a whole
+    /// `<video_settings>` element, and a run that corrected one axis while
+    /// putting the other back has exactly one thing to say.
+    fn store(&mut self, now: Instant, fb: &Framebuffer, targets: &[(Axis, i32)]) -> Step {
+        if let Some((axis, _)) = targets.first() {
+            self.settle = Some(Settle::new(now, *axis, fb));
+        }
+        Aligner::store_step(targets)
+    }
+
+    /// The same write with nothing waiting on it — for the abandoned run, which
+    /// has nothing left to measure and should say so at once rather than
+    /// holding the caller for a settle it will not read.
+    fn store_step(targets: &[(Axis, i32)]) -> Step {
+        Step::Store(
+            targets
+                .iter()
+                .map(|(axis, value)| (axis.setting(), *value))
+                .collect(),
+        )
+    }
+
+    /// Where every axis the run touched belongs: its answer if it has one, and
+    /// the figure the device was holding before the probe if it does not.
+    fn targets(&self) -> Vec<(Axis, i32)> {
+        self.touched
+            .iter()
+            .map(|(axis, was)| {
+                let answer = self
+                    .measured
+                    .iter()
+                    .find(|a| a.axis == *axis)
+                    .and_then(|a| match a.outcome {
+                        Outcome::Corrected { to, .. } => Some(to),
+                        _ => None,
+                    });
+                (*axis, answer.unwrap_or(*was))
+            })
+            .collect()
+    }
+
+    /// The run is over; hand back what it found.
+    fn done(&mut self) -> Phase {
+        let report = Report {
+            axes: std::mem::take(&mut self.measured),
+        };
+        tracing::info!(summary = %report.summary(), "alignment finished");
+        Phase::Done(report)
     }
 
     fn finish_axis(&mut self, axis: Axis, default: i32, outcome: Outcome) {
@@ -610,7 +661,7 @@ impl Aligner {
             "probing"
         );
         self.phase = Phase::Probe { axis, probe };
-        Some(self.set(now, fb, axis, probe))
+        Some(self.set(now, fb, v, axis, probe))
     }
 
     fn next_axis(&mut self, done: Axis) {
@@ -663,7 +714,7 @@ impl Aligner {
                                 axis,
                                 probe: deeper,
                             };
-                            return self.set(now, fb, axis, deeper);
+                            return self.set(now, fb, v, axis, deeper);
                         }
                         self.finish_axis(
                             axis,
@@ -714,7 +765,6 @@ impl Aligner {
                     if answer == knob.value {
                         self.finish_axis(axis, knob.value, Outcome::AlreadyCorrect);
                     } else {
-                        self.pending.push((axis, answer));
                         self.finish_axis(
                             axis,
                             knob.value,
@@ -729,82 +779,79 @@ impl Aligner {
                 }
 
                 Phase::Decide => {
-                    // Probing moved every axis off its default. Any axis that
-                    // is not about to be set to something else has to be put
-                    // back, and the device's own adjustment is the only thing
-                    // that can do it — a set of the default value is dropped.
-                    let needs_restore = self
+                    // Probing left every axis it touched sitting on a probe
+                    // value. One stored write puts them all where they belong —
+                    // the answer where there is one, the figure the device was
+                    // holding where there is not — and because the device
+                    // stores it rather than measuring it against what it has
+                    // stored, the value it started from is reachable again and
+                    // an answer outlives the session.
+                    let targets = self.targets();
+                    if targets.is_empty() {
+                        self.phase = self.done();
+                        continue;
+                    }
+                    tracing::debug!(?targets, "storing");
+                    self.phase = Phase::Confirm;
+                    return self.store(now, fb, &targets);
+                }
+
+                Phase::Confirm => {
+                    // Every corrected axis should now show a clean leading
+                    // edge. One that does not is still the best answer the
+                    // measurement had, so it is reported rather than undone.
+                    let corrected: Vec<(Axis, i32)> = self
                         .measured
                         .iter()
-                        .any(|a| !matches!(a.outcome, Outcome::Corrected { .. }));
-                    if needs_restore && self.moved {
-                        tracing::info!("running the device's adjustment to restore a default");
-                        self.restored = false;
-                        self.phase = Phase::Restoring {
-                            until: now + RESTORE_TIMEOUT,
-                        };
-                        return Step::AutoAdjust;
+                        .filter_map(|a| match a.outcome {
+                            Outcome::Corrected { to, .. } => Some((a.axis, to)),
+                            _ => None,
+                        })
+                        .collect();
+                    for (axis, answer) in &corrected {
+                        let (blank, _) = blank_lanes(fb, *axis);
+                        if blank != 0 {
+                            tracing::warn!(
+                                axis = axis.name(),
+                                answer,
+                                blank,
+                                "the leading edge is still blank after the write"
+                            );
+                            if let Some(a) = self.measured.iter_mut().find(|a| a.axis == *axis) {
+                                a.outcome = Outcome::Corrected { to: *answer, blank };
+                            }
+                        }
                     }
-                    self.phase = Phase::Apply;
+                    if self.opts.verify {
+                        self.to_verify = corrected;
+                    }
+                    self.phase = Phase::NextVerify;
                     continue;
                 }
 
-                Phase::Restoring { until } => {
-                    if !self.restored && now <= until {
-                        return Step::Wait;
-                    }
-                    if !self.restored {
-                        tracing::warn!("the device's adjustment never answered");
-                    }
-                    self.phase = Phase::Apply;
-                    continue;
-                }
-
-                Phase::Apply => match self.pending.first().copied() {
+                Phase::NextVerify => match self.to_verify.first().copied() {
                     Some((axis, answer)) => {
-                        self.pending.remove(0);
-                        self.phase = Phase::Confirm { axis, answer };
-                        return self.set(now, fb, axis, answer);
+                        self.to_verify.remove(0);
+                        let knob = axis.knob(v);
+                        // One below the answer must show exactly one blank
+                        // lane. Unless that value is the one the device is
+                        // holding, which it drops — the picture would not move
+                        // and the check would read as a failure rather than as
+                        // the set never happening.
+                        let below = answer - 1;
+                        if below < knob.min || below == knob.value {
+                            continue;
+                        }
+                        self.phase = Phase::Verify { axis, answer };
+                        return self.set(now, fb, v, axis, below);
                     }
                     None => {
-                        let report = Report {
-                            axes: std::mem::take(&mut self.measured),
-                        };
-                        tracing::info!(summary = %report.summary(), "alignment finished");
-                        self.phase = Phase::Done(report);
+                        self.phase = self.done();
                         continue;
                     }
                 },
 
-                Phase::Confirm { axis, answer } => {
-                    let (blank, _) = blank_lanes(fb, axis);
-                    if blank != 0 {
-                        tracing::warn!(
-                            axis = axis.name(),
-                            answer,
-                            blank,
-                            "the leading edge is still blank after setting the answer"
-                        );
-                        if let Some(a) = self.measured.iter_mut().find(|a| a.axis == axis) {
-                            a.outcome = Outcome::Corrected { to: answer, blank };
-                        }
-                    }
-
-                    let knob = axis.knob(v);
-                    // One below the answer must show exactly one blank lane.
-                    // Unless that value is the device's default, which it drops
-                    // — the picture would not move and the check would read as
-                    // a failure rather than as the set never happening.
-                    let below = answer - 1;
-                    if self.opts.verify && below >= knob.min && below != knob.value {
-                        self.phase = Phase::Check { axis, answer };
-                        return self.set(now, fb, axis, below);
-                    }
-                    self.phase = Phase::Apply;
-                    continue;
-                }
-
-                Phase::Check { axis, answer } => {
+                Phase::Verify { axis, answer } => {
                     let (blank, _) = blank_lanes(fb, axis);
                     if blank == 1 {
                         tracing::info!(axis = axis.name(), answer, "answer verified");
@@ -816,24 +863,20 @@ impl Aligner {
                             "one below the answer should have shown exactly one blank lane"
                         );
                     }
-                    self.phase = Phase::Resume;
-                    return self.set(now, fb, axis, answer);
-                }
-
-                Phase::Resume => {
-                    self.phase = Phase::Apply;
-                    continue;
+                    // Back to the answer, which the device is now holding — so
+                    // this has to be a stored write or it would be dropped.
+                    self.phase = Phase::NextVerify;
+                    return self.store(now, fb, &[(axis, answer)]);
                 }
 
                 Phase::Abort { why } => {
-                    self.pending.clear();
-                    if self.moved {
-                        self.moved = false;
-                        tracing::info!(%why, "abandoning; handing the capture back to the device");
-                        self.phase = Phase::Abort { why };
-                        return Step::AutoAdjust;
+                    self.to_verify.clear();
+                    let targets: Vec<(Axis, i32)> = std::mem::take(&mut self.touched);
+                    self.phase = Phase::Failed(why.clone());
+                    if !targets.is_empty() {
+                        tracing::info!(%why, ?targets, "abandoning; putting the capture back");
+                        return Aligner::store_step(&targets);
                     }
-                    self.phase = Phase::Failed(why);
                     continue;
                 }
 
@@ -897,17 +940,19 @@ mod tests {
     }
 
     /// The device, as far as the aligner can tell: a capture window that can be
-    /// moved, a stored default it silently refuses to be set to, and an
-    /// automatic adjustment that puts both knobs back.
+    /// moved, a stored config a session set is measured against and silently
+    /// dropped for matching, and stored writes that move both.
     struct Fake {
         settings: VideoSettings,
         at_h: i32,
         at_v: i32,
         correct_h: i32,
         correct_v: i32,
-        auto_adjusts: u32,
-        /// Every set the aligner asked for, to prove none was a dropped one.
+        /// Every session set the aligner asked for, to prove none was a
+        /// dropped one.
         sets: Vec<(VideoSetting, i32)>,
+        /// Every stored write, as the list of knobs it carried.
+        stores: Vec<Vec<(VideoSetting, i32)>>,
         /// Overrides the picture entirely, for the nothing-to-measure case.
         blank_screen: bool,
     }
@@ -920,38 +965,50 @@ mod tests {
                 at_v: 24,
                 correct_h,
                 correct_v,
-                auto_adjusts: 0,
                 sets: Vec::new(),
+                stores: Vec::new(),
                 blank_screen: false,
             }
         }
 
-        fn default_for(&self, setting: VideoSetting) -> i32 {
+        fn stored(&self, setting: VideoSetting) -> i32 {
             match setting {
                 VideoSetting::HOffset => self.settings.hoffset.value,
                 VideoSetting::VOffset => self.settings.voffset.value,
-                other => panic!("the aligner set {other:?}, which is not its to touch"),
+                other => panic!("the aligner touched {other:?}, which is not its to touch"),
+            }
+        }
+
+        fn point_capture(&mut self, setting: VideoSetting, value: i32) {
+            match setting {
+                VideoSetting::HOffset => self.at_h = value,
+                VideoSetting::VOffset => self.at_v = value,
+                other => panic!("the aligner touched {other:?}, which is not its to touch"),
             }
         }
 
         fn set(&mut self, setting: VideoSetting, value: i32) {
             self.sets.push((setting, value));
-            // The device compares against its stored config, which a client's
-            // sets never update, so this one goes nowhere.
-            if value == self.default_for(setting) {
+            // The device compares a session set against its stored config, and
+            // one that matches goes nowhere.
+            if value == self.stored(setting) {
                 return;
             }
-            match setting {
-                VideoSetting::HOffset => self.at_h = value,
-                VideoSetting::VOffset => self.at_v = value,
-                _ => unreachable!(),
-            }
+            self.point_capture(setting, value);
         }
 
-        fn auto_adjust(&mut self) {
-            self.auto_adjusts += 1;
-            self.at_h = self.settings.hoffset.value;
-            self.at_v = self.settings.voffset.value;
+        /// A stored write: the capture moves *and* the config the device
+        /// publishes moves with it, which is what makes it outlive the session.
+        fn store(&mut self, changes: &[(VideoSetting, i32)]) {
+            self.stores.push(changes.to_vec());
+            for (setting, value) in changes {
+                self.point_capture(*setting, *value);
+                match setting {
+                    VideoSetting::HOffset => self.settings.hoffset.value = *value,
+                    VideoSetting::VOffset => self.settings.voffset.value = *value,
+                    _ => unreachable!(),
+                }
+            }
         }
 
         fn frame(&self) -> Framebuffer {
@@ -980,10 +1037,7 @@ mod tests {
             let v = fake.settings.clone();
             match aligner.poll(now, &fb, &v) {
                 Step::Set(setting, value) => fake.set(setting, value),
-                Step::AutoAdjust => {
-                    fake.auto_adjust();
-                    aligner.config_arrived();
-                }
+                Step::Store(changes) => fake.store(&changes),
                 Step::Wait => {}
                 end => return end,
             }
@@ -1065,7 +1119,12 @@ mod tests {
         assert_eq!(fake.at_h, 364);
         assert_eq!(report.summary(), "hoffset 368 → 364");
         assert!(report.changed());
-        assert_eq!(fake.auto_adjusts, 0, "nothing needed putting back");
+        assert_eq!(
+            fake.stores,
+            vec![vec![(VideoSetting::HOffset, 364)]],
+            "one write, and the device kept it"
+        );
+        assert_eq!(fake.settings.hoffset.value, 364, "the device stored it");
     }
 
     #[test]
@@ -1078,7 +1137,8 @@ mod tests {
         assert_eq!(fake.at_h, 340);
         assert_eq!(report.summary(), "hoffset 368 → 340");
         let probes: Vec<i32> = fake.sets.iter().map(|(_, v)| *v).collect();
-        assert_eq!(probes, vec![352, 336, 340]);
+        assert_eq!(probes, vec![352, 336], "two probes, then the answer");
+        assert_eq!(fake.stores, vec![vec![(VideoSetting::HOffset, 340)]]);
     }
 
     #[test]
@@ -1088,30 +1148,43 @@ mod tests {
 
         assert_eq!((fake.at_h, fake.at_v), (364, 25));
         assert_eq!(report.summary(), "hoffset 368 → 364; voffset 24 → 25");
-        assert_eq!(fake.auto_adjusts, 0);
+        assert_eq!(
+            fake.stores,
+            vec![vec![
+                (VideoSetting::HOffset, 364),
+                (VideoSetting::VOffset, 25)
+            ]],
+            "both axes in the one write the device takes"
+        );
     }
 
-    /// The default is the one value a session cannot set, so an axis that was
-    /// right all along has to be handed back to the device's own adjustment.
+    /// The value the device is holding is the one a session set cannot reach,
+    /// so an axis that was right all along is put back by a stored write.
     #[test]
-    fn an_already_correct_axis_goes_back_through_the_devices_adjustment() {
+    fn an_already_correct_axis_is_put_back_by_a_stored_write() {
         let mut fake = Fake::new(368, 24);
         let report = done(run(&mut fake, horizontal()));
 
         assert_eq!(report.summary(), "hoffset already correct at 368");
         assert!(!report.changed());
-        assert_eq!(fake.auto_adjusts, 1);
+        assert_eq!(fake.stores, vec![vec![(VideoSetting::HOffset, 368)]]);
         assert_eq!(fake.at_h, 368, "the probe was not left behind");
     }
 
     #[test]
     fn a_correct_axis_does_not_cost_the_other_one_its_correction() {
-        // The restore puts *both* knobs back, so the vertical answer has to be
-        // set after it rather than before.
+        // One write carries both: the axis that was already right goes back
+        // to where it was, the other to its answer.
         let mut fake = Fake::new(368, 25);
         let report = done(run(&mut fake, Options::default()));
 
-        assert_eq!(fake.auto_adjusts, 1);
+        assert_eq!(
+            fake.stores,
+            vec![vec![
+                (VideoSetting::HOffset, 368),
+                (VideoSetting::VOffset, 25)
+            ]]
+        );
         assert_eq!((fake.at_h, fake.at_v), (368, 25));
         assert_eq!(
             report.summary(),
@@ -1131,9 +1204,12 @@ mod tests {
                 },
             );
             assert!(
-                !fake.sets.iter().any(|(s, v)| *v == fake.default_for(*s)),
-                "correct_h={correct_h}: asked for the device's own default, \
-                 which it silently drops"
+                !fake
+                    .sets
+                    .iter()
+                    .any(|(setting, value)| *value == fake.stored(*setting)),
+                "correct_h={correct_h}: asked for the value the device was \
+                 holding as a session set, which it silently drops"
             );
         }
     }
@@ -1154,7 +1230,7 @@ mod tests {
             report.summary()
         );
         assert_eq!(fake.at_h, 368, "the probe was put back");
-        assert_eq!(fake.auto_adjusts, 1);
+        assert_eq!(fake.stores, vec![vec![(VideoSetting::HOffset, 368)]]);
     }
 
     #[test]
@@ -1182,8 +1258,17 @@ mod tests {
 
         assert_eq!(report.summary(), "hoffset 368 → 364");
         assert_eq!(fake.at_h, 364, "left on the answer, not on the check");
-        let values: Vec<i32> = fake.sets.iter().map(|(_, v)| *v).collect();
-        assert_eq!(values, vec![352, 364, 363, 364]);
+        // The probe and the check are session sets; the answer is stored, both
+        // when it is first applied and when the check is stepped back from.
+        let probes: Vec<i32> = fake.sets.iter().map(|(_, v)| *v).collect();
+        assert_eq!(probes, vec![352, 363]);
+        assert_eq!(
+            fake.stores,
+            vec![
+                vec![(VideoSetting::HOffset, 364)],
+                vec![(VideoSetting::HOffset, 364)]
+            ]
+        );
     }
 
     #[test]
@@ -1206,15 +1291,12 @@ mod tests {
                         aligner.abort("the video mode changed");
                     }
                 }
-                Step::AutoAdjust => {
-                    fake.auto_adjust();
-                    aligner.config_arrived();
-                }
+                Step::Store(changes) => fake.store(&changes),
                 Step::Wait => {}
                 Step::Failed(why) => {
                     assert_eq!(why, "the video mode changed");
                     assert_eq!(fake.at_h, 368, "the probe was not left on screen");
-                    assert_eq!(fake.auto_adjusts, 1);
+                    assert_eq!(fake.stores, vec![vec![(VideoSetting::HOffset, 368)]]);
                     return;
                 }
                 other => panic!("expected the abort to land, got {other:?}"),
@@ -1236,8 +1318,8 @@ mod tests {
             report.summary()
         );
         assert!(fake.sets.is_empty());
-        assert_eq!(
-            fake.auto_adjusts, 0,
+        assert!(
+            fake.stores.is_empty(),
             "nothing was moved, so nothing to undo"
         );
     }

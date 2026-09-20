@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use b070_mgmt::{Client, PowerCommand};
 use b070_proto::command::{VideoFilter, VideoSetting};
-use b070_session::{Error, Event, Input, Session, SharedFrame};
+use b070_session::{Error, Event, Input, Session, SharedFrame, VideoSettings};
 use b070_ui::platform::{MgmtLink, MgmtReply, SessionLink};
 
 /// The threaded session, as a [`SessionLink`].
@@ -69,6 +69,13 @@ impl SessionLink for NativeSession {
     }
     fn set_video_number(&mut self, setting: VideoSetting, value: i32) -> Result<(), Error> {
         self.session.set_video_number(setting, value)
+    }
+    fn store_video_settings(
+        &mut self,
+        current: &VideoSettings,
+        changes: &[(VideoSetting, i32)],
+    ) -> Result<(), Error> {
+        self.session.store_video_settings(current, changes)
     }
     fn set_video_filter(&mut self, filter: VideoFilter) -> Result<(), Error> {
         self.session.set_video_filter(filter)

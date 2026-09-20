@@ -20,7 +20,9 @@ use std::thread::JoinHandle;
 use b070_proto::command::{VideoFilter, VideoSetting};
 use b070_proto::kvmmsg::{Message, SocketType};
 
-use crate::core::{outbound, Login, SessionCore, HEARTBEAT_DELAY, HEARTBEAT_PERIOD, LOGIN_TIMEOUT};
+use crate::core::{
+    outbound, Login, SessionCore, VideoSettings, HEARTBEAT_DELAY, HEARTBEAT_PERIOD, LOGIN_TIMEOUT,
+};
 use crate::input::Input;
 use crate::tcp::{ShutdownHandle, Stream, TcpChannel};
 use crate::time::{Duration, Instant};
@@ -154,18 +156,16 @@ impl Session {
         self.queue(Outgoing::Cmd(outbound::stop_auto_adjust()))
     }
 
-    /// Set one analog video knob by hand
+    /// Set one analog video knob by hand, for this session
     /// (`<video_settings hoffset='364'/>` and friends).
     ///
-    /// This is what [`Session::auto_adjust_video`] cannot do for you. On the
-    /// firmware this was verified against, the automatic adjustment leaves
-    /// `hoffset` exactly as the device's video-mode table set it — so where
-    /// that table is wrong for the mode, as it is for 1360×768, the edge it
-    /// cuts off can only be recovered here.
+    /// The change applies immediately and lasts until logout; the device does
+    /// not announce it and goes on reporting its stored figure, so the caller
+    /// keeps its own copy of the value. Because the comparison is against that
+    /// stored figure, a set *equal* to it is silently dropped.
     ///
-    /// The change applies immediately and lasts for the session; the device
-    /// does not announce it, so the caller keeps its own copy of the value. It
-    /// is **not** persisted: the next login reads the device's default again.
+    /// [`Session::store_video_settings`] is the one that lasts — and the one to
+    /// use when the value being set may be the stored one.
     pub fn set_video_setting(&self, setting: VideoSetting, value: &str) -> Result<(), Error> {
         self.queue(Outgoing::Cmd(outbound::set_video_setting(setting, value)))
     }
@@ -173,6 +173,29 @@ impl Session {
     /// Set a numeric video knob. See [`Session::set_video_setting`].
     pub fn set_video_number(&self, setting: VideoSetting, value: i32) -> Result<(), Error> {
         self.set_video_setting(setting, &value.to_string())
+    }
+
+    /// Write video knobs into the device's stored configuration.
+    ///
+    /// Unlike [`Session::set_video_setting`] this survives logout, a target
+    /// switch and a reconnect, because the device stores it rather than
+    /// overlaying it — which it does for any `<video_settings>` element
+    /// carrying both gains. `current` is the device's own last report
+    /// ([`Event::ConfigXml`] → [`crate::parse_video_settings`]); the gains are
+    /// taken from it, so a caller moving a capture offset need not think about
+    /// the rule.
+    ///
+    /// The device answers with a fresh [`Event::ConfigXml`] carrying the new
+    /// values, which is the only acknowledgement there is. Nothing comes back
+    /// when it declines.
+    pub fn store_video_settings(
+        &self,
+        current: &VideoSettings,
+        changes: &[(VideoSetting, i32)],
+    ) -> Result<(), Error> {
+        self.queue(Outgoing::Cmd(outbound::store_video_settings(
+            current, changes,
+        )))
     }
 
     /// Choose the capture's noise filter.

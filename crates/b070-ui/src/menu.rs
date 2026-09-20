@@ -98,11 +98,14 @@ pub enum Action {
     RefreshVideo,
     AutoAdjustVideo,
     StopAutoAdjust,
-    /// Measure the capture offsets from the picture and correct them — the
-    /// thing the device's own adjustment cannot do. See `b070_session::align`.
+    /// Measure the capture offsets from the picture, correct them and store
+    /// them on the device. See `b070_session::align`.
     AlignCapture,
-    /// Set one analog capture knob to an absolute value.
+    /// Set one analog capture knob to an absolute value, for this session.
     SetVideoNumber(VideoSetting, i32),
+    /// Write capture knobs into the device's stored configuration, where they
+    /// outlive the session. See `b070_session::Session::store_video_settings`.
+    StoreVideoNumbers(Vec<(VideoSetting, i32)>),
     SetVideoFilter(VideoFilter),
     SetScaling(Scaling),
     ResizeToRemote,
@@ -701,6 +704,7 @@ impl Menu {
         let restore = self.video_restore.clone();
         let noise = self.noise;
         let mut restore_now = false;
+        let mut save_now = false;
 
         egui::Window::new("Video adjustment")
             .open(&mut open)
@@ -779,13 +783,22 @@ impl Menu {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui
+                        .button("Save to device")
+                        .on_hover_text(
+                            "Write these values into the device's own configuration, \
+                             where they survive logging out and coming back. This is \
+                             what the stock client's OK button does.",
+                        )
+                        .clicked()
+                    {
+                        save_now = true;
+                    }
+                    if ui
                         .add_enabled(restore.is_some(), egui::Button::new("Restore"))
                         .on_hover_text(
-                            "Put back the brightness, contrast, phase and filter the \
-                             device reported when this window was opened. The two \
-                             positions are not included: the device refuses to be set \
-                             to the values it is already holding, so only its own \
-                             adjustment can put those back.",
+                            "Put back the values the device reported when this window \
+                             was opened, and store them, which is the only way to \
+                             reach a value the device is already holding.",
                         )
                         .clicked()
                     {
@@ -794,8 +807,10 @@ impl Menu {
                     if ui
                         .button("Auto adjust")
                         .on_hover_text(
-                            "Let the device adjust itself. It re-derives the phase and \
-                             the filter — but not the positions above.",
+                            "Let the device measure and store its own settings: the \
+                             phase, the filter and the two positions. Its answer \
+                             replaces what is above, and it is only a good answer \
+                             when nothing here has been set by hand this session.",
                         )
                         .clicked()
                     {
@@ -812,8 +827,9 @@ impl Menu {
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(
-                        "Changes take effect at once and last for this session only: \
-                         the device reads its own defaults again at the next login.",
+                        "Changes take effect at once but last for this session only \
+                         until they are saved: the device reads its own stored \
+                         values again at the next login.",
                     )
                     .small()
                     .weak(),
@@ -822,6 +838,12 @@ impl Menu {
 
         self.video = video;
         self.show_video_adjust = open;
+
+        if save_now {
+            if let Some(v) = &self.video {
+                out.extend(save_actions(v));
+            }
+        }
 
         if restore_now {
             if let Some(r) = restore {
@@ -946,21 +968,18 @@ fn filter_label(f: VideoFilter) -> &'static str {
 
 /// What the adjustment window's *Restore* button sends.
 ///
-/// Not the whole of what it says on the tin, and it cannot be: the device
-/// silently drops a set whose value equals the one in its own stored config,
-/// and for the two positions the value being restored *is* that value — the
-/// window opens on whatever the device last reported. Sending them would be a
-/// gesture with nothing behind it, so they are left out and the window says so
-/// instead. See `b070_session::align`.
+/// One stored write, carrying every knob the window opened with. It has to be
+/// a stored write rather than a set apiece: the device drops a session set
+/// whose value equals the one it has stored, and for a window opened on the
+/// device's own figures that is exactly what a restore is made of.
 fn restore_actions(original: &VideoSettings) -> Vec<Action> {
-    let mut out: Vec<Action> = [
+    let mut out = vec![Action::StoreVideoNumbers(vec![
         (VideoSetting::Brightness, original.brightness.value),
         (VideoSetting::Contrast, original.contrast.value),
+        (VideoSetting::HOffset, original.hoffset.value),
+        (VideoSetting::VOffset, original.voffset.value),
         (VideoSetting::Phase, original.phase.value),
-    ]
-    .into_iter()
-    .map(|(setting, value)| Action::SetVideoNumber(setting, value))
-    .collect();
+    ])];
 
     // `Auto` is not a filter the device stores, it is a request to run the
     // adjustment — which is the one thing a restore must not do.
@@ -970,23 +989,37 @@ fn restore_actions(original: &VideoSettings) -> Vec<Action> {
     out
 }
 
-const ALIGN_HELP: &str = "\
-Measure where the target's picture actually starts and move the capture window \
-onto it.
+/// What *Save to device* sends: everything the window is showing, as one
+/// stored write.
+fn save_actions(v: &VideoSettings) -> Vec<Action> {
+    vec![Action::StoreVideoNumbers(vec![
+        (VideoSetting::Brightness, v.brightness.value),
+        (VideoSetting::Contrast, v.contrast.value),
+        (VideoSetting::HOffset, v.hoffset.value),
+        (VideoSetting::VOffset, v.voffset.value),
+        (VideoSetting::Phase, v.phase.value),
+    ])]
+}
 
-This is what the device's own adjustment cannot do: that one puts the two \
-positions back to the figures in its video-mode table, which is the very thing \
-that is wrong for a mode the table has no entry for. Takes about ten seconds, \
-and needs something on screen to measure against.";
+const ALIGN_HELP: &str = "\
+Measure where the target's picture actually starts, move the capture window \
+onto it and save it to the device.
+
+The device's own adjustment measures the same thing and also keeps it — but \
+only when nothing has been set by hand in this session, and its answer is not \
+always right. This one is measured here, from the picture, and checked against \
+the range the device declares. Takes about ten seconds, and needs something on \
+screen to measure against.";
 
 const HOFFSET_HELP: &str = "\
 Where the device starts sampling each scan line, in pixels.
 
 Lower moves the picture right. If the left edge of the target's screen is cut \
-off, take this down by the number of pixels missing — the automatic adjustment \
-puts this back to the figure in the device's video-mode table, so a mode that \
-table is wrong for stays wrong until you correct it here or use Re-align \
-capture.";
+off, take this down by the number of pixels missing, then Save to device to \
+keep it. Until it is saved it lasts for this session only. Auto adjust \
+replaces it with the position the device measures for itself — which is only \
+a good measurement from a session where nothing has been set by hand, so \
+reconnect before asking for one.";
 
 const VOFFSET_HELP: &str = "\
 Which line the device starts capturing at. Lower moves the picture down.";
@@ -1251,21 +1284,26 @@ mod tests {
         assert!(frame(&mut m, &ctx).is_empty());
     }
 
-    /// Restore puts every knob back and, above all, does not turn the filter
-    /// into an auto-adjust.
+    /// Restore puts every knob back — as one stored write, which is the only
+    /// kind the device accepts for a value it is already holding — and, above
+    /// all, does not turn the filter into an auto-adjust.
     #[test]
     fn restore_resends_the_values_the_window_opened_with() {
         let original = settings();
         let out = restore_actions(&original);
 
-        assert!(out.contains(&Action::SetVideoNumber(
-            VideoSetting::Brightness,
-            original.brightness.value
-        )));
-        assert!(out.contains(&Action::SetVideoNumber(
-            VideoSetting::Phase,
-            original.phase.value
-        )));
+        let Some(Action::StoreVideoNumbers(changes)) = out.first() else {
+            panic!("restore did not write anything: {out:?}");
+        };
+        for expected in [
+            (VideoSetting::Brightness, original.brightness.value),
+            (VideoSetting::Contrast, original.contrast.value),
+            (VideoSetting::HOffset, original.hoffset.value),
+            (VideoSetting::VOffset, original.voffset.value),
+            (VideoSetting::Phase, original.phase.value),
+        ] {
+            assert!(changes.contains(&expected), "{expected:?} in {changes:?}");
+        }
     }
 
     /// Restoring `auto` would run the device's adjustment, which is the one
@@ -1280,17 +1318,38 @@ mod tests {
             .any(|a| matches!(a, Action::SetVideoFilter(_))));
     }
 
-    /// The device drops a set that matches its own stored value, and the two
-    /// positions being restored are exactly that — so sending them would look
-    /// like a restore without being one.
+    /// The device drops a *session* set that matches the value it is holding,
+    /// which is exactly what a restore is made of — so a restore must never
+    /// send one.
     #[test]
-    fn restore_leaves_out_the_positions_the_device_would_drop() {
+    fn restore_never_sends_a_set_the_device_would_drop() {
         let out = restore_actions(&settings());
 
-        assert!(!out.iter().any(|a| matches!(
-            a,
-            Action::SetVideoNumber(VideoSetting::HOffset | VideoSetting::VOffset, _)
-        )));
+        assert!(!out
+            .iter()
+            .any(|a| matches!(a, Action::SetVideoNumber(_, _))));
+    }
+
+    /// A save is one element carrying both gains — without them the device
+    /// treats it as a live set and forgets it at logout, which would make the
+    /// button a lie.
+    #[test]
+    fn a_save_carries_the_gains_that_make_the_device_store_it() {
+        let v = settings();
+        let out = save_actions(&v);
+
+        let [Action::StoreVideoNumbers(changes)] = out.as_slice() else {
+            panic!("expected one stored write, got {out:?}");
+        };
+        for expected in [
+            (VideoSetting::Brightness, v.brightness.value),
+            (VideoSetting::Contrast, v.contrast.value),
+            (VideoSetting::HOffset, v.hoffset.value),
+            (VideoSetting::VOffset, v.voffset.value),
+            (VideoSetting::Phase, v.phase.value),
+        ] {
+            assert!(changes.contains(&expected), "{expected:?} in {changes:?}");
+        }
     }
 
     #[test]

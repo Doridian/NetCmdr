@@ -189,27 +189,36 @@ switch landed.
 
 The device digitises analog VGA, so its sampling phase and gain drift per target
 and per video mode; `--auto-adjust` (or Ctrl+Alt+A, or Video → Auto adjust) is
-what re-derives them. It does not find the capture *position* — for that see
-below.
+what re-derives them. It finds the capture *position* too, and keeps what it
+finds — with one condition, below.
 
-### When the automatic adjustment is not enough
+### Auto adjust, and when to reach past it
 
 The device keeps a sampling offset per video mode, and on a mode whose figure it
-has wrong, the edge of the picture is simply never captured — measured on a
-target driving 1360×768, the device starts sampling 4 px into the active area
-and cuts the first character off every line. **Its own automatic adjustment
-cannot fix that, because the figure it restores is the wrong one**: ask for one
-and it puts `hoffset` and `voffset` back to what its video-mode table says, so
-Ctrl+Alt+A undoes a correction rather than making one. (It does re-derive the
-phase and the filter, and those it keeps.)
+has wrong the edge of the picture is simply never captured — measured on a target
+driving 1360×768, sampling started 4 px into the active area and cut the first
+character off every line. **Ask for an automatic adjustment and the device fixes
+that itself**: it measured the same 364 this project measures by hand, wrote it
+to its own stored config, and every later login — from any client, including the
+vendor's — came up correct. It re-derives the phase and the filter at the same
+time, and takes about six seconds.
 
-*Video → Re-align capture* (Ctrl+Alt+Shift+A, or `--align` on `b070-view`) is
-what corrects it. Lowering an offset by one moves the picture one pixel right
-and brings one lane of the scan line's blanking into view, so the error counts
-itself: probe a little below where the device has it, count the blank lanes that
-appear, and the sum is the answer. One probe per axis, about five seconds for
-both, measured from the picture itself rather than searched for. The result goes
-in the bar — `hoffset 368 → 364`.
+**The condition: nothing may be set by hand when it runs.** The device measures
+against the capture window your set already moved, then corrects against its own
+stored figure, and the two errors add — asked for an adjustment with `hoffset`
+sitting at 352 it stored 380, which is worse than where it started. Reconnect
+first, then adjust. (This is what made earlier versions of this file say the
+adjustment *undoes* a correction: every test of it followed a manual set.)
+
+*Video → Re-align capture* (Ctrl+Alt+Shift+A, or `--align` on `b070-view`)
+measures the position from the picture instead of asking the device to. Lowering
+an offset by one moves the picture one pixel right and brings one lane of the
+scan line's blanking into view, so the error counts itself: probe a little below
+where the device has it, count the blank lanes that appear, and the sum is the
+answer. One probe per axis, about five seconds for both. The result goes in the
+bar — `hoffset 368 → 364`. The answer is written to the device, so it is there
+at the next login too. Reach for it when the device's own answer is wrong, or
+when you would rather see the measurement than take the device's word for it.
 
 It needs something on screen to measure against, and it says so rather than
 guessing: blanking and black content are the same pixels to a digitiser, so a
@@ -218,12 +227,15 @@ on until the console has scrolled. An answer that falls outside the range the
 device declares for the knob is refused for the same reason — that range is
 exactly the mode's blanking interval, so a real answer is always inside it.
 
-Corrections last for the session: they are lost at logout, on a target switch,
-and whenever the device re-derives its own settings. The bar says so when it
-happens, and re-aligning takes a few seconds.
+A run ends in a single write that the device keeps, carrying both axes: the
+answer for an axis it measured, and the figure the device started with for one
+it could not — so a probe is never left behind. An alignment therefore survives
+a logout; what still discards it is the device re-deriving the capture for
+itself, and the bar says so when that happens.
 
 Video → *Adjust manually…* opens the controls the stock client keeps in its
-Advanced Video dialog, each applied live as you move it:
+Advanced Video dialog, each applied live as you move it, with *Save to device*
+for when one is worth keeping:
 
 | Control | What it does |
 |---|---|
@@ -240,20 +252,22 @@ capture* does exactly this, by counting the band instead of watching it.
 
 Two things discard a position set by hand or by an alignment: **Auto adjust**,
 and picking **Auto** as the filter — which is a request for the same
-adjustment. Both hand the two positions back to the device's table.
+adjustment. Both replace it with the position the device measures for itself —
+so run them from a fresh session, never on top of a set you have just made.
 
-*Restore* puts back the brightness, contrast, phase and filter the window opened
-with. It cannot put back the two positions: the device silently ignores a set
-whose value matches the one in its own stored config, and those are exactly the
-values a restore would be sending. Auto adjust is the way back to them.
+**Moving a control takes effect at once but lasts only for this session**, which
+is what the stock client does too: one attribute at a time, which the device
+applies to the picture without storing. ***Save to device*** is the other half
+— the stock client's *OK* button in all but name. The device stores a
+`<video_settings>` element when, and only when, it carries `brightness` and
+`contrast`, whatever else rides along with it (`research/notes/FINDINGS.md`
+§5.4), so a save sends the window's values as one such element and the next
+login comes up on them.
 
-These settings are per session and are **not** persisted — the device reads its
-own defaults again at the next login, so a mode it has wrong needs correcting
-each time you connect. There is no way around that from a client: every signal
-in the vendor's protocol that might have meant *keep this* was tried against
-the device and none of them writes anything (`research/notes/FINDINGS.md`
-§5.4). Only the device's own automatic adjustment writes to its stored config,
-and the figures it writes are the ones that were wrong.
+*Restore* puts back everything the window opened with, and saves it, because
+that is the only way to reach a value the device is already holding: a session
+set whose value matches the stored one is silently dropped, and a restore is
+made of exactly those values.
 
 The right-hand end of the bar carries a **Noise** bar next to the resolution:
 how much of the picture is changing, per second, the same reading the stock

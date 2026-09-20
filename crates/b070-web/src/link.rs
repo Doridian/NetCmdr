@@ -10,7 +10,7 @@ use b070_mgmt::PowerCommand;
 use b070_proto::command::{VideoFilter, VideoSetting};
 use b070_session::core::{SessionCore, HEARTBEAT_DELAY, HEARTBEAT_PERIOD};
 use b070_session::time::Instant;
-use b070_session::{Error, Event, Input, SharedFrame};
+use b070_session::{Error, Event, Input, SharedFrame, VideoSettings};
 use b070_ui::platform::{MgmtLink, MgmtReply, SessionLink};
 use wasm_bindgen_futures::spawn_local;
 
@@ -73,6 +73,13 @@ impl SessionLink for WebSession {
     }
     fn set_video_number(&mut self, setting: VideoSetting, value: i32) -> Result<(), Error> {
         self.core.set_video_number(setting, value)
+    }
+    fn store_video_settings(
+        &mut self,
+        current: &VideoSettings,
+        changes: &[(VideoSetting, i32)],
+    ) -> Result<(), Error> {
+        self.core.store_video_settings(current, changes)
     }
     fn set_video_filter(&mut self, filter: VideoFilter) -> Result<(), Error> {
         self.core.set_video_filter(filter)
