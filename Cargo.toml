@@ -25,3 +25,16 @@ quick-xml = "0.37"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The browser downloads this module before anything happens, so it is built for
+# size where the native binaries are built for speed. Kept as its own profile so
+# `cargo build --release` is unaffected.
+[profile.web]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+# Unwinding machinery is dead weight in a browser: a panic there is a trap, and
+# the hook that reports it still runs.
+panic = "abort"
+strip = true

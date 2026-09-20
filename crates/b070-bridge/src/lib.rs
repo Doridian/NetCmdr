@@ -94,7 +94,13 @@ pub fn route(bridge: &Bridge, stream: &mut TcpStream) -> std::io::Result<()> {
             .as_bytes(),
         ),
         ("GET", path) => match &bridge.static_dir {
-            Some(root) => http::serve_static(stream, root, path),
+            Some(root) => {
+                let accepted = request
+                    .header("accept-encoding")
+                    .unwrap_or_default()
+                    .to_string();
+                http::serve_static(stream, root, path, &accepted)
+            }
             None => http::respond_status(stream, 404, "Not Found"),
         },
         _ => http::respond_status(stream, 405, "Method Not Allowed"),

@@ -248,7 +248,22 @@ re-encodes nothing.
 
 Building it needs the `wasm32-unknown-unknown` target and a `wasm-bindgen` that
 matches the `wasm-bindgen` crate in `Cargo.lock`; the script says so, with the
-version, if it is missing.
+version, if it is missing. `wasm-opt` (from **binaryen**) is used if it is
+there and skipped with a note if it is not.
+
+The module is what a browser must have in full before anything appears, so the
+script also precompresses it and `b070-bridge` serves the result:
+
+| | size |
+|---|---|
+| raw | 5.7 MiB |
+| gzip | 2.0 MiB |
+| brotli | **1.6 MiB** |
+
+`wasm-opt -Oz` is worth about 8% of that, rather than the usual much larger
+figure, because the `web` profile in the workspace manifest already builds with
+`opt-level = "z"`, fat LTO and one codegen unit. Most of what is left is not
+code: roughly 1.7 MiB is the fonts egui bundles.
 
 Two things a browser does differently, both of them the keyboard's fault:
 
@@ -286,7 +301,7 @@ WebSockets:
 | `POST /message.pv` | forwarded verbatim to the device's management API |
 | `GET /kvm?type=cmd\|video\|km\|vm` | a WebSocket carrying one session socket |
 | `GET /api/info` | which device this bridge is pointed at |
-| anything else | a file from `--static-dir` |
+| anything else | a file from `--static-dir`, precompressed where one exists |
 
 Each `/kvm` WebSocket is one of the session's four TCP connections. The client
 sends its `SESSIONID` as the **first message**, as text; the bridge then
@@ -296,6 +311,11 @@ Everything after that first message is opaque bytes. The bridge deliberately
 does not understand `KVMMsg`: WebSocket message boundaries have nothing to do
 with protocol message boundaries, and the client reassembles the stream exactly
 as it would from a socket.
+
+Static files are served from disk as they are, except that a `.br` or `.gz`
+sitting next to a file is sent instead when the client offers that encoding.
+The compressing is `tools/build-web.sh`'s job, so this costs the bridge nothing
+per request and keeps a compressor out of it.
 
 The token travels in the socket rather than the URL for two measured reasons.
 It is base64 — on firmware 2.2.1258.1.0 a 44-character string routinely

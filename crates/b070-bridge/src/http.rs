@@ -192,16 +192,37 @@ pub fn respond(
     content_type: &str,
     body: &[u8],
 ) -> io::Result<()> {
+    respond_encoded(out, status, reason, content_type, None, body)
+}
+
+/// As [`respond`], but declaring a `Content-Encoding` for an already-compressed
+/// body.
+pub fn respond_encoded(
+    out: &mut impl Write,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    encoding: Option<&str>,
+    body: &[u8],
+) -> io::Result<()> {
     write!(
         out,
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {len}\r\n\
          Cache-Control: no-store\r\n\
-         Connection: close\r\n\
-         \r\n",
+         Connection: close\r\n",
         len = body.len(),
     )?;
+    if let Some(encoding) = encoding {
+        // Vary, or a cache in front would hand a brotli body to a client that
+        // never asked for one.
+        write!(
+            out,
+            "Content-Encoding: {encoding}\r\nVary: Accept-Encoding\r\n"
+        )?;
+    }
+    write!(out, "\r\n")?;
     out.write_all(body)?;
     out.flush()
 }
@@ -223,7 +244,20 @@ pub fn respond_status(out: &mut impl Write, status: u16, reason: &str) -> io::Re
 /// parent reference, a root anchor, a Windows prefix — is refused outright
 /// rather than normalised, because normalising is where directory traversal
 /// bugs come from.
-pub fn serve_static(out: &mut impl Write, root: &Path, path: &str) -> io::Result<()> {
+///
+/// If a precompressed twin sits next to the file — `app.wasm.br` beside
+/// `app.wasm` — and the client said it would take that encoding, the twin is
+/// sent instead. It matters here more than it usually would: the client is a
+/// WebAssembly module of several megabytes that the browser must have in full
+/// before anything appears, and it compresses to under a third of that. The
+/// compressing is `tools/build-web.sh`'s job, so this costs the bridge nothing
+/// per request and needs no compressor in it.
+pub fn serve_static(
+    out: &mut impl Write,
+    root: &Path,
+    path: &str,
+    accepted: &str,
+) -> io::Result<()> {
     let relative = path.trim_start_matches('/');
     let relative = if relative.is_empty() {
         "index.html"
@@ -239,14 +273,57 @@ pub fn serve_static(out: &mut impl Write, root: &Path, path: &str) -> io::Result
         }
     }
 
-    match std::fs::read(&full) {
-        Ok(body) => respond(out, 200, "OK", content_type(&full), &body),
+    // Brotli first: it is the better of the two and every browser that speaks
+    // it also speaks gzip, so preferring it costs nothing.
+    let encoding = ["br", "gzip"].into_iter().find(|encoding| {
+        let suffix = if *encoding == "br" { "br" } else { "gz" };
+        accepts(accepted, encoding) && precompressed(&full, suffix).is_some()
+    });
+
+    let (body, chosen) = match encoding {
+        Some(encoding) => {
+            let suffix = if encoding == "br" { "br" } else { "gz" };
+            match precompressed(&full, suffix) {
+                Some(twin) => (std::fs::read(twin), Some(encoding)),
+                None => (std::fs::read(&full), None),
+            }
+        }
+        None => (std::fs::read(&full), None),
+    };
+
+    match body {
+        // The type is the *original* file's; the encoding is separate from it.
+        Ok(body) => respond_encoded(out, 200, "OK", content_type(&full), chosen, &body),
         Err(e) if e.kind() == io::ErrorKind::NotFound => respond_status(out, 404, "Not Found"),
         Err(e) => {
             tracing::warn!(path = %full.display(), error = %e, "static read failed");
             respond_status(out, 500, "Internal Server Error")
         }
     }
+}
+
+/// The precompressed twin of `path`, if there is one.
+fn precompressed(path: &Path, suffix: &str) -> Option<PathBuf> {
+    let mut twin = path.as_os_str().to_owned();
+    twin.push(".");
+    twin.push(suffix);
+    let twin = PathBuf::from(twin);
+    twin.is_file().then_some(twin)
+}
+
+/// Whether an `Accept-Encoding` header offers `encoding`.
+///
+/// A `q=0` means the client is refusing that encoding specifically, which is
+/// the one case where naming it does not mean accepting it.
+fn accepts(header: &str, encoding: &str) -> bool {
+    header.split(',').any(|part| {
+        let mut bits = part.split(';').map(str::trim);
+        let name = bits.next().unwrap_or_default();
+        if !name.eq_ignore_ascii_case(encoding) {
+            return false;
+        }
+        !bits.any(|p| p.replace(' ', "") == "q=0" || p.replace(' ', "") == "q=0.0")
+    })
 }
 
 /// Content type by extension.
@@ -329,8 +406,66 @@ mod tests {
     #[test]
     fn traversal_is_refused_rather_than_normalised() {
         let mut out = Vec::new();
-        serve_static(&mut out, Path::new("/nonexistent"), "/../etc/passwd").unwrap();
+        serve_static(&mut out, Path::new("/nonexistent"), "/../etc/passwd", "").unwrap();
         assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 403 "));
+    }
+
+    #[test]
+    fn an_accept_encoding_header_is_read_per_token() {
+        assert!(accepts("gzip, deflate, br", "br"));
+        assert!(accepts("gzip;q=1.0, br;q=0.8", "gzip"));
+        assert!(!accepts("gzip, deflate", "br"));
+        assert!(!accepts("", "gzip"));
+        // Naming an encoding at q=0 is how a client refuses it specifically.
+        assert!(!accepts("gzip;q=0, br", "gzip"));
+        assert!(accepts("gzip;q=0, br", "br"));
+        // A prefix is not a match: "brotli" is not "br".
+        assert!(!accepts("brotli", "br"));
+    }
+
+    /// A precompressed twin is sent in place of the file, with the original's
+    /// type and an encoding beside it.
+    #[test]
+    fn a_precompressed_twin_is_served_when_the_client_takes_it() {
+        let dir = std::env::temp_dir().join(format!("b070-http-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.wasm"), b"plain-bytes").unwrap();
+        std::fs::write(dir.join("app.wasm.br"), b"squeezed").unwrap();
+
+        let mut out = Vec::new();
+        serve_static(&mut out, &dir, "/app.wasm", "gzip, br").unwrap();
+        let sent = String::from_utf8_lossy(&out).into_owned();
+        assert!(sent.contains("Content-Encoding: br"), "{sent}");
+        assert!(sent.contains("Vary: Accept-Encoding"), "{sent}");
+        assert!(sent.contains("Content-Type: application/wasm"), "{sent}");
+        assert!(sent.ends_with("squeezed"), "{sent}");
+
+        // A client that does not offer it gets the file itself.
+        let mut out = Vec::new();
+        serve_static(&mut out, &dir, "/app.wasm", "identity").unwrap();
+        let sent = String::from_utf8_lossy(&out).into_owned();
+        assert!(!sent.contains("Content-Encoding"), "{sent}");
+        assert!(sent.ends_with("plain-bytes"), "{sent}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// No twin on disk means the file is served plainly, however eager the
+    /// client's header is.
+    #[test]
+    fn a_missing_twin_is_not_an_error() {
+        let dir = std::env::temp_dir().join(format!("b070-http-bare-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), b"<!doctype html>").unwrap();
+
+        let mut out = Vec::new();
+        serve_static(&mut out, &dir, "/", "gzip, br").unwrap();
+        let sent = String::from_utf8_lossy(&out).into_owned();
+        assert!(sent.starts_with("HTTP/1.1 200 "), "{sent}");
+        assert!(!sent.contains("Content-Encoding"), "{sent}");
+        assert!(sent.ends_with("<!doctype html>"), "{sent}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
