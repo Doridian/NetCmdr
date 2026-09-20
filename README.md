@@ -149,18 +149,20 @@ Everything else above has been run against a live device.
 ```sh
 b070-view --host 192.0.2.10 --target 1      # open a window on target 1
 b070-view --host 192.0.2.10 --list          # list targets
-b070-view --host 192.0.2.10 -t 1 --auto-adjust   # re-align the analog capture
+b070-view --host 192.0.2.10 -t 1 --auto-adjust   # the device's own adjustment
+b070-view --host 192.0.2.10 -t 1 --align    # measure the capture offsets and fix them
 b070-view --host 192.0.2.10 -t 1 --snapshot out.ppm   # headless frame capture
 ```
 
 In the window, keyboard and mouse go to the target and the image scales to the
-window with the aspect ratio preserved. Three shortcuts stay local:
+window with the aspect ratio preserved. Four shortcuts stay local:
 
 | Key | Does |
 |---|---|
 | **Ctrl+Alt+End** | send Ctrl+Alt+Delete to the target |
 | **Ctrl+Alt+Home** | re-sync the remote pointer with yours |
 | **Ctrl+Alt+A** | run the device's automatic video adjustment |
+| **Ctrl+Alt+Shift+A** | measure the capture offsets from the picture and correct them |
 
 Everything else is on the menu bar, which mirrors the stock client's toolbar
 minus virtual media:
@@ -169,7 +171,7 @@ minus virtual media:
 |---|---|
 | **Keyboard** | Ctrl+Alt+Delete, and the combinations your own desktop swallows — Alt+Tab, Alt+F4, Ctrl+Shift+Esc, Super+L, Print Screen, Ctrl+Alt+F1… — plus *release held keys* |
 | **Mouse** | sync pointer, calibrate, align, and how the local pointer is drawn over the video |
-| **Video** | refresh, auto adjust, **manual adjustment** (position, phase, brightness, filter), fit-to-window or 1:1, resize the window to the target |
+| **Video** | refresh, auto adjust, **re-align capture**, **manual adjustment** (position, phase, brightness, filter), fit-to-window or 1:1, resize the window to the target |
 | **Power** | cycle / on / off for the current target's IP-PDU outlet, each behind a confirmation |
 | **Session** | **switch target without reconnecting**, reload the target list, exclusive access, disconnect |
 
@@ -185,18 +187,40 @@ another machine's name, so the viewer blanks the screen and puts up a
 session is still on its way. Video comes back when the device itself says the
 switch landed.
 
-The device digitises analog VGA, so its horizontal position and sampling phase
-drift per target and per video mode; `--auto-adjust` (or Ctrl+Alt+A, or
-Video → Auto adjust) is what re-centres the captured image.
+The device digitises analog VGA, so its sampling phase and gain drift per target
+and per video mode; `--auto-adjust` (or Ctrl+Alt+A, or Video → Auto adjust) is
+what re-derives them. It does not find the capture *position* — for that see
+below.
 
 ### When the automatic adjustment is not enough
 
-The device keeps a horizontal sampling offset per video mode, and on a mode
-whose figure it has wrong, the edge of the picture is simply never captured —
-measured on a target driving 1360×768, the device starts sampling 4 px into the
-active area and cuts the first character off every line. **Its own automatic
-adjustment does not touch that value**: ask for one and the device answers with
-a byte-identical `<video_settings>`, so Ctrl+Alt+A can never fix it.
+The device keeps a sampling offset per video mode, and on a mode whose figure it
+has wrong, the edge of the picture is simply never captured — measured on a
+target driving 1360×768, the device starts sampling 4 px into the active area
+and cuts the first character off every line. **Its own automatic adjustment
+cannot fix that, because the figure it restores is the wrong one**: ask for one
+and it puts `hoffset` and `voffset` back to what its video-mode table says, so
+Ctrl+Alt+A undoes a correction rather than making one. (It does re-derive the
+phase and the filter, and those it keeps.)
+
+*Video → Re-align capture* (Ctrl+Alt+Shift+A, or `--align` on `b070-view`) is
+what corrects it. Lowering an offset by one moves the picture one pixel right
+and brings one lane of the scan line's blanking into view, so the error counts
+itself: probe a little below where the device has it, count the blank lanes that
+appear, and the sum is the answer. One probe per axis, about five seconds for
+both, measured from the picture itself rather than searched for. The result goes
+in the bar — `hoffset 368 → 364`.
+
+It needs something on screen to measure against, and it says so rather than
+guessing: blanking and black content are the same pixels to a digitiser, so a
+target sitting at a bare console has nothing to anchor a *vertical* measurement
+on until the console has scrolled. An answer that falls outside the range the
+device declares for the knob is refused for the same reason — that range is
+exactly the mode's blanking interval, so a real answer is always inside it.
+
+Corrections last for the session: they are lost at logout, on a target switch,
+and whenever the device re-derives its own settings. The bar says so when it
+happens, and re-aligning takes a few seconds.
 
 Video → *Adjust manually…* opens the controls the stock client keeps in its
 Advanced Video dialog, each applied live as you move it:
@@ -209,9 +233,19 @@ Advanced Video dialog, each applied live as you move it:
 | **Brightness / contrast** | the digitiser's gain, so they also move the Noise reading |
 | **Filter** | how hard the device filters the signal. *Auto* is not a value — picking it runs the automatic adjustment, exactly as the stock client does |
 
-To find the right horizontal position, take it *down* until a black band appears
-along the left edge, then back up until the band is just gone: that band is the
-scan line's back porch, so its edge is where the picture really begins.
+To find a position by hand, take it *down* until a black band appears along the
+edge, then back up until the band is just gone: that band is the blanking
+interval, so where it ends is where the picture really begins. *Re-align
+capture* does exactly this, by counting the band instead of watching it.
+
+Two things discard a position set by hand or by an alignment: **Auto adjust**,
+and picking **Auto** as the filter — which is a request for the same
+adjustment. Both hand the two positions back to the device's table.
+
+*Restore* puts back the brightness, contrast, phase and filter the window opened
+with. It cannot put back the two positions: the device silently ignores a set
+whose value matches the one in its own stored config, and those are exactly the
+values a restore would be sending. Auto adjust is the way back to them.
 
 These settings are per session and are **not** persisted — the device reads its
 own defaults again at the next login, so a mode it has wrong needs correcting

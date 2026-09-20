@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use b070_session::{Event, Session, SessionConfig};
+use b070_session::align::{self, Aligner, Step as AlignStep};
+use b070_session::{Event, Session, SessionConfig, VideoSettings};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -27,8 +28,9 @@ use clap::Parser;
     long_about = "Opens a KVM session to one target and shows its screen.\n\n\
                   Keyboard and mouse are passed through. Ctrl+Alt+End sends \
                   Ctrl+Alt+Delete to the target, Ctrl+Alt+Home re-syncs the \
-                  remote pointer with yours, and Ctrl+Alt+A runs the device's \
-                  automatic video adjustment.\n\n\
+                  remote pointer with yours, Ctrl+Alt+A runs the device's \
+                  automatic video adjustment and Ctrl+Alt+Shift+A measures the \
+                  capture offsets from the picture and corrects them.\n\n\
                   The window's menu bar covers the rest: key combinations your \
                   own desktop swallows, switching target without reconnecting, \
                   mouse calibration, video adjustment and target power control."
@@ -76,6 +78,28 @@ struct Args {
     /// captured image for the target's current video mode.
     #[arg(long)]
     auto_adjust: bool,
+
+    /// Align the capture window with the target's picture on connect.
+    ///
+    /// Measures where the picture actually starts and moves the device's
+    /// sampling offsets onto it. This is the correction --auto-adjust cannot
+    /// make: that one restores the figures in the device's own video-mode
+    /// table, which is the very thing that is wrong for a mode the table has no
+    /// right entry for. Needs something on screen to measure against.
+    #[arg(long)]
+    align: bool,
+
+    /// With --align, leave the vertical offset alone.
+    ///
+    /// A target sitting at a bare console has nothing in its top rows, so there
+    /// is nothing to measure vertically until it has scrolled.
+    #[arg(long)]
+    align_horizontal: bool,
+
+    /// With --align, prove each answer by stepping one below it and checking
+    /// that exactly one blank lane appears. Roughly doubles the run.
+    #[arg(long)]
+    align_verify: bool,
 }
 
 fn main() -> Result<()> {
@@ -124,6 +148,16 @@ fn main() -> Result<()> {
         session.auto_adjust_video()?;
     }
 
+    if args.align {
+        align_capture(
+            &session,
+            align::Options {
+                vertical: !args.align_horizontal,
+                verify: args.align_verify,
+            },
+        )?;
+    }
+
     match &args.snapshot {
         Some(path) => snapshot(&session, args.frames, path),
         None => shell::run(
@@ -136,6 +170,115 @@ fn main() -> Result<()> {
                 client,
             },
         ),
+    }
+}
+
+/// Measure the capture offsets from the picture and correct them.
+///
+/// Drives the same state machine the window uses ([`b070_session::align`]) from
+/// a plain loop: it never blocks, so pumping it is just a matter of handing it
+/// a frame and carrying out the one step it asks for.
+fn align_capture(session: &Session, opts: align::Options) -> Result<()> {
+    /// Long enough for both axes with verification, which measured 18.6 s on
+    /// the hardware, plus a restore through the device's own adjustment.
+    const TIMEOUT: Duration = Duration::from_secs(90);
+    /// How long to wait for the device to announce the mode it is digitising.
+    const SETTINGS_TIMEOUT: Duration = Duration::from_secs(15);
+
+    let mut video: Option<VideoSettings> = None;
+    let mut aligner: Option<Aligner> = None;
+    // The mode the run was armed on. The device announces the mode it is
+    // already on at the start of every session, so it is a *change* of mode
+    // that invalidates a run, not an announcement of one.
+    let mut armed_on: Option<(u16, u16)> = None;
+    let started = Instant::now();
+
+    loop {
+        // Drain whatever has arrived.
+        loop {
+            match session.events.recv_timeout(Duration::from_millis(20)) {
+                Ok(Event::ConfigXml(xml)) => {
+                    if let Some(v) = b070_session::parse_video_settings(&xml) {
+                        tracing::info!(
+                            width = v.width,
+                            height = v.height,
+                            refresh = v.refresh,
+                            hoffset = v.hoffset.value,
+                            voffset = v.voffset.value,
+                            "device capture settings"
+                        );
+                        video = Some(v);
+                        if let Some(a) = &mut aligner {
+                            a.config_arrived();
+                        }
+                    }
+                }
+                Ok(Event::Resolution { width, height }) => {
+                    tracing::info!(width, height, "resolution");
+                    if armed_on.is_some_and(|had| had != (width, height)) {
+                        if let Some(a) = &mut aligner {
+                            a.abort("the video mode changed");
+                        }
+                    }
+                }
+                Ok(Event::Gui(msg)) if !msg.is_empty() => tracing::debug!(%msg, "device message"),
+                Ok(Event::NoSignal) => anyhow::bail!("no video signal from the target"),
+                Ok(Event::Disconnected(reason)) => anyhow::bail!("session ended: {reason}"),
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(e) => anyhow::bail!("session ended: {e}"),
+            }
+        }
+
+        let Some(v) = &video else {
+            anyhow::ensure!(
+                started.elapsed() < SETTINGS_TIMEOUT,
+                "the device never reported its capture settings"
+            );
+            continue;
+        };
+
+        let step = {
+            let frame = session.frame().lock().expect("framebuffer lock");
+            // Nothing is armed until there is a picture: until then the mode
+            // the run belongs to is not settled either.
+            if frame.width == 0 || frame.height == 0 {
+                anyhow::ensure!(
+                    started.elapsed() < SETTINGS_TIMEOUT,
+                    "the device never sent a picture to align to"
+                );
+                continue;
+            }
+            let aligner = match &mut aligner {
+                Some(a) => a,
+                none => {
+                    armed_on = Some((frame.width, frame.height));
+                    none.insert(Aligner::new(opts))
+                }
+            };
+            aligner.poll(Instant::now(), &frame, v)
+        };
+        match step {
+            AlignStep::Set(setting, value) => {
+                tracing::debug!(setting = setting.as_str(), value, "setting");
+                session.set_video_number(setting, value)?;
+            }
+            AlignStep::AutoAdjust => {
+                tracing::info!("running the device's own adjustment to restore a default");
+                session.auto_adjust_video()?;
+            }
+            AlignStep::Wait => {}
+            AlignStep::Done(report) => {
+                println!("{}", report.summary());
+                return Ok(());
+            }
+            AlignStep::Failed(why) => anyhow::bail!("could not align the capture: {why}"),
+        }
+
+        anyhow::ensure!(
+            started.elapsed() < TIMEOUT,
+            "the alignment did not finish within {TIMEOUT:?}"
+        );
     }
 }
 

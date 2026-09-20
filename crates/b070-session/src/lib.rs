@@ -32,6 +32,7 @@
 //!
 //! Virtual media (the fourth channel) is not implemented.
 
+pub mod align;
 pub mod channel;
 pub mod core;
 pub mod input;
@@ -44,6 +45,7 @@ pub mod time;
 pub mod video;
 pub mod ycbcr;
 
+pub use align::{Aligner, Axis, Report as AlignReport, Step as AlignStep};
 pub use channel::{Channel, Transport};
 pub use core::{
     parse_servers, parse_video_settings, Event, Knob, Server, SessionConfig, SessionCore,

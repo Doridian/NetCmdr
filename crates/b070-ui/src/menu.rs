@@ -98,6 +98,9 @@ pub enum Action {
     RefreshVideo,
     AutoAdjustVideo,
     StopAutoAdjust,
+    /// Measure the capture offsets from the picture and correct them — the
+    /// thing the device's own adjustment cannot do. See `b070_session::align`.
+    AlignCapture,
     /// Set one analog capture knob to an absolute value.
     SetVideoNumber(VideoSetting, i32),
     SetVideoFilter(VideoFilter),
@@ -151,6 +154,8 @@ pub enum Work {
     Switch,
     /// An automatic adjustment, ended by the fresh capture settings it sends.
     VideoAdjust,
+    /// A capture alignment, ended by the viewer's own state machine reporting.
+    Align,
     /// A full repaint, ended by the next picture that arrives.
     Repaint,
 }
@@ -320,6 +325,11 @@ impl Menu {
         done
     }
 
+    /// What the bar is saying, if anything.
+    pub fn note_text(&self) -> Option<&str> {
+        self.note.as_ref().map(|n| n.text.as_str())
+    }
+
     /// Take the note down now, for a caller that knows it has stopped being
     /// true before its time is up.
     pub fn clear_note(&mut self) {
@@ -478,6 +488,14 @@ impl Menu {
             }
             if ui.button("Stop adjusting").clicked() {
                 out.push(Action::StopAutoAdjust);
+                ui.close();
+            }
+            if ui
+                .add(egui::Button::new("Re-align capture").shortcut_text("Ctrl+Alt+Shift+A"))
+                .on_hover_text(ALIGN_HELP)
+                .clicked()
+            {
+                out.push(Action::AlignCapture);
                 ui.close();
             }
             if ui
@@ -763,8 +781,11 @@ impl Menu {
                     if ui
                         .add_enabled(restore.is_some(), egui::Button::new("Restore"))
                         .on_hover_text(
-                            "Put back the values the device reported when this window \
-                             was opened.",
+                            "Put back the brightness, contrast, phase and filter the \
+                             device reported when this window was opened. The two \
+                             positions are not included: the device refuses to be set \
+                             to the values it is already holding, so only its own \
+                             adjustment can put those back.",
                         )
                         .clicked()
                     {
@@ -779,6 +800,13 @@ impl Menu {
                         .clicked()
                     {
                         out.push(Action::AutoAdjustVideo);
+                    }
+                    if ui
+                        .button("Re-align capture")
+                        .on_hover_text(ALIGN_HELP)
+                        .clicked()
+                    {
+                        out.push(Action::AlignCapture);
                     }
                 });
                 ui.add_space(4.0);
@@ -797,21 +825,7 @@ impl Menu {
 
         if restore_now {
             if let Some(r) = restore {
-                for (setting, value) in [
-                    (VideoSetting::Brightness, r.brightness.value),
-                    (VideoSetting::Contrast, r.contrast.value),
-                    (VideoSetting::HOffset, r.hoffset.value),
-                    (VideoSetting::VOffset, r.voffset.value),
-                    (VideoSetting::Phase, r.phase.value),
-                ] {
-                    out.push(Action::SetVideoNumber(setting, value));
-                }
-                // `Auto` is not a filter the device stores, it is a request to
-                // run the adjustment — which is the one thing a restore must
-                // not do.
-                if r.filter != VideoFilter::Auto {
-                    out.push(Action::SetVideoFilter(r.filter));
-                }
+                out.extend(restore_actions(&r));
                 self.video = Some(r);
             }
         }
@@ -930,13 +944,49 @@ fn filter_label(f: VideoFilter) -> &'static str {
     }
 }
 
+/// What the adjustment window's *Restore* button sends.
+///
+/// Not the whole of what it says on the tin, and it cannot be: the device
+/// silently drops a set whose value equals the one in its own stored config,
+/// and for the two positions the value being restored *is* that value — the
+/// window opens on whatever the device last reported. Sending them would be a
+/// gesture with nothing behind it, so they are left out and the window says so
+/// instead. See `b070_session::align`.
+fn restore_actions(original: &VideoSettings) -> Vec<Action> {
+    let mut out: Vec<Action> = [
+        (VideoSetting::Brightness, original.brightness.value),
+        (VideoSetting::Contrast, original.contrast.value),
+        (VideoSetting::Phase, original.phase.value),
+    ]
+    .into_iter()
+    .map(|(setting, value)| Action::SetVideoNumber(setting, value))
+    .collect();
+
+    // `Auto` is not a filter the device stores, it is a request to run the
+    // adjustment — which is the one thing a restore must not do.
+    if original.filter != VideoFilter::Auto {
+        out.push(Action::SetVideoFilter(original.filter));
+    }
+    out
+}
+
+const ALIGN_HELP: &str = "\
+Measure where the target's picture actually starts and move the capture window \
+onto it.
+
+This is what the device's own adjustment cannot do: that one puts the two \
+positions back to the figures in its video-mode table, which is the very thing \
+that is wrong for a mode the table has no entry for. Takes about ten seconds, \
+and needs something on screen to measure against.";
+
 const HOFFSET_HELP: &str = "\
 Where the device starts sampling each scan line, in pixels.
 
 Lower moves the picture right. If the left edge of the target's screen is cut \
 off, take this down by the number of pixels missing — the automatic adjustment \
-does not touch this value, so a mode the device has the wrong figure for stays \
-wrong until you correct it here.";
+puts this back to the figure in the device's video-mode table, so a mode that \
+table is wrong for stays wrong until you correct it here or use Re-align \
+capture.";
 
 const VOFFSET_HELP: &str = "\
 Which line the device starts capturing at. Lower moves the picture down.";
@@ -1205,26 +1255,42 @@ mod tests {
     /// into an auto-adjust.
     #[test]
     fn restore_resends_the_values_the_window_opened_with() {
-        let mut m = menu();
         let original = settings();
-        m.video_restore = Some(original.clone());
+        let out = restore_actions(&original);
 
-        // What the window does when Restore is clicked.
-        let mut out = Vec::new();
-        for (setting, value) in [
-            (VideoSetting::Brightness, original.brightness.value),
-            (VideoSetting::Contrast, original.contrast.value),
-            (VideoSetting::HOffset, original.hoffset.value),
-            (VideoSetting::VOffset, original.voffset.value),
-            (VideoSetting::Phase, original.phase.value),
-        ] {
-            out.push(Action::SetVideoNumber(setting, value));
-        }
-        assert!(out.contains(&Action::SetVideoNumber(VideoSetting::HOffset, 368)));
-        assert!(!out
+        assert!(out.contains(&Action::SetVideoNumber(
+            VideoSetting::Brightness,
+            original.brightness.value
+        )));
+        assert!(out.contains(&Action::SetVideoNumber(
+            VideoSetting::Phase,
+            original.phase.value
+        )));
+    }
+
+    /// Restoring `auto` would run the device's adjustment, which is the one
+    /// thing a restore must not do.
+    #[test]
+    fn restore_never_asks_for_the_automatic_filter() {
+        let mut original = settings();
+        original.filter = VideoFilter::Auto;
+
+        assert!(!restore_actions(&original)
             .iter()
-            .any(|a| matches!(a, Action::SetVideoFilter(VideoFilter::Auto))));
-        assert!(m.video_restore.is_some());
+            .any(|a| matches!(a, Action::SetVideoFilter(_))));
+    }
+
+    /// The device drops a set that matches its own stored value, and the two
+    /// positions being restored are exactly that — so sending them would look
+    /// like a restore without being one.
+    #[test]
+    fn restore_leaves_out_the_positions_the_device_would_drop() {
+        let out = restore_actions(&settings());
+
+        assert!(!out.iter().any(|a| matches!(
+            a,
+            Action::SetVideoNumber(VideoSetting::HOffset | VideoSetting::VOffset, _)
+        )));
     }
 
     #[test]

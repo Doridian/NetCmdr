@@ -590,7 +590,9 @@ session survives its 30-second heartbeat.
 a few pixels off horizontally until adjusted. `CmdFlag::GENERAL` + `Cmd` 64
 (`VIDEO_AUTO`) starts the device's own auto-adjust, 65 stops it, and progress
 comes back as `RAW_DATA` + `Cmd` 19 with an `RPMAutoAdjStruct` (two i16s then a
-64-byte status string).
+64-byte status string). What that adjustment does and does not fix — it
+re-derives the phase but *reverts* the capture position — is measured under
+"Analog capture position" below.
 
 **The "noise" meter is computed client-side from a wire field.** The stock
 client's Advanced Video dialog shows a "Noise / Level" progress bar, and nothing
@@ -627,6 +629,77 @@ substring `statistics noise_level` and routes it to the dialog's `JProgressBar`.
 
 `crates/b070-session/src/video.rs` (`NoiseMeter`) transcribes this, ungated, and
 `b070-view` shows it as a bar in the menu bar rather than hiding it in a dialog.
+
+#### Analog capture position — HARDWARE-MEASURED (2026-09-19)
+
+The two capture-position knobs in `<video_settings>` are where the device starts
+digitising each frame, and they are the one part of the video path its own
+automatic adjustment makes *worse* rather than better. Everything below was
+measured on a live B070-008-19-IP (firmware 2.2.1258.1.0) against two targets:
+port 1 driving 1360×768@60 and port 2 driving 1024×768@75.
+
+**What the numbers mean.** `hoffset` is the hsync width plus the back porch, in
+pixel clocks from the sync edge; `voffset` is the same in lines. The reported
+`hoffset_min`/`hoffset_max` are exactly the mode's blanking interval, so the
+mode's whole timing can be read back out of them:
+
+```
+hsync  = hoffset_min - 1
+hback  = hoffset - hoffset_min + 1
+hfront = hoffset_max - hoffset + 1
+```
+
+Checked against CVT/VESA timings for both modes — eight numbers, all exact. The
+practical consequence is that **a correct value is always inside the range the
+device declares**, which is the only cheap guard there is on a measurement.
+
+**One unit is one pixel or one line.** Lowering a value moves the captured
+picture right (or down) and brings that many lanes of blanking into view at the
+leading edge, so the error counts itself:
+
+```
+correct = probe + blank_lanes(picture at probe)
+```
+
+One probe and one addition, not a search. Every probe point tried agrees:
+
+| Target | Mode | Device default | Probes → answer |
+|---|---|---|---|
+| 1 | 1360×768@60 | `hoffset` 368 | 360→4, 352→12, 348→16 ⇒ **364** |
+| 2 | 1024×768@75 | `hoffset` 272 | 264→6, 256→14, 248→22, 268→2 ⇒ **270** |
+| 1 | 1360×768@60 | `voffset` 24 | 23→2, 20→5, 16→9, 10→15, 7→18 ⇒ **25** |
+
+**A set whose value equals the device's own default is silently dropped.** Four
+reproductions across both axes, and six spellings of the number (`0368`, ` 368`,
+`368.0`, `+368`, `368 `) — so the filter is numeric and device-side. The device
+compares against its *stored* config, which a client's sets never update, so the
+default value is unreachable for the rest of the session and the config document
+keeps reporting the default no matter what has been set.
+
+**The automatic adjustment reverts both offsets to the stored default.** It does
+not leave them alone, which is what §5.4.1's earlier note and the README both
+said: that observation came from a session in which nothing had been moved. It
+also re-derives the phase and **persists** it — it moved port 2's `phase` from
+16 to 20, and that survived new logins. It takes ~6.5 s, sends no `gui` progress
+at all, and its only signal is a single `CONFIG_XML`. So it is simultaneously
+the thing that undoes a correction and the only route back to a default value.
+
+**A set reaches the picture in 0.5–1.6 s**, variably. Anything driving these
+knobs has to watch the framebuffer rather than sleep a fixed amount.
+
+**Blanking is indistinguishable from black content.** Same level (max luma 16
+over a floor of about 10) and the same temporal noise (sd 0.07–0.26 for both,
+over 20 samples). There is no metric that separates them, so a measurement can
+only be *range-checked*, not validated: on port 2, whose console leaves the top
+of the screen empty, the vertical probe read 41 blank rows and produced 64 — past
+`voffset_max` of 31, and refused on that ground alone.
+
+**Corrections die on logout and on a target switch**, the latter because the
+device re-announces its defaults along with the new port's config.
+
+`crates/b070-session/src/align.rs` implements the measurement and the state
+machine that drives it; `b070-view --align` and the viewer's *Video → Re-align
+capture* are the two front ends.
 
 #### 5.4.2 `ITCMsg` / `CommIO` — LEGACY (2013 firmware, superseded)
 

@@ -14,6 +14,7 @@
 //! Nothing here knows whether it is in a window or a browser tab. What differs
 //! between the two is behind [`crate::platform`].
 
+use b070_session::align::{self, Aligner, Step as AlignStep};
 use b070_session::time::{Duration, Instant};
 use b070_session::{Event, Input, Modifiers, MouseButton};
 
@@ -112,6 +113,15 @@ pub struct Viewer<S: SessionLink, M: MgmtLink> {
     video_rect: egui::Rect,
     pointer_over_video: bool,
 
+    /// A capture alignment in progress. See [`b070_session::align`].
+    align: Option<Aligner>,
+    /// What the last alignment corrected, while that correction is still live.
+    ///
+    /// Corrections do not survive the device re-deriving its own capture
+    /// settings, and nothing announces that they have gone — so this is what
+    /// lets the bar say so when it happens.
+    aligned: Option<String>,
+
     /// A target change asked for but not yet confirmed by the device.
     switching: Option<Switch>,
     /// The device last told us the target is not driving video.
@@ -147,6 +157,8 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             mgmt,
             menu,
             screen: Screen::new(),
+            align: None,
+            aligned: None,
             remote: None,
             video_rect: egui::Rect::NOTHING,
             pointer_over_video: false,
@@ -274,6 +286,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                 Ok(()) => self.note("stopped adjusting"),
                 Err(e) => self.failed("stop adjusting", e),
             },
+            Action::AlignCapture => self.start_align(),
             // The control that sent this is on screen showing the value, and
             // the picture answers for itself, so a note would only read the
             // knob back. Say something only when the device refuses.
@@ -326,6 +339,14 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                         name: name.clone(),
                         since: Instant::now(),
                     });
+                    // Frames from the old target go on arriving for seconds
+                    // after this, and two targets can share a resolution — so
+                    // a run left going would measure one machine's picture and
+                    // set the offsets for another's mode.
+                    if let Some(aligner) = &mut self.align {
+                        aligner.abort("the target changed");
+                    }
+                    self.aligned = None;
                     self.working_on(format!("switching to {name}…"), Work::Switch);
                 }
                 Err(e) => self.failed("switch target", e),
@@ -445,6 +466,106 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         None
     }
 
+    // ----------------------------------------------------------------- align
+
+    /// Start measuring the capture offsets from the picture.
+    ///
+    /// This is the correction the device's own adjustment cannot make: that one
+    /// restores the figures in the firmware's video-mode table, which is
+    /// exactly what is wrong for a mode the table has no right entry for. See
+    /// [`b070_session::align`] for the measurement.
+    fn start_align(&mut self) {
+        if self.align.is_some() {
+            self.note("already aligning the capture");
+            return;
+        }
+        if self.menu.video.is_none() {
+            self.note("the device has not reported its capture settings yet");
+            return;
+        }
+        self.align = Some(Aligner::new(align::Options::default()));
+        self.working_on("aligning the capture…", Work::Align);
+    }
+
+    /// Give the alignment its frame, and carry out whatever it asks for.
+    ///
+    /// The state machine never blocks — it hands back one step per frame — so
+    /// this works the same in a window and in a browser tab, where there is
+    /// nowhere to block at all.
+    fn pump_align(&mut self) {
+        let Some(mut aligner) = self.align.take() else {
+            return;
+        };
+        // The device's own view of the knobs, which is always its defaults:
+        // it never folds a client's sets back into the config it publishes.
+        let Some(video) = self.menu.video.clone() else {
+            self.note("the device stopped reporting its capture settings");
+            return;
+        };
+
+        let step = match self.session.frame().lock() {
+            Ok(frame) => aligner.poll(Instant::now(), &frame, &video),
+            Err(_) => {
+                self.align = Some(aligner);
+                return;
+            }
+        };
+
+        match step {
+            AlignStep::Set(setting, value) => {
+                self.progress("aligning the capture…");
+                if let Err(e) = self.session.set_video_number(setting, value) {
+                    // Without the set there is nothing to measure, and the run
+                    // would only sit there waiting for a picture that is not
+                    // going to move.
+                    aligner.abort(format!("could not set {}: {e}", setting.as_str()));
+                }
+            }
+            AlignStep::AutoAdjust => {
+                self.progress("restoring the device's own setting…");
+                if let Err(e) = self.session.auto_adjust_video() {
+                    aligner.abort(format!("could not restore the device's setting: {e}"));
+                }
+            }
+            AlignStep::Wait => {}
+            AlignStep::Done(report) => {
+                self.menu.work_done(Work::Align);
+                self.note(report.summary());
+                self.aligned = report.changed().then(|| report.summary());
+                self.dirty = true;
+                return;
+            }
+            AlignStep::Failed(why) => {
+                tracing::warn!(%why, "capture alignment gave up");
+                self.menu.work_done(Work::Align);
+                self.note(format!("could not align the capture: {why}"));
+                self.dirty = true;
+                return;
+            }
+        }
+
+        // A run in flight is the only thing on screen that moves on its own,
+        // so it has to ask for the repaints that keep it being polled.
+        self.dirty = true;
+        self.align = Some(aligner);
+    }
+
+    /// The device has re-derived its own capture settings, so any correction
+    /// this client made has gone with them.
+    ///
+    /// Nothing announces that. Saying so is the whole of the recovery: putting
+    /// it back is a ten-second run, and doing that unasked — possibly in a loop
+    /// with whatever moved the settings — is worse than a line in the bar.
+    fn align_lost(&mut self, why: &str) {
+        if self.align.is_some() {
+            return;
+        }
+        if let Some(what) = self.aligned.take() {
+            tracing::info!(%what, %why, "capture alignment lost");
+            self.note(format!("{why}; the capture alignment ({what}) is gone"));
+        }
+    }
+
     // ----------------------------------------------------------------- events
 
     /// Drain session events, returning false when the session has ended.
@@ -468,6 +589,16 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                 }
                 Event::Resolution { width, height } => {
                     tracing::info!(width, height, "remote resolution");
+                    // A *changed* mode invalidates every offset measured so far,
+                    // and the range they were checked against with them. The
+                    // device also re-announces the mode it is already on, which
+                    // invalidates nothing.
+                    if self.remote.is_some_and(|had| had != (width, height)) {
+                        if let Some(aligner) = &mut self.align {
+                            aligner.abort("the video mode changed");
+                        }
+                        self.align_lost("the video mode changed");
+                    }
                     self.remote = Some((width, height));
                     self.menu.remote = Some((width, height));
                     self.no_signal = false;
@@ -525,6 +656,14 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             // the protocol has no "done" message, and this is the only thing
             // that arrives when one finishes.
             self.menu.work_done(Work::VideoAdjust);
+            // An alignment asks for that adjustment itself, to reach the one
+            // value a session cannot set; this is what ends its wait.
+            match &mut self.align {
+                Some(aligner) => aligner.config_arrived(),
+                // Otherwise the device re-derived the offsets on its own
+                // account, which puts them back to its table's figures.
+                None => self.align_lost("the device re-adjusted its capture"),
+            }
             self.dirty = true;
         }
 
@@ -586,6 +725,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         if !self.pump_session(host) {
             return false;
         }
+        self.pump_align();
         // A switch the device never confirms must not blank the screen forever.
         if self
             .switching
@@ -645,9 +785,15 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
 
     /// Height of the menu bar in physical pixels, for sizing to the target.
     fn bar_height(&self) -> u32 {
-        (self.video_rect.top() * self.pixels_per_point)
-            .round()
-            .max(0.0) as u32
+        // Before the first pass has drawn anything the rectangle is
+        // `Rect::NOTHING`, whose top is infinite — and the device's first
+        // resolution can well arrive before that pass. Nothing is known about
+        // the bar yet, so nothing is what it adds.
+        let top = self.video_rect.top() * self.pixels_per_point;
+        if !top.is_finite() {
+            return 0;
+        }
+        top.round().max(0.0) as u32
     }
 
     /// Whether a repaint is wanted.
@@ -730,6 +876,11 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             match code {
                 PhysicalKey::End => return self.act(Action::CtrlAltDel, host),
                 PhysicalKey::Home => return self.act(Action::SyncPointer, host),
+                // Shifted: our own measurement rather than the device's,
+                // which is the one that can move the capture position.
+                PhysicalKey::KeyA if self.modifiers.shift => {
+                    return self.act(Action::AlignCapture, host)
+                }
                 PhysicalKey::KeyA => return self.act(Action::AutoAdjustVideo, host),
                 _ => {}
             }
@@ -844,4 +995,261 @@ fn draw_screen(
             }
         });
     rect
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use b070_proto::command::{VideoFilter, VideoSetting};
+    use b070_session::video::Framebuffer;
+    use b070_session::{Error, SharedFrame};
+    use std::sync::{Arc, Mutex};
+
+    /// A session that records what was asked of it and shows a fixed picture.
+    ///
+    /// Enough to drive the alignment's first move, which is what the wiring
+    /// here is: the state machine itself is tested against a simulated device
+    /// in `b070_session::align`.
+    #[derive(Default)]
+    struct FakeSession {
+        frame: SharedFrame,
+        events: Vec<Event>,
+        sets: Vec<(VideoSetting, i32)>,
+        auto_adjusts: u32,
+    }
+
+    impl FakeSession {
+        /// A picture with enough lit pixels in it to be worth measuring.
+        fn with_picture() -> FakeSession {
+            let mut fb = Framebuffer::new();
+            fb.resize(64, 64);
+            for y in 16..48 {
+                for x in 16..48 {
+                    fb.pixels[y * 64 + x] = 0x00FF_FFFF;
+                }
+            }
+            FakeSession {
+                frame: Arc::new(Mutex::new(fb)),
+                ..FakeSession::default()
+            }
+        }
+    }
+
+    impl SessionLink for FakeSession {
+        fn frame(&self) -> &SharedFrame {
+            &self.frame
+        }
+        fn next_event(&mut self) -> Option<Event> {
+            if self.events.is_empty() {
+                None
+            } else {
+                Some(self.events.remove(0))
+            }
+        }
+        fn is_ended(&self) -> bool {
+            false
+        }
+        fn send_input(&mut self, _: Input) -> Result<(), Error> {
+            Ok(())
+        }
+        fn send_xml(&mut self, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+        fn refresh_screen(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn auto_adjust_video(&mut self) -> Result<(), Error> {
+            self.auto_adjusts += 1;
+            Ok(())
+        }
+        fn stop_auto_adjust(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn set_video_number(&mut self, setting: VideoSetting, value: i32) -> Result<(), Error> {
+            self.sets.push((setting, value));
+            Ok(())
+        }
+        fn set_video_filter(&mut self, _: VideoFilter) -> Result<(), Error> {
+            Ok(())
+        }
+        fn change_target(&mut self, _: &str, _: u32) -> Result<(), Error> {
+            Ok(())
+        }
+        fn calibrate_mouse(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn align_mouse(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn set_exclusive(&mut self, _: bool) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeMgmt;
+
+    impl MgmtLink for FakeMgmt {
+        fn request_targets(&mut self) {}
+        fn request_power(&mut self, _: u32, _: b070_mgmt::PowerCommand) {}
+        fn next_reply(&mut self) -> Option<MgmtReply> {
+            None
+        }
+        fn busy(&self) -> bool {
+            false
+        }
+    }
+
+    struct FakeHost;
+
+    impl Host for FakeHost {
+        fn set_title(&self, _: &str) {}
+        fn set_cursor(&self, _: bool, _: crate::menu::CursorMode) {}
+    }
+
+    const VIDEO_XML: &str = "<client_config><video_settings cx='1360' cy='768' fq='60' \
+                             hoffset='368' hoffset_min='113' hoffset_max='431' \
+                             voffset='24' voffset_min='7' voffset_max='26' \
+                             brightness='50' contrast='50' phase='4'/></client_config>";
+
+    fn viewer(session: FakeSession) -> Viewer<FakeSession, FakeMgmt> {
+        Viewer::new(
+            session,
+            FakeMgmt,
+            Config {
+                host: "device".into(),
+                user: "admin".into(),
+                target: 1,
+                exclusive: true,
+            },
+        )
+    }
+
+    #[test]
+    fn aligning_before_the_device_has_reported_says_so() {
+        let mut v = viewer(FakeSession::with_picture());
+        v.act(Action::AlignCapture, &FakeHost);
+        assert!(v.align.is_none(), "nothing to measure against yet");
+
+        v.poll(&FakeHost);
+        assert!(v.session.sets.is_empty());
+    }
+
+    #[test]
+    fn aligning_puts_the_first_probe_on_the_wire() {
+        let mut v = viewer(FakeSession::with_picture());
+        v.on_config(VIDEO_XML, &FakeHost);
+        v.act(Action::AlignCapture, &FakeHost);
+        assert!(v.align.is_some());
+
+        v.poll(&FakeHost);
+        assert_eq!(
+            v.session.sets,
+            vec![(VideoSetting::HOffset, 352)],
+            "16 below the device's default is where the measurement starts"
+        );
+    }
+
+    /// The device answers its own adjustment with a config document, and an
+    /// alignment asks for that adjustment itself — so while one is running the
+    /// document is its answer and not news of a correction being lost.
+    #[test]
+    fn a_config_mid_run_belongs_to_the_run() {
+        let mut v = viewer(FakeSession::with_picture());
+        v.on_config(VIDEO_XML, &FakeHost);
+        v.aligned = Some("hoffset 368 → 364".into());
+        v.act(Action::AlignCapture, &FakeHost);
+
+        v.on_config(VIDEO_XML, &FakeHost);
+        assert!(
+            v.aligned.is_some(),
+            "the run is not news of its own undoing"
+        );
+    }
+
+    #[test]
+    fn the_device_readjusting_reports_the_correction_gone() {
+        let mut v = viewer(FakeSession::with_picture());
+        v.aligned = Some("hoffset 368 → 364".into());
+
+        v.on_config(VIDEO_XML, &FakeHost);
+        assert!(v.aligned.is_none());
+        assert!(
+            v.menu.note_text().is_some_and(|n| n.contains("is gone")),
+            "the bar says so: {:?}",
+            v.menu.note_text()
+        );
+    }
+
+    /// A mode change invalidates every measurement, and the capture is left on
+    /// a probe value — so the abort hands it back to the device.
+    #[test]
+    fn a_mode_change_abandons_a_run_and_restores_the_capture() {
+        let mut v = viewer(FakeSession::with_picture());
+        v.on_config(VIDEO_XML, &FakeHost);
+        v.act(Action::AlignCapture, &FakeHost);
+        v.poll(&FakeHost);
+        assert_eq!(v.session.sets.len(), 1);
+
+        v.remote = Some((1360, 768));
+        v.session.events.push(Event::Resolution {
+            width: 1024,
+            height: 768,
+        });
+        v.poll(&FakeHost);
+        assert_eq!(v.session.auto_adjusts, 1, "the probe was handed back");
+
+        v.poll(&FakeHost);
+        assert!(v.align.is_none(), "the run is over");
+        assert!(
+            v.menu
+                .note_text()
+                .is_some_and(|n| n.contains("the video mode changed")),
+            "{:?}",
+            v.menu.note_text()
+        );
+    }
+
+    /// Frames from the old target keep arriving for seconds after a switch,
+    /// and two targets can share a resolution — so the switch itself has to
+    /// end a run rather than waiting for a mode change that may never come.
+    #[test]
+    fn switching_target_abandons_a_run() {
+        let mut v = viewer(FakeSession::with_picture());
+        v.on_config(VIDEO_XML, &FakeHost);
+        v.act(Action::AlignCapture, &FakeHost);
+        v.poll(&FakeHost);
+
+        v.act(
+            Action::SwitchTarget {
+                port: 2,
+                name: "other".into(),
+            },
+            &FakeHost,
+        );
+        v.poll(&FakeHost);
+        assert_eq!(v.session.auto_adjusts, 1, "the probe was handed back");
+
+        v.poll(&FakeHost);
+        assert!(v.align.is_none());
+    }
+
+    /// The device re-announcing the mode it is already on is not a mode change.
+    #[test]
+    fn the_same_mode_announced_again_leaves_a_run_alone() {
+        let mut v = viewer(FakeSession::with_picture());
+        v.on_config(VIDEO_XML, &FakeHost);
+        v.act(Action::AlignCapture, &FakeHost);
+        v.poll(&FakeHost);
+
+        v.remote = Some((1360, 768));
+        v.session.events.push(Event::Resolution {
+            width: 1360,
+            height: 768,
+        });
+        v.poll(&FakeHost);
+
+        assert!(v.align.is_some(), "still measuring");
+        assert_eq!(v.session.auto_adjusts, 0);
+    }
 }
