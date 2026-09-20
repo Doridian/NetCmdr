@@ -1,4 +1,5 @@
 /target
+/result
 
 # Bytecode from the tools/ scripts.
 __pycache__/
