@@ -288,8 +288,9 @@ those out rather than sitting on the last thing it was told.
 
 ```sh
 tools/build-web.sh                        # build into crates/netcmdr-web/dist
-cargo build --release -p netcmdr-bridge      # ... which the bridge embeds
-netcmdr-bridge --host 192.0.2.10
+tools/pack-web.sh                         # gzip it into bridge/web/dist
+go build -C bridge -o netcmdr-bridge .    # ... which the bridge embeds
+./bridge/netcmdr-bridge --host 192.0.2.10
 ```
 
 Then open <http://127.0.0.1:8080>, and log in with the same credentials the
@@ -305,13 +306,12 @@ version, if it is missing. `wasm-opt` (from **binaryen**) is used if it is
 there and skipped with a note if it is not.
 
 The module is what a browser must have in full before anything appears, so it
-is carried in the bridge brotli-compressed and served that way:
+is carried in the bridge gzipped and served that way:
 
 | | size |
 |---|---|
 | raw | 4.3 MiB |
-| gzip | 1.3 MiB |
-| brotli | **914 KiB** |
+| gzip | **1.3 MiB** |
 
 `wasm-opt -Oz` is worth about 8% of that, rather than the usual much larger
 figure, because the `web` profile in the workspace manifest already builds with
@@ -325,7 +325,7 @@ WebAssembly — `queryLocalFonts()` is Chromium-only, wants a secure context and
 asks the person's permission — and the page's CSS reaches nothing egui draws.
 
 Carrying egui's four stock faces whole cost 1.3 MiB, close to a quarter of the
-module and 673 KiB of the brotli download, to draw a login form, a menu bar and
+module, to draw a login form, a menu bar and
 one submenu arrow. So `default_fonts` is off and `crates/netcmdr-web/fonts` holds
 three faces cut down to what can actually appear: ASCII, Latin-1 and the
 punctuation the viewer uses, plus the four triangles and the warning sign that
@@ -366,8 +366,7 @@ it by asking OpenSSL for security level 1, and a browser has no equivalent
 switch. The handshake fails before a certificate is ever considered, so no
 amount of clicking through a warning helps.
 
-So the bridge terminates that TLS itself — the same settings the native client
-already proved against hardware — and offers the browser plain HTTP and
+So the bridge terminates that TLS itself and offers the browser plain HTTP and
 WebSockets:
 
 | Route | Purpose |
@@ -405,34 +404,28 @@ are fixed at startup, and no request can steer them.
 
 #### One binary
 
-The bridge is a single file. The web client is inside it, put there by the
-crate's build script from `crates/netcmdr-web/dist` — or from `$NETCMDR_WEB_DIST`, if
-that is set — and there is nothing to deploy, mount or point it at beside the
-executable. It cannot be served a client that has drifted from the bridge it
-came with, and there is no directory under it for a file to appear in.
+The bridge is a single file. The web client is inside it, put there by
+`go:embed` from `bridge/web/dist`, which `tools/pack-web.sh` fills — and there
+is nothing to deploy, mount or point it at beside the executable. It cannot be
+served a client that has drifted from the bridge it came with, and there is no
+directory under it for a file to appear in.
 
-It is stored **brotli-compressed, at quality 11**, for both of the reasons that
-matter: that is a third of the size in the executable, and it is the copy most
-browsers are sent, so the expensive compression happens once during the build
-rather than on every start of the service. What startup does is the cheap half —
-decompress each file and gzip it for the clients that do not take brotli — which
-is under half a second for the whole client against the minute the brotli would
-have cost. Both copies then stay in memory, immutable, so no request pays for
-compression and none needs revalidating.
+It is stored **gzipped**, for both of the reasons that matter: that is under a
+third of the size in the executable, and it is the copy every browser is sent,
+so the compression happens once during the build rather than on every start of
+the service. What startup does is the cheap half — gunzip each file for the
+clients that take no coding at all — which is milliseconds. Both copies then
+stay in memory, immutable, so no request pays for compression and none needs
+revalidating. Nothing beyond `compress/gzip` is linked in to do it.
 
-A file brotli does not shrink, such as a PNG, is stored as it is instead, and is
-then simply offered in no encoding. Nothing in the binary is larger than the
-file it came from.
+A file gzip does not shrink, such as a PNG, is packed as it is instead, under no
+suffix, and is then simply offered in no encoding. Nothing in the binary is
+larger than the file it came from.
 
-The cost is on the build: a change to the client re-compresses it, which is
-about half a minute for a module this size. Cargo reruns that only when the
-`dist` directory actually changes, so an ordinary rebuild of the bridge does not
-pay it.
-
-Building the bridge with no client built is a warning rather than an error — the
-binary still relays the protocol and answers 404 for everything else. That keeps
-`cargo build --workspace` working for anyone without a wasm toolchain, which is
-most people touching the native crates.
+Building the bridge with no client packed is a warning rather than an error —
+the binary still relays the protocol and answers 404 for everything else. That
+keeps `go build ./...` in `bridge/` working for anyone without a wasm
+toolchain, which is most people touching the native crates.
 
 All of this has been run against a live device: a management login, the TLS
 command channel answering with its `CONFIG_XML`, and video decoding to the same
@@ -442,11 +435,12 @@ The client it serves is [`netcmdr-web`](#netcmdr-web--the-viewer-in-a-browser).
 
 #### In a container
 
-`nix build .#netcmdr-bridge-static` links the whole of it — musl and OpenSSL
-included — into one static-pie: no interpreter, no `DT_NEEDED`, nothing on the
-host to match. Nothing outside the file is read at runtime either. No
-certificate is verified here, so there is no CA bundle to carry, and only a
-`--host` given as a name needs so much as `/etc/resolv.conf`.
+`nix build .#netcmdr-bridge` links the whole of it into one static executable:
+no interpreter, no `DT_NEEDED`, nothing on the host to match. That costs nothing
+to arrange, because the bridge is Go with `CGO_ENABLED=0` — there is no libc in
+it and `crypto/tls` stands in for OpenSSL. Nothing outside the file is read at
+runtime either. No certificate is verified here, so there is no CA bundle to
+carry, and only a `--host` given as a name needs so much as `/etc/resolv.conf`.
 
 `nix build .#netcmdr-bridge-image` puts that in an image whose one layer holds
 that one file. There is no base image under it and no shell in it, so there is
@@ -471,9 +465,25 @@ bridge installs a handler for `SIGTERM` and `SIGINT`, which PID 1 has to do for
 itself, since the kernel drops a signal a process of that number has no handler
 for.
 
-Both are Linux's only — neither `pkgsStatic` nor `dockerTools` is a thing on
-macOS, where the bridge is still an ordinary `nix build .#netcmdr-bridge` or
-`cargo build`.
+The images are Linux's only — `dockerTools` is not a thing on macOS, where the
+bridge is still an ordinary `nix build .#netcmdr-bridge`, or a `go build` in
+[`bridge/`](bridge/).
+
+`.#netcmdr-bridge-image-amd64` and `.#netcmdr-bridge-image-arm64` are that same
+image for a named architecture, built wherever you are: the one that is not
+this machine's is cross-compiled, which for a pure-Go binary is a `GOARCH` and
+nothing else — no second toolchain, no cross libc, no TLS library to build
+twice. So a single machine produces both in seconds. Only the bridge is
+compiled twice — the wasm client it embeds is one derivation and one build
+whatever the bridge is built for. CI pushes the pair to
+`git.foxden.network/foxden/netcmdr:latest` as a manifest list, which is the
+only tag published, so a deploy following `latest` gets its own architecture.
+
+The arm64 binary is static but not a PIE, where the amd64 one is a static-pie.
+That is rustc's doing and not this flake's: upstream's target for
+`aarch64-unknown-linux-musl` does not claim `static-position-independent-executables`,
+so a `+crt-static` link there comes out as a plain `ET_EXEC`, with no ASLR for
+the image itself.
 
 ## Protocols
 
@@ -497,8 +507,8 @@ negotiate TLS 1.2.
 
 It is nonetheless not reachable from a modern Rust TLS stack: it offers **no
 ECDHE suite at all** — only DHE and static RSA — and no TLS 1.3, and rustls
-implements neither of those key exchanges. So both crates use OpenSSL, with two
-settings:
+implements neither of those key exchanges. So the Rust crates use OpenSSL, with
+two settings:
 
 - `SECLEVEL=1`, because the device's DHE group is 1024-bit and OpenSSL's default
   level 2 requires 2048. Level 1 keeps forward secrecy; excluding DHE to fall
@@ -509,6 +519,50 @@ settings:
 Certificate verification is off. The certificate is self-signed with no trust
 anchor, and the vendor's own Java client verifies nothing either — so this is no
 weaker than stock, but the session is only as private as the network it crosses.
+
+### The bridge is Go
+
+`netcmdr-bridge` is the one piece not written in Rust, and its TLS is the reason
+it can be. Go's `crypto/tls` has never implemented finite-field DHE and offers
+no way to add it, so the static RSA suites are the whole of what it and the
+device have in common. They have to be named explicitly — Go 1.22 dropped RSA
+key exchange from the default list, and leaving `CipherSuites` nil fails the
+handshake outright.
+
+**This gives up forward secrecy on `/message.pv`**, which is what `SECLEVEL=1`
+and DHE buy the Rust crates above. It is a deliberate trade, and a narrower one
+than it sounds: the session sockets on port 900 negotiate `AES256-GCM-SHA384` —
+static RSA — under either client, so the command and keyboard channels, which
+are the ones carrying keystrokes, were always on this footing. What changes is
+that the management channel joins them. The threat it opens is retrospective:
+someone who records the traffic and later obtains the device's RSA key can read
+it. Treat the network as trusted or tunnel it, which is what
+[the bridge's own warning](#netcmdr-bridge--the-web-bridge) already asks for.
+
+What it buys is the cross-compilation. A pure-Go binary with `CGO_ENABLED=0`
+needs no libc, no OpenSSL and no second toolchain, so building the arm64 image
+on an amd64 machine is a `GOARCH` and nothing else — a fraction of a second,
+against the cross musl stdenv, the statically-linked OpenSSL and the rustc
+release fetched from outside nixpkgs that the Rust bridge needed, because
+nixpkgs' own rustc carries no standard library for a target it was not built
+for. The `rust-overlay` input, the cross package-set table and the
+`pkgsStatic`-versus-`pkgsCross` workaround are all gone, and the bridge is one
+derivation where it was two.
+
+`flake.nix` is not shorter for it — the bridge's own stanza spells out the build
+and install phases that `buildRustPackage` supplied for free. What went is the
+part that was hard to get right rather than the part that was long. (It is `buildGoModule`, but not
+straightforwardly: that sets `GOOS` and `GOARCH` from the Nix platform, which
+here never differs from the host, so the target is exported in `postConfigure`
+instead — late enough that the module fetch behind `vendorHash` stays one
+derivation for every architecture — and `postBuild` flattens the subdirectory
+Go puts a cross build in. An image whose manifest says `arm64` over an amd64
+binary is the failure that costs, so the `e_machine` of what came out is
+checked against what was asked for, and the build fails if a cross ever stops
+taking.)
+
+The device address and both ports are still fixed at startup, the bridge is
+still one file with the client inside it, and what it serves is unchanged.
 
 ## Layout
 
@@ -523,10 +577,11 @@ crates/
   netcmdr-cli/      the `netcmdr` binary
   netcmdr-view/     the `netcmdr-view` viewer: a window, a GL context and raw input,
                  over `netcmdr-ui` (winit + egui on OpenGL)
-  netcmdr-bridge/   the `netcmdr-bridge` WebSocket and HTTPS bridge, so a browser can
-                 speak a protocol its TLS stack cannot
   netcmdr-web/      the browser client: WebSockets, `fetch` and raw DOM keys,
                  over `netcmdr-ui` (eframe on WebGL)
+bridge/          the `netcmdr-bridge` WebSocket and HTTPS bridge, so a browser can
+                 speak a protocol its TLS stack cannot. Go, not Rust — see
+                 [The bridge is Go](#the-bridge-is-go)
 research/        the protocol write-up, provenance for the vendor material it
                  was derived from, and the live fixtures the tests parse
 ```
@@ -545,15 +600,30 @@ rustfmt defaults, pinned in `rustfmt.toml` so the style does not drift with the
 toolchain; `cargo fmt --all --check` and `cargo clippy --workspace
 --all-targets` are both clean and expected to stay that way.
 
+The bridge is its own Go module in [`bridge/`](bridge/), outside the cargo
+workspace, and its commands run from that directory: `go build ./...`,
+`go test ./...`, `gofmt`, `go vet`. Its dependencies are not vendored into this
+repository, so `nix build .#netcmdr-bridge` needs the hash of the module set
+that `go.sum` pins — which is
+[`bridge/vendor-hash.txt`](bridge/vendor-hash.txt), a file of its own because
+that is where Renovate's post-upgrade task writes it when it bumps `go.mod`. If
+you edit `go.mod` by hand, regenerate it the same way Renovate does:
+
+```sh
+# what maid's tools/auto-nix-hash does, which is what Renovate runs
+echo 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' > bridge/vendor-hash.txt
+nix build '.#netcmdr-bridge.goModules'   # fails, and prints the hash it wanted
+```
+
 There is a flake as well, for the builds with something to get right beyond
 cargo:
 
 | Command | What it builds |
 |---|---|
 | `nix build` | the CLI and the viewer, the viewer's dlopened libraries on its RPATH |
-| `nix build .#netcmdr-bridge` | the bridge, with the wasm client built and embedded — no `tools/build-web.sh` by hand, and wasm-bindgen's CLI pinned to the version `Cargo.lock` says the module was compiled against |
-| `nix build .#netcmdr-bridge-static` | the same bridge, linked static (Linux) |
-| `nix build .#netcmdr-bridge-image` | that binary as a container image (Linux) |
+| `nix build .#netcmdr-bridge` | the bridge, with the wasm client built, packed and embedded — no `tools/build-web.sh` by hand, and wasm-bindgen's CLI pinned to the version `Cargo.lock` says the module was compiled against |
+| `nix build .#netcmdr-bridge-image` | that binary as a container image, for this machine's architecture (Linux) |
+| `nix build .#netcmdr-bridge-image-{amd64,arm64}` | the same image for a named architecture, cross-compiled when it is not this machine's (Linux) |
 
 ## License
 

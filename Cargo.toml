@@ -4,7 +4,6 @@ members = [
     "crates/netcmdr-proto",
     "crates/netcmdr-mgmt",
     "crates/netcmdr-session",
-    "crates/netcmdr-bridge",
     "crates/netcmdr-ui",
     "crates/netcmdr-web",
     "crates/netcmdr-cli",

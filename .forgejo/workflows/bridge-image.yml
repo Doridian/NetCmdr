@@ -1,8 +1,15 @@
 # The bridge's container image comes out of the flake, not out of a Dockerfile:
-# `.#netcmdr-bridge-image` is the static binary and nothing else, so there is
-# nothing here for buildx to do. That is why this does not use the shared
-# docker.yml template, and why it is not named docker.yml — a central deploy of
-# that template would land on top of it.
+# `.#netcmdr-bridge-image-<arch>` is the static binary and nothing else, so
+# there is nothing here for buildx to do. That is why this does not use the
+# shared docker.yml template, and why it is not named docker.yml — a central
+# deploy of that template would land on top of it.
+#
+# Both architectures are built on this one runner, the arm64 one by
+# cross-compiling. That is nearly free: the bridge is Go with CGO off, so the
+# other architecture is a GOARCH away with no second toolchain and no libc to
+# match, and the wasm client it embeds is the same derivation whatever the
+# bridge is built for, so that half is compiled once instead of once per
+# architecture.
 name: Bridge image
 
 concurrency:
@@ -42,18 +49,24 @@ jobs:
             substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
       - run: nix registry add nixpkgs github:NixOS/nixpkgs/nixos-26.05
       - run: start-docker
-      # This also builds the static bridge and the wasm client it embeds, and
-      # runs the bridge crate's tests on the way through.
-      - name: Build the image
-        run: nix build '.#netcmdr-bridge-image'
-      # What the tarball calls itself, asked of the flake rather than scraped
-      # out of `docker load`'s output.
-      - id: image
-        name: Load the image
+      # This also builds both bridges and the wasm client they share, and runs
+      # the bridge's Go tests on the way through. The tests run once, under the
+      # amd64 build: nothing here can execute an aarch64 test binary, so the
+      # flake does not try.
+      - name: Build the images
         run: |
-          docker load < result
-          echo "name=$(nix eval --raw '.#netcmdr-bridge-image.imageName')" >> "$GITHUB_OUTPUT"
-          echo "tag=$(nix eval --raw '.#netcmdr-bridge-image.imageTag')" >> "$GITHUB_OUTPUT"
+          nix build '.#netcmdr-bridge-image-amd64' -o result-amd64
+          nix build '.#netcmdr-bridge-image-arm64' -o result-arm64
+      # What the tarballs call themselves, asked of the flake rather than
+      # scraped out of `docker load`'s output.
+      - id: image
+        name: Load the images
+        run: |
+          docker load < result-amd64
+          docker load < result-arm64
+          echo "name=$(nix eval --raw '.#netcmdr-bridge-image-amd64.imageName')" >> "$GITHUB_OUTPUT"
+          echo "amd64=$(nix eval --raw '.#netcmdr-bridge-image-amd64.imageTag')" >> "$GITHUB_OUTPUT"
+          echo "arm64=$(nix eval --raw '.#netcmdr-bridge-image-arm64.imageTag')" >> "$GITHUB_OUTPUT"
       - name: Log in to Docker Registry
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
@@ -61,11 +74,27 @@ jobs:
           username: forgejo
           password: ${{ steps.jwt.outputs.jwt }}
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
-      # Pushed under the crate's version and under a moving tag, so a deploy can
-      # pin one or follow the other.
+      # One moving tag and nothing else, as before, except that it now names a
+      # manifest list over both architectures. The two images are pushed under
+      # that tag first and the list replaces it: a list can only name manifests
+      # the registry already holds, and this tag is the only name published, so
+      # for the length of the push it points at one architecture at a time.
       - name: Push the image
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
+        env:
+          # Where `docker manifest` is still gated, this is the gate.
+          DOCKER_CLI_EXPERIMENTAL: enabled
         run: |
           dockertag='git.foxden.network/${{ steps.repository_case.outputs.lowercase }}:${{ vars.OCI_TAG || 'latest' }}'
-          docker tag '${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}' "$dockertag"
-          docker push "$dockertag"
+          amd64='${{ steps.image.outputs.name }}:${{ steps.image.outputs.amd64 }}'
+          arm64='${{ steps.image.outputs.name }}:${{ steps.image.outputs.arm64 }}'
+          for image in "$amd64" "$arm64"; do
+            docker tag "$image" "$dockertag"
+            docker push "$dockertag"
+          done
+          # Each image by the digest the registry gave it, read back off the
+          # image rather than scraped out of what `docker push` printed.
+          docker manifest create "$dockertag" \
+            "$(docker image inspect --format '{{index .RepoDigests 0}}' "$amd64")" \
+            "$(docker image inspect --format '{{index .RepoDigests 0}}' "$arm64")"
+          docker manifest push "$dockertag"

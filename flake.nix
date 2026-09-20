@@ -18,8 +18,8 @@
 
         version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
-        # Only what a build reads, so that editing the README or this file does
-        # not rebuild every crate.
+        # Only what a Rust build reads, so that editing the README, the bridge
+        # or this file does not rebuild every crate.
         src = lib.fileset.toSource {
           root = ./.;
           fileset = lib.fileset.unions [
@@ -32,6 +32,17 @@
         };
         cargoLock = {
           lockFile = ./Cargo.lock;
+        };
+
+        # The Go bridge, and the script that packs the web client into the
+        # directory it embeds. Kept apart from `src` so the two halves of the
+        # tree do not rebuild each other.
+        bridgeSrc = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            ./bridge
+            ./tools/pack-web.sh
+          ];
         };
 
         # What a crate is pinned to in Cargo.lock. wasm-bindgen's CLI has to be
@@ -72,8 +83,7 @@
             "-p"
             "netcmdr-view"
           ];
-          # Everything except the bridge, which is its own package below, and
-          # netcmdr-web, which compiles to nothing off wasm32.
+          # netcmdr-web compiles to nothing off wasm32, so it is not listed.
           cargoTestFlags = [
             "-p"
             "netcmdr-cli"
@@ -190,8 +200,9 @@
 
             cp crates/netcmdr-web/web/index.html $out/
 
-            # Nothing is compressed here: brotli is netcmdr-bridge's build script's
-            # job, so a rebuild cannot leave a stale .br next to a file.
+            # Nothing is compressed here: tools/pack-web.sh is what gzips the
+            # client for the bridge, so a rebuild cannot leave a stale copy
+            # next to a file.
 
             runHook postInstall
           '';
@@ -203,113 +214,201 @@
           };
         };
 
-        # The bridge, with the client above baked into it. The build script
-        # reads $NETCMDR_WEB_DIST, so the binary is the whole service: there is
-        # nothing to deploy, mount or point it at beside the executable.
+        # What OCI calls each architecture the image is published for. It is
+        # written into the image's config and it is what a manifest list is
+        # assembled out of. It is also Go's name for the architecture, so it is
+        # GOARCH as well — which is the whole of what cross-compiling the bridge
+        # takes.
+        ociArch = {
+          x86_64-linux = "amd64";
+          aarch64-linux = "arm64";
+          x86_64-darwin = "amd64";
+          aarch64-darwin = "arm64";
+        };
+
+        # `e_machine`, at offset 18 of an ELF header. The build below reads it
+        # back off the binary it just produced, because a GOARCH that failed to
+        # take is otherwise silent: the result is this machine's architecture
+        # under another one's name, and the image then advertises an
+        # architecture it cannot run.
+        elfMachine = {
+          amd64 = 62;
+          arm64 = 183;
+        };
+
+        # Go's own name for this machine, which is what a build that names no
+        # target is for.
+        hostGoos = if pkgs.stdenv.hostPlatform.isDarwin then "darwin" else "linux";
+
+        # The bridge, with the web client baked into it. The binary is the whole
+        # service: there is nothing to deploy, mount or point it at beside the
+        # executable.
         #
-        # Taken over a package set rather than written once, so that the static
-        # build below is the same derivation against a different stdenv.
+        # This is Go rather than Rust so that the images below cost nothing to
+        # cross-compile. CGO is off and crypto/tls stands in for OpenSSL, so the
+        # result is static with no libc to match, no second toolchain to
+        # bootstrap and no store path to scrub out — GOARCH is the entire cross
+        # story. What that costs is forward secrecy on the management channel;
+        # see README.md#tls and bridge/device.go.
         mkBridge =
-          p:
+          {
+            goos ? hostGoos,
+            goarch ? ociArch.${system},
+          }:
           let
-            static = p.stdenv.hostPlatform.isStatic;
+            native = goarch == ociArch.${system} && goos == hostGoos;
           in
-          p.rustPlatform.buildRustPackage {
-            # No suffix for the static one: a static stdenv already puts its own
-            # on the derivation name.
+          pkgs.buildGoModule {
             pname = "netcmdr-bridge";
-            inherit version src cargoLock;
+            inherit version;
+            src = bridgeSrc;
+            modRoot = "bridge";
 
-            cargoBuildFlags = [
-              "-p"
-              "netcmdr-bridge"
+            # The dependencies are fetched rather than committed here, so there
+            # is a hash to keep in step with go.mod. It is a file of its own
+            # because that is where Renovate's post-upgrade task writes it when
+            # it bumps one; see renovate-local.json.
+            vendorHash = builtins.readFile ./bridge/vendor-hash.txt;
+
+            env.CGO_ENABLED = "0";
+            ldflags = [
+              "-s"
+              "-w"
             ];
-            cargoTestFlags = [
-              "-p"
-              "netcmdr-bridge"
-            ];
+            # The linker has already dropped the symbol table and the debug
+            # information, and this machine's `strip` has no business on a binary
+            # built for another architecture.
+            dontStrip = true;
 
-            env = {
-              NETCMDR_WEB_DIST = "${web}";
-            }
-            # openssl-sys links whatever pkg-config hands it, and for a static
-            # stdenv that has to be the archives. It does not infer this from
-            # the target, so say so.
-            // lib.optionalAttrs static {
-              OPENSSL_STATIC = "1";
-            };
+            # The client is packed in before the compiler runs. Not in postPatch,
+            # which the derivation behind vendorHash inherits: a set of Go
+            # modules has no business depending on the wasm client, and fetching
+            # them would otherwise have to build it first.
+            preConfigure = ''
+              sh tools/pack-web.sh ${web} bridge/web/dist
+            '';
 
-            nativeBuildInputs = [ p.pkg-config ];
-            buildInputs = [ p.openssl ];
+            # Exported here rather than passed in `env`, where buildGoModule sets
+            # both from the Go it builds with. This way the target leaks into one
+            # place and the module fetch stays the same derivation for every
+            # architecture, rather than one apiece for a module set that does not
+            # differ between them.
+            postConfigure = ''
+              export GOOS=${goos} GOARCH=${goarch}
+            '';
+
+            # Go puts a build for another architecture in a subdirectory of its
+            # own, and the normalisation nixpkgs does for that only fires when
+            # the Nix platforms differ — which here they do not, GOARCH being the
+            # whole of the cross build.
+            postBuild = lib.optionalString (!native) ''
+              mv "$GOPATH/bin/${goos}_${goarch}"/* "$GOPATH/bin"
+              rmdir "$GOPATH/bin/${goos}_${goarch}"
+            '';
+
+            # `go install` names a binary after the import path of its package,
+            # and this one's is the module root.
+            postInstall = ''
+              mv "$out/bin/bridge" "$out/bin/netcmdr-bridge"
+            '';
+
+            # Only where the result can actually run: nothing here can execute a
+            # binary for another architecture, so a cross build is not tested
+            # and does not pretend to be.
+            doCheck = native;
+
+            # Trust the binary, not the variable. See elfMachine above.
+            postFixup = lib.optionalString (goos == "linux") ''
+              want=${toString elfMachine.${goarch}}
+              got=$(od -An -tu2 -j18 -N2 "$out/bin/netcmdr-bridge" | tr -d ' ')
+              if [ "$got" != "$want" ]; then
+                echo "GOARCH=${goarch} wanted ELF machine $want but the binary is $got;" >&2
+                echo "the cross build did not take." >&2
+                exit 1
+              fi
+            '';
 
             meta = {
-              description =
-                "WebSocket and HTTPS bridge serving the browser client for Tripp Lite NetCommander / Minicom Smart IP KVM switches"
-                + lib.optionalString static " (static build)";
+              description = "WebSocket and HTTPS bridge serving the browser client for Tripp Lite NetCommander / Minicom Smart IP KVM switches";
               homepage = "https://git.foxden.network/FoxDen/NetCmdr";
               license = lib.licenses.agpl3Plus;
               mainProgram = "netcmdr-bridge";
-              platforms = if static then lib.platforms.linux else lib.platforms.linux ++ lib.platforms.darwin;
+              platforms = lib.platforms.linux ++ lib.platforms.darwin;
             };
           };
 
-        bridge = mkBridge pkgs;
+        bridge = mkBridge { };
 
-        # The same bridge against musl with everything, OpenSSL included, linked
-        # in: no interpreter, no DT_NEEDED, no libc to match. The web client is
-        # already inside the executable, and the device's certificate is never
-        # verified (see netcmdr-mgmt's transport), so nothing outside the file
+        # That binary and nothing else, as an image: no base layer, no shell, no
+        # store. `docker load < result` and run it.
+        #
+        # A Go binary with CGO off has no interpreter, no DT_NEEDED and no store
+        # path inside it, and the web client is already part of the executable.
+        # The device's certificate is never verified, so nothing outside the file
         # is read at runtime but /etc/resolv.conf, and only if --host is given a
         # name. That is a container built FROM scratch.
-        bridgeStatic = mkBridge pkgs.pkgsStatic;
-
-        # That binary and nothing else, as an image: no base layer, no shell,
-        # no store. `docker load < result` and run it.
         #
         # The device goes in the environment rather than the command, so that
         # passing arguments — a different port, a longer timeout — does not
         # silently drop it along with the rest of the default command.
-        bridgeImage = pkgs.dockerTools.buildImage {
-          name = "netcmdr-bridge";
-          tag = version;
+        mkBridgeImage =
+          { goarch, tag }:
+          pkgs.dockerTools.buildImage {
+            name = "netcmdr-bridge";
+            inherit tag;
+            # Without this a cross-built image would still claim the
+            # architecture of the machine that built it, and whatever pulled it
+            # would refuse to run it or, worse, try to.
+            architecture = goarch;
 
-          # Copied rather than linked in: a symlink into /nix/store would dangle
-          # in an image that has no store to point at.
-          #
-          # The copy is then scrubbed of store paths, because the only ones a
-          # static OpenSSL leaves behind are the OPENSSLDIR and MODULESDIR it
-          # was configured with, and following them would otherwise drag
-          # openssl's etc into the image. Neither is read: no certificate is
-          # verified, no provider is loaded from disk, and a handshake with the
-          # device's profile — TLS 1.2, 1024-bit DHE at security level 1 —
-          # completes with no openssl.cnf in reach.
-          copyToRoot =
-            pkgs.runCommand "netcmdr-bridge-root" { nativeBuildInputs = [ pkgs.nukeReferences ]; }
-              ''
-                mkdir -p $out/bin
-                cp ${bridgeStatic}/bin/netcmdr-bridge $out/bin/netcmdr-bridge
-                chmod +w $out/bin/netcmdr-bridge
-                nuke-refs $out/bin/netcmdr-bridge
-              '';
+            # Copied rather than linked in: a symlink into /nix/store would
+            # dangle in an image that has no store to point at.
+            #
+            # The copy is then scrubbed of store paths. nixpkgs patches Go's
+            # standard library to find its data files in the store rather than
+            # under /etc — iana-etc for `net`, mailcap for `mime`, tzdata for
+            # `time` — and following those references would otherwise drag all
+            # three into the image, tzdata's several megabytes of zoneinfo
+            # included. None of them is read: the ports this dials are numeric
+            # so no service name is ever looked up, the content types it serves
+            # come from its own table, and a container keeps UTC.
+            copyToRoot =
+              pkgs.runCommand "netcmdr-bridge-root-${goarch}" { nativeBuildInputs = [ pkgs.nukeReferences ]; }
+                ''
+                  install -Dm755 ${
+                    mkBridge {
+                      goos = "linux";
+                      inherit goarch;
+                    }
+                  }/bin/netcmdr-bridge $out/bin/netcmdr-bridge
+                  nuke-refs $out/bin/netcmdr-bridge
+                '';
 
-          config = {
-            Entrypoint = [ "/bin/netcmdr-bridge" ];
-            # Loopback is the binary's default and the right one on a host; in a
-            # namespace of its own it would mean nothing outside could reach the
-            # bridge, so the image listens on all of the container's addresses.
-            # What the warning it logs says still holds: whatever can reach the
-            # published port can reach the device.
-            Cmd = [
-              "--listen"
-              "0.0.0.0:8080"
-            ];
-            ExposedPorts = {
-              "8080/tcp" = { };
+            config = {
+              Entrypoint = [ "/bin/netcmdr-bridge" ];
+              # Loopback is the binary's default and the right one on a host; in
+              # a namespace of its own it would mean nothing outside could reach
+              # the bridge, so the image listens on all of the container's
+              # addresses. What the warning it logs says still holds: whatever
+              # can reach the published port can reach the device.
+              Cmd = [
+                "--listen"
+                "0.0.0.0:8080"
+              ];
+              ExposedPorts = {
+                "8080/tcp" = { };
+              };
+              # Nothing here is read or written at runtime and the port is above
+              # 1024, so there is nothing for root to do.
+              User = "65534:65534";
             };
-            # Nothing here is read or written at runtime and the port is above
-            # 1024, so there is nothing for root to do.
-            User = "65534:65534";
           };
+
+        # This machine's architecture, under the bare version tag: the one to
+        # build and run by hand.
+        bridgeImage = mkBridgeImage {
+          goarch = ociArch.${system};
+          tag = version;
         };
       in
       {
@@ -318,11 +417,25 @@
           netcmdr = native;
           netcmdr-bridge = bridge;
         }
-        # musl and dockerTools are Linux's; on macOS these do not even evaluate.
-        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          netcmdr-bridge-static = bridgeStatic;
-          netcmdr-bridge-image = bridgeImage;
-        };
+        # dockerTools is Linux's; on macOS these do not even evaluate.
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+          {
+            netcmdr-bridge-image = bridgeImage;
+          }
+          # The same image for each architecture it is published under, built
+          # here whichever one this machine is — the bridge cross-compiles for
+          # free, and the wasm client it embeds is the same derivation either
+          # way, so it is compiled once rather than once per architecture. The
+          # tag carries the architecture because CI loads both into one daemon,
+          # where a shared name:tag would leave the first of them nameless.
+          // lib.mapAttrs' (target: arch: {
+            name = "netcmdr-bridge-image-${arch}";
+            value = mkBridgeImage {
+              goarch = arch;
+              tag = "${version}-${arch}";
+            };
+          }) (lib.filterAttrs (target: _: lib.hasSuffix "-linux" target) ociArch)
+        );
       }
     );
 }

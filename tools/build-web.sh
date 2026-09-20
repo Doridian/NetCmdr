@@ -2,11 +2,12 @@
 # Build the browser client into crates/netcmdr-web/dist.
 #
 # netcmdr-bridge embeds whatever this produces, so building the client is the
-# first of two steps:
+# first of three steps:
 #   tools/build-web.sh
-#   cargo build --release -p netcmdr-bridge
+#   tools/pack-web.sh
+#   go build ./bridge
 # and the resulting binary is the whole service — there is nothing to deploy
-# beside it.
+# beside it. `nix build .#netcmdr-bridge` does all three.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -67,12 +68,13 @@ else
   fi
 fi
 
-# Nothing is compressed here. netcmdr-bridge's build script brotli-compresses what
-# it embeds, so the files in this directory are the plain ones and a rebuild
-# cannot leave a stale .br or .gz behind next to them.
+# Nothing is compressed here. tools/pack-web.sh gzips what the bridge embeds, so
+# the files in this directory are the plain ones and a rebuild cannot leave a
+# stale .gz behind next to them.
 
 echo "wrote $out"
 ls -la "$out"
 echo
-echo "now build the bridge, which embeds this:"
-echo "  cargo build --release -p netcmdr-bridge"
+echo "now pack it and build the bridge, which embeds it:"
+echo "  tools/pack-web.sh"
+echo "  go build ./bridge"

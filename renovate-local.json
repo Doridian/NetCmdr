@@ -1,0 +1,10 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "What local>FoxDen/maid//tasks/go would do, named explicitly: the Go module is bridge/ rather than the root, and the flake's default package is the Rust one, so neither the hash file's path nor the derivation to read it out of is the default. The tool is the same one, and it is the reason bridge/vendor-hash.txt is a file at all.",
+  "postUpgradeTasks": {
+    "commands": [
+      "/repo/tools/auto-nix-hash bridge/vendor-hash.txt .#packages.x86_64-linux.netcmdr-bridge.goModules"
+    ],
+    "executionMode": "branch"
+  }
+}
