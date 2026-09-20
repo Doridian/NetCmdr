@@ -412,6 +412,28 @@
         };
       in
       {
+        # One shell for both halves of the tree, so that CI and a checkout lint
+        # and test with the same toolchain the builds above use: the cargo
+        # workspace needs pkg-config and OpenSSL to compile openssl-sys, and the
+        # bridge needs Go. golangci-lint is here rather than fetched by CI so
+        # that a run here and a run there are the same linter.
+        devShells.default = pkgs.mkShell {
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.cargo
+            pkgs.rustc
+            pkgs.clippy
+            pkgs.rustfmt
+            pkgs.go
+            pkgs.golangci-lint
+          ];
+          buildInputs = [ pkgs.openssl ] ++ viewerLibraries;
+
+          # The viewer dlopens these, so the linker never records them and a
+          # test that starts a window would not find them otherwise.
+          LD_LIBRARY_PATH = lib.makeLibraryPath viewerLibraries;
+        };
+
         packages = {
           default = native;
           netcmdr = native;

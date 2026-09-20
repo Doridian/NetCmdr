@@ -1,0 +1,17 @@
+# What CI lints the bridge with, kept here so that a run in a checkout and a run
+# in CI are the same run. The default set — errcheck, govet, ineffassign,
+# staticcheck, unused — covers `go vet`, so the workflow does not run it twice.
+#
+# bodyclose is deliberately not enabled: it cannot see a body closed from a
+# t.Cleanup, nor the one coder/websocket takes over on a successful dial, so on
+# this module it is three false positives and nothing else.
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+
+linters:
+  enable:
+    - errorlint
+    - misspell

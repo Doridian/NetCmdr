@@ -602,7 +602,9 @@ toolchain; `cargo fmt --all --check` and `cargo clippy --workspace
 
 The bridge is its own Go module in [`bridge/`](bridge/), outside the cargo
 workspace, and its commands run from that directory: `go build ./...`,
-`go test ./...`, `gofmt`, `go vet`. Its dependencies are not vendored into this
+`go test ./...`, `gofmt`, `go vet`, and `golangci-lint run ./...`, whose enabled
+set is [`bridge/.golangci.yml`](bridge/.golangci.yml) — the default one, which
+already includes `go vet`, plus two. Its dependencies are not vendored into this
 repository, so `nix build .#netcmdr-bridge` needs the hash of the module set
 that `go.sum` pins — which is
 [`bridge/vendor-hash.txt`](bridge/vendor-hash.txt), a file of its own because
@@ -615,11 +617,19 @@ echo 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' > bridge/vendor-hash.
 nix build '.#netcmdr-bridge.goModules'   # fails, and prints the hash it wanted
 ```
 
+All of that runs in CI on every push and pull request, lints first and tests
+after, from [`.forgejo/workflows/test.yml`](.forgejo/workflows/test.yml). It
+uses the flake's dev shell rather than its own toolchain, so what CI lints with
+is what `nix develop` gives you here: rustc and cargo at the version
+`rust-version` asks for, clippy, rustfmt, Go, golangci-lint, and pkg-config and
+OpenSSL for `openssl-sys`.
+
 There is a flake as well, for the builds with something to get right beyond
 cargo:
 
 | Command | What it builds |
 |---|---|
+| `nix develop` | nothing — a shell with the toolchain for both halves of the tree, which is what CI lints and tests in |
 | `nix build` | the CLI and the viewer, the viewer's dlopened libraries on its RPATH |
 | `nix build .#netcmdr-bridge` | the bridge, with the wasm client built, packed and embedded — no `tools/build-web.sh` by hand, and wasm-bindgen's CLI pinned to the version `Cargo.lock` says the module was compiled against |
 | `nix build .#netcmdr-bridge-image` | that binary as a container image, for this machine's architecture (Linux) |
