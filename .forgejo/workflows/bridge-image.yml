@@ -66,9 +66,6 @@ jobs:
       - name: Push the image
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
         run: |
-          local='${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}'
-          remote='git.foxden.network/${{ steps.repository_case.outputs.lowercase }}'
-          for tag in '${{ steps.image.outputs.tag }}' '${{ vars.OCI_TAG || 'latest' }}'; do
-            docker tag "$local" "$remote:$tag"
-            docker push "$remote:$tag"
-          done
+          dockertag='git.foxden.network/${{ steps.repository_case.outputs.lowercase }}:${{ vars.OCI_TAG || 'latest' }}'
+          docker tag '${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}' "$dockertag"
+          docker push "$dockertag"
