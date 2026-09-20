@@ -26,7 +26,7 @@
             ./Cargo.toml
             ./Cargo.lock
             ./crates
-            # The live captures netcmd-mgmt's tests parse.
+            # The live captures netcmdr-mgmt's tests parse.
             ./research/notes/analysis/live-fixtures
           ];
         };
@@ -53,22 +53,22 @@
             libGL
             libxkbcommon
             wayland
-            xorg.libX11
-            xorg.libXcursor
-            xorg.libXi
-            xorg.libXrandr
+            libx11
+            libxcursor
+            libxi
+            libxrandr
           ]
         );
 
         # The management client and the desktop viewer: everything that runs on
         # this machine and talks to the device directly.
         native = pkgs.rustPlatform.buildRustPackage {
-          pname = "netcmd";
+          pname = "netcmdr";
           inherit version src cargoLock;
 
           cargoBuildFlags = [
             "-p"
-            "netcmd-cli"
+            "netcmdr-cli"
             "-p"
             "netcmdr-view"
           ];
