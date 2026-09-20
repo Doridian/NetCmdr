@@ -25,6 +25,9 @@ clap.workspace = true
 # brotli copy. Pure Rust, so the bridge still builds with nothing but OpenSSL
 # on the system.
 flate2 = "1"
+# std has no way to install a signal handler, and the bridge needs one to stop
+# when it is PID 1 in a container. Already in the tree under openssl-sys.
+libc = "0.2"
 # OpenSSL is already the device's TLS stack here; the WebSocket accept key is
 # a SHA-1 and a base64, so it supplies those too rather than pulling in crates
 # that would duplicate them.

@@ -1551,6 +1551,7 @@ dependencies = [
  "brotli-decompressor",
  "clap",
  "flate2",
+ "libc",
  "netcmdr-mgmt",
  "netcmdr-proto",
  "netcmdr-session",

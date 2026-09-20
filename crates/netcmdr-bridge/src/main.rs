@@ -44,6 +44,32 @@ struct Args {
     timeout: u64,
 }
 
+/// Exit when told to, rather than when killed.
+///
+/// A process with no handler installed for a signal is normally terminated by
+/// the kernel, but PID 1 — which this is, in a container — is exempt: an
+/// unhandled signal is dropped instead. Without this, `docker stop` waits out
+/// its whole grace period and then SIGKILLs the bridge.
+///
+/// A signal handler may call almost nothing, so this one calls `_exit`: unlike
+/// `std::process::exit` it runs no atexit handler and takes no lock, which is
+/// what makes it safe here. Nothing is lost by going out this way. A connection
+/// thread holds no state worth finishing — the device's own session outlives
+/// any one of them — and the kernel closes the sockets.
+fn exit_on_signals() {
+    extern "C" fn exit(_: libc::c_int) {
+        // SAFETY: `_exit` is async-signal-safe, which is the whole of what a
+        // handler is allowed to assume.
+        unsafe { libc::_exit(0) }
+    }
+
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        // SAFETY: the handler above is async-signal-safe, which is what
+        // `signal` requires of what it is given.
+        unsafe { libc::signal(signal, exit as *const () as libc::sighandler_t) };
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -51,6 +77,8 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| "netcmdr_bridge=info,netcmdr_session=info".into()),
         )
         .init();
+
+    exit_on_signals();
 
     let args = Args::parse();
     // Unpack the built-in client before anything can ask for it, so that the
