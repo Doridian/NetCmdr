@@ -206,30 +206,109 @@
         # The bridge, with the client above baked into it. The build script
         # reads $NETCMDR_WEB_DIST, so the binary is the whole service: there is
         # nothing to deploy, mount or point it at beside the executable.
-        bridge = pkgs.rustPlatform.buildRustPackage {
-          pname = "netcmdr-bridge";
-          inherit version src cargoLock;
+        #
+        # Taken over a package set rather than written once, so that the static
+        # build below is the same derivation against a different stdenv.
+        mkBridge =
+          p:
+          let
+            static = p.stdenv.hostPlatform.isStatic;
+          in
+          p.rustPlatform.buildRustPackage {
+            # No suffix for the static one: a static stdenv already puts its own
+            # on the derivation name.
+            pname = "netcmdr-bridge";
+            inherit version src cargoLock;
 
-          cargoBuildFlags = [
-            "-p"
-            "netcmdr-bridge"
-          ];
-          cargoTestFlags = [
-            "-p"
-            "netcmdr-bridge"
-          ];
+            cargoBuildFlags = [
+              "-p"
+              "netcmdr-bridge"
+            ];
+            cargoTestFlags = [
+              "-p"
+              "netcmdr-bridge"
+            ];
 
-          env.NETCMDR_WEB_DIST = "${web}";
+            env = {
+              NETCMDR_WEB_DIST = "${web}";
+            }
+            # openssl-sys links whatever pkg-config hands it, and for a static
+            # stdenv that has to be the archives. It does not infer this from
+            # the target, so say so.
+            // lib.optionalAttrs static {
+              OPENSSL_STATIC = "1";
+            };
 
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = [ pkgs.openssl ];
+            nativeBuildInputs = [ p.pkg-config ];
+            buildInputs = [ p.openssl ];
 
-          meta = {
-            description = "WebSocket and HTTPS bridge serving the browser client for Tripp Lite NetCommander / Minicom Smart IP KVM switches";
-            homepage = "https://git.foxden.network/FoxDen/NetCmdr";
-            license = lib.licenses.agpl3Plus;
-            mainProgram = "netcmdr-bridge";
-            platforms = lib.platforms.linux ++ lib.platforms.darwin;
+            meta = {
+              description =
+                "WebSocket and HTTPS bridge serving the browser client for Tripp Lite NetCommander / Minicom Smart IP KVM switches"
+                + lib.optionalString static " (static build)";
+              homepage = "https://git.foxden.network/FoxDen/NetCmdr";
+              license = lib.licenses.agpl3Plus;
+              mainProgram = "netcmdr-bridge";
+              platforms = if static then lib.platforms.linux else lib.platforms.linux ++ lib.platforms.darwin;
+            };
+          };
+
+        bridge = mkBridge pkgs;
+
+        # The same bridge against musl with everything, OpenSSL included, linked
+        # in: no interpreter, no DT_NEEDED, no libc to match. The web client is
+        # already inside the executable, and the device's certificate is never
+        # verified (see netcmdr-mgmt's transport), so nothing outside the file
+        # is read at runtime but /etc/resolv.conf, and only if --host is given a
+        # name. That is a container built FROM scratch.
+        bridgeStatic = mkBridge pkgs.pkgsStatic;
+
+        # That binary and nothing else, as an image: no base layer, no shell,
+        # no store. `docker load < result` and run it.
+        #
+        # The device goes in the environment rather than the command, so that
+        # passing arguments — a different port, a longer timeout — does not
+        # silently drop it along with the rest of the default command.
+        bridgeImage = pkgs.dockerTools.buildImage {
+          name = "netcmdr-bridge";
+          tag = version;
+
+          # Copied rather than linked in: a symlink into /nix/store would dangle
+          # in an image that has no store to point at.
+          #
+          # The copy is then scrubbed of store paths, because the only ones a
+          # static OpenSSL leaves behind are the OPENSSLDIR and MODULESDIR it
+          # was configured with, and following them would otherwise drag
+          # openssl's etc into the image. Neither is read: no certificate is
+          # verified, no provider is loaded from disk, and a handshake with the
+          # device's profile — TLS 1.2, 1024-bit DHE at security level 1 —
+          # completes with no openssl.cnf in reach.
+          copyToRoot =
+            pkgs.runCommand "netcmdr-bridge-root" { nativeBuildInputs = [ pkgs.nukeReferences ]; }
+              ''
+                mkdir -p $out/bin
+                cp ${bridgeStatic}/bin/netcmdr-bridge $out/bin/netcmdr-bridge
+                chmod +w $out/bin/netcmdr-bridge
+                nuke-refs $out/bin/netcmdr-bridge
+              '';
+
+          config = {
+            Entrypoint = [ "/bin/netcmdr-bridge" ];
+            # Loopback is the binary's default and the right one on a host; in a
+            # namespace of its own it would mean nothing outside could reach the
+            # bridge, so the image listens on all of the container's addresses.
+            # What the warning it logs says still holds: whatever can reach the
+            # published port can reach the device.
+            Cmd = [
+              "--listen"
+              "0.0.0.0:8080"
+            ];
+            ExposedPorts = {
+              "8080/tcp" = { };
+            };
+            # Nothing here is read or written at runtime and the port is above
+            # 1024, so there is nothing for root to do.
+            User = "65534:65534";
           };
         };
       in
@@ -238,6 +317,11 @@
           default = native;
           netcmdr = native;
           netcmdr-bridge = bridge;
+        }
+        # musl and dockerTools are Linux's; on macOS these do not even evaluate.
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          netcmdr-bridge-static = bridgeStatic;
+          netcmdr-bridge-image = bridgeImage;
         };
       }
     );
