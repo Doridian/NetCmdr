@@ -27,6 +27,9 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::KeyboardEvent;
 
+/// A listener, held alive for as long as it is attached to the page.
+type KeyListener = Closure<dyn FnMut(KeyboardEvent)>;
+
 /// One key event, as the viewer wants it.
 pub struct KeyEvent {
     pub key: PhysicalKey,
@@ -45,7 +48,7 @@ pub struct Keyboard {
     /// frame from the viewer.
     to_target: Rc<Cell<bool>>,
     /// Held so the listeners stay attached.
-    _listeners: Rc<Vec<Closure<dyn FnMut(KeyboardEvent)>>>,
+    _listeners: Rc<Vec<KeyListener>>,
 }
 
 impl Keyboard {
@@ -59,7 +62,7 @@ impl Keyboard {
         for (name, down) in [("keydown", true), ("keyup", false)] {
             let queue = events.clone();
             let active = to_target.clone();
-            let listener = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+            let listener = KeyListener::new(move |event: KeyboardEvent| {
                 if !active.get() {
                     return; // the menu is typing; let eframe have it
                 }
