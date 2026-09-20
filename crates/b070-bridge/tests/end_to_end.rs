@@ -51,7 +51,6 @@ fn start_bridge(session_port: u16) -> u16 {
         host: "127.0.0.1".into(),
         https_port: 443,
         session_port,
-        assets: None,
         timeout: Duration::from_secs(5),
     };
     std::thread::spawn(move || {
@@ -234,10 +233,11 @@ fn an_unknown_channel_type_is_rejected_before_any_device_connection() {
     assert!(reply.starts_with("HTTP/1.1 400 "), "got {reply}");
 }
 
-/// Without `--static-dir` the bridge still answers the protocol routes, and
-/// says a clear no to everything else.
+/// The protocol routes answer for themselves, and a path that is in no build
+/// of the client is a plain 404 — there is no directory behind the bridge for
+/// one to appear in.
 #[test]
-fn serves_its_own_description_and_nothing_else() {
+fn serves_its_own_description_and_refuses_what_it_does_not_have() {
     let bridge_port = start_bridge(1);
 
     let mut sock = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
@@ -248,7 +248,7 @@ fn serves_its_own_description_and_nothing_else() {
     assert!(reply.contains(r#""device":"127.0.0.1""#), "got {reply}");
 
     let mut sock = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
-    write!(sock, "GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    write!(sock, "GET /not-in-any-client HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
     let mut reply = String::new();
     sock.read_to_string(&mut reply).unwrap();
     assert!(reply.starts_with("HTTP/1.1 404 "), "got {reply}");

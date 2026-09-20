@@ -235,8 +235,9 @@ those out rather than sitting on the last thing it was told.
 ### `b070-web` — the viewer in a browser
 
 ```sh
-tools/build-web.sh                                     # build into crates/b070-web/dist
-b070-bridge --host 192.0.2.10 --static-dir crates/b070-web/dist
+tools/build-web.sh                        # build into crates/b070-web/dist
+cargo build --release -p b070-bridge      # ... which the bridge embeds
+b070-bridge --host 192.0.2.10
 ```
 
 Then open <http://127.0.0.1:8080>, and log in with the same credentials the
@@ -251,9 +252,8 @@ matches the `wasm-bindgen` crate in `Cargo.lock`; the script says so, with the
 version, if it is missing. `wasm-opt` (from **binaryen**) is used if it is
 there and skipped with a note if it is not.
 
-The module is what a browser must have in full before anything appears, so
-`b070-bridge` compresses it — once, at startup, in memory — and serves the
-result:
+The module is what a browser must have in full before anything appears, so it
+is carried in the bridge brotli-compressed and served that way:
 
 | | size |
 |---|---|
@@ -305,8 +305,7 @@ clippy and rustfmt still cover the repository in one pass.
 ### `b070-bridge` — the web bridge
 
 ```sh
-b070-bridge --host 192.0.2.10                     # serve on 127.0.0.1:8080
-b070-bridge --host 192.0.2.10 --static-dir ./web  # ... and the web client with it
+b070-bridge --host 192.0.2.10   # serve the client and the protocol on 127.0.0.1:8080
 ```
 
 The device's TLS is why this exists. As [TLS](#tls) explains, it offers no ECDHE
@@ -324,7 +323,7 @@ WebSockets:
 | `POST /message.pv` | forwarded verbatim to the device's management API |
 | `GET /kvm?type=cmd\|video\|km\|vm` | a WebSocket carrying one session socket |
 | `GET /api/info` | which device this bridge is pointed at |
-| anything else | a file from `--static-dir`, compressed where the browser takes it |
+| anything else | a file of the built-in web client, compressed where the browser takes it |
 
 Each `/kvm` WebSocket is one of the session's four TCP connections. The client
 sends its `SESSIONID` as the **first message**, as text; the bridge then
@@ -334,20 +333,6 @@ Everything after that first message is opaque bytes. The bridge deliberately
 does not understand `KVMMsg`: WebSocket message boundaries have nothing to do
 with protocol message boundaries, and the client reassembles the stream exactly
 as it would from a socket.
-
-Static files are compressed by the bridge itself, once, as it starts: it walks
-`--static-dir`, keeps a brotli and a gzip copy of every compressible file in
-memory, and sends whichever the client's `Accept-Encoding` allows. Nothing is
-written beside the files and nothing is baked into the executable, so the same
-binary serves any build of the client.
-
-That work runs on a thread of its own and the listener does not wait for it —
-brotli at quality 11 takes tens of seconds on a module this size. Until a
-file's copy is ready it is served as it is on disk, so the bridge is usable
-immediately and merely gets cheaper to download from over the following minute;
-gzip is done first, for every file, so an early client still gets something.
-A file that changes underneath a running bridge — a rebuild, typically — is
-detected by size and mtime and served uncompressed until the next restart.
 
 The token travels in the socket rather than the URL for two measured reasons.
 It is base64 — on firmware 2.2.1258.1.0 a 44-character string routinely
@@ -365,6 +350,37 @@ default listen address is loopback, and why anything else belongs behind a
 reverse proxy that does authenticate — and that terminates a TLS the browser
 will accept. It is not an open relay, though: the device address and both ports
 are fixed at startup, and no request can steer them.
+
+#### One binary
+
+The bridge is a single file. The web client is inside it, put there by the
+crate's build script from `crates/b070-web/dist` — or from `$B070_WEB_DIST`, if
+that is set — and there is nothing to deploy, mount or point it at beside the
+executable. It cannot be served a client that has drifted from the bridge it
+came with, and there is no directory under it for a file to appear in.
+
+It is stored **brotli-compressed, at quality 11**, for both of the reasons that
+matter: that is a third of the size in the executable, and it is the copy most
+browsers are sent, so the expensive compression happens once during the build
+rather than on every start of the service. What startup does is the cheap half —
+decompress each file and gzip it for the clients that do not take brotli — which
+is under half a second for the whole client against the minute the brotli would
+have cost. Both copies then stay in memory, immutable, so no request pays for
+compression and none needs revalidating.
+
+A file brotli does not shrink, such as a PNG, is stored as it is instead, and is
+then simply offered in no encoding. Nothing in the binary is larger than the
+file it came from.
+
+The cost is on the build: a change to the client re-compresses it, which is
+about half a minute for a module this size. Cargo reruns that only when the
+`dist` directory actually changes, so an ordinary rebuild of the bridge does not
+pay it.
+
+Building the bridge with no client built is a warning rather than an error — the
+binary still relays the protocol and answers 404 for everything else. That keeps
+`cargo build --workspace` working for anyone without a wasm toolchain, which is
+most people touching the native crates.
 
 All of this has been run against a live device: a management login, the TLS
 command channel answering with its `CONFIG_XML`, and video decoding to the same

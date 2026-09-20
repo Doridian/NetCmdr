@@ -219,6 +219,7 @@ dependencies = [
  "b070-proto",
  "b070-session",
  "brotli",
+ "brotli-decompressor",
  "clap",
  "flate2",
  "openssl",

@@ -11,13 +11,13 @@
 //!
 //! What is *not* implemented is as important as what is: no chunked transfer
 //! encoding, no keep-alive, and no compressing per request — a static file goes
-//! out from the copy [`crate::assets`] made of it at startup, or as it is.
+//! out from a copy [`crate::assets`] already holds, or as it is.
 //! Every response closes the connection. The bridge answers three kinds of request — a file, a
 //! `/message.pv` forward and a WebSocket upgrade — and none of them are helped
 //! by pipelining.
 
 use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use crate::assets::{Assets, Encoding};
 
@@ -241,20 +241,21 @@ pub fn respond_status(out: &mut impl Write, status: u16, reason: &str) -> io::Re
     )
 }
 
-/// Serve a file from the static directory, or 404.
+/// Serve a file of the embedded web client, or 404.
 ///
 /// `/` means `index.html`. Anything that is not a plain relative path — a
 /// parent reference, a root anchor, a Windows prefix — is refused outright
-/// rather than normalised, because normalising is where directory traversal
-/// bugs come from.
+/// rather than normalised. There is no filesystem behind this any more, so
+/// such a path could at worst miss the table; refusing it keeps the answer to
+/// a traversal attempt an unambiguous no rather than a 404 that looks like a
+/// typo.
 ///
-/// If [`Assets`] has a compressed copy of the file and the client said it
-/// would take that encoding, the copy is sent instead. It matters here more
-/// than it usually would: the client is a WebAssembly module of several
-/// megabytes that the browser must have in full before anything appears, and
-/// it compresses to under a third of that. The compressing happened at
-/// startup, so this costs nothing per request; until it has finished, the file
-/// goes out as it is rather than making anyone wait for it.
+/// If the client said it would take a coding [`Assets`] holds the file in, that
+/// copy is sent instead. It matters here more than it usually would: the client
+/// is a WebAssembly module of several megabytes that the browser must have in
+/// full before anything appears, and it compresses to under a third of that.
+/// The brotli copy is the one in the binary and the gzip copy was made as the
+/// bridge started, so this costs nothing per request either way.
 pub fn serve_static(
     out: &mut impl Write,
     assets: &Assets,
@@ -268,35 +269,44 @@ pub fn serve_static(
         relative
     };
 
-    let mut full = PathBuf::from(assets.root());
+    let mut key = String::with_capacity(relative.len());
     for component in Path::new(relative).components() {
         match component {
-            Component::Normal(part) => full.push(part),
+            Component::Normal(part) => {
+                if !key.is_empty() {
+                    key.push('/');
+                }
+                key.push_str(&part.to_string_lossy());
+            }
             _ => return respond_status(out, 403, "Forbidden"),
         }
     }
 
-    // Brotli first: it is the better of the two and every browser that speaks
-    // it also speaks gzip, so preferring it costs nothing.
-    let cached = [Encoding::Brotli, Encoding::Gzip]
-        .into_iter()
-        .filter(|encoding| accepts(accepted, encoding.name()))
-        .find_map(|encoding| assets.get(&full, encoding).map(|body| (encoding, body)));
-
-    let (body, chosen) = match cached {
-        Some((encoding, body)) => (Ok(body.to_vec()), Some(encoding.name())),
-        None => (std::fs::read(&full), None),
+    let Some(file) = assets.get(&key) else {
+        return respond_status(out, 404, "Not Found");
     };
 
-    match body {
-        // The type is the *original* file's; the encoding is separate from it.
-        Ok(body) => respond_encoded(out, 200, "OK", content_type(&full), chosen, &body),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => respond_status(out, 404, "Not Found"),
-        Err(e) => {
-            tracing::warn!(path = %full.display(), error = %e, "static read failed");
-            respond_status(out, 500, "Internal Server Error")
-        }
-    }
+    // Brotli first: it is the better of the two and every browser that speaks
+    // it also speaks gzip, so preferring it costs nothing.
+    let chosen = [Encoding::Brotli, Encoding::Gzip]
+        .into_iter()
+        .filter(|encoding| accepts(accepted, encoding.name()))
+        .find_map(|encoding| file.encoded(encoding).map(|body| (encoding, body)));
+
+    let (body, encoding) = match chosen {
+        Some((encoding, body)) => (body, Some(encoding.name())),
+        None => (file.plain(), None),
+    };
+
+    // The type is the *original* file's; the encoding is separate from it.
+    respond_encoded(
+        out,
+        200,
+        "OK",
+        content_type(Path::new(&key)),
+        encoding,
+        body,
+    )
 }
 
 /// Whether an `Accept-Encoding` header offers `encoding`.
@@ -391,11 +401,20 @@ mod tests {
             .is_none());
     }
 
+    /// Something that compresses, as the real client's files do.
+    fn compressible() -> Vec<u8> {
+        "const module = 'plain-bytes';\n".repeat(64).into_bytes()
+    }
+
+    /// A bridge carrying `files` and nothing else.
+    fn serving(files: Vec<(&'static str, Vec<u8>)>) -> Assets {
+        Assets::unpack(crate::assets::table_for_test(files))
+    }
+
     #[test]
     fn traversal_is_refused_rather_than_normalised() {
         let mut out = Vec::new();
-        let assets = Assets::new(PathBuf::from("/nonexistent"));
-        serve_static(&mut out, &assets, "/../etc/passwd", "").unwrap();
+        serve_static(&mut out, &serving(vec![]), "/../etc/passwd", "").unwrap();
         assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 403 "));
     }
 
@@ -412,22 +431,11 @@ mod tests {
         assert!(!accepts("brotli", "br"));
     }
 
-    /// Something that compresses, and clears the size floor `assets` applies.
-    fn compressible() -> Vec<u8> {
-        "const module = 'plain-bytes';\n".repeat(64).into_bytes()
-    }
-
     /// A compressed copy is sent in place of the file, with the original's
     /// type and an encoding beside it.
     #[test]
     fn a_compressed_copy_is_served_when_the_client_takes_it() {
-        let dir = std::env::temp_dir().join(format!("b070-http-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("app.wasm"), compressible()).unwrap();
-
-        let assets = Assets::new(dir.clone());
-        assets.warm();
+        let assets = serving(vec![("app.wasm", compressible())]);
 
         let mut out = Vec::new();
         serve_static(&mut out, &assets, "/app.wasm", "gzip, br").unwrap();
@@ -436,7 +444,14 @@ mod tests {
         assert!(sent.contains("Vary: Accept-Encoding"), "{sent}");
         assert!(sent.contains("Content-Type: application/wasm"), "{sent}");
 
-        // A client that does not offer it gets the file itself.
+        // A client that takes only gzip gets the copy made at startup.
+        let mut out = Vec::new();
+        serve_static(&mut out, &assets, "/app.wasm", "gzip").unwrap();
+        let sent = String::from_utf8_lossy(&out).into_owned();
+        assert!(sent.contains("Content-Encoding: gzip"), "{sent}");
+
+        // A client that offers neither gets the file itself, unpacked from the
+        // brotli the binary actually carries.
         let mut out = Vec::new();
         serve_static(&mut out, &assets, "/app.wasm", "identity").unwrap();
         let sent = String::from_utf8_lossy(&out).into_owned();
@@ -445,28 +460,44 @@ mod tests {
             sent.ends_with(&String::from_utf8(compressible()).unwrap()),
             "{sent}"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Nothing compressed yet — the startup pass is still running, or the file
-    /// is one it skips — means the file itself, not a wait and not an error.
+    /// `/` is the client's entry point, not a listing and not a 404.
     #[test]
-    fn an_uncompressed_file_is_not_an_error() {
-        let dir = std::env::temp_dir().join(format!("b070-http-bare-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("index.html"), b"<!doctype html>").unwrap();
-
-        let assets = Assets::new(dir.clone());
+    fn the_root_is_the_index() {
+        let assets = serving(vec![("index.html", b"<!doctype html>".to_vec())]);
         let mut out = Vec::new();
         serve_static(&mut out, &assets, "/", "gzip, br").unwrap();
         let sent = String::from_utf8_lossy(&out).into_owned();
         assert!(sent.starts_with("HTTP/1.1 200 "), "{sent}");
-        assert!(!sent.contains("Content-Encoding"), "{sent}");
-        assert!(sent.ends_with("<!doctype html>"), "{sent}");
+        assert!(sent.contains("Content-Type: text/html"), "{sent}");
 
-        std::fs::remove_dir_all(&dir).ok();
+        let mut out = Vec::new();
+        serve_static(&mut out, &assets, "/", "identity").unwrap();
+        let sent = String::from_utf8_lossy(&out).into_owned();
+        assert!(sent.ends_with("<!doctype html>"), "{sent}");
+    }
+
+    /// Nothing is served that was not built in — there is no directory behind
+    /// this to grow a file in.
+    #[test]
+    fn a_file_that_was_not_embedded_is_a_404() {
+        let assets = serving(vec![("index.html", compressible())]);
+        let mut out = Vec::new();
+        serve_static(&mut out, &assets, "/b070_web.js", "gzip, br").unwrap();
+        assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 404 "));
+    }
+
+    /// A path in a subdirectory is keyed the way the URL spells it, whatever
+    /// the build host's separator was.
+    #[test]
+    fn nested_paths_are_served() {
+        let assets = serving(vec![("assets/js/app.js", compressible())]);
+        let mut out = Vec::new();
+        serve_static(&mut out, &assets, "/assets/js/app.js", "br").unwrap();
+        let sent = String::from_utf8_lossy(&out).into_owned();
+        assert!(sent.starts_with("HTTP/1.1 200 "), "{sent}");
+        assert!(sent.contains("Content-Type: text/javascript"), "{sent}");
     }
 
     #[test]

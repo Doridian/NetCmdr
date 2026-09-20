@@ -24,11 +24,12 @@
 //! | `POST /message.pv` | forwarded verbatim to the device's management API |
 //! | `GET /kvm?type=…` | a WebSocket carrying one session socket |
 //! | `GET /api/info` | what device this bridge is pointed at |
-//! | anything else | a file from `--static-dir`, for the web client itself |
+//! | anything else | a file of the web client, which is inside this binary |
 //!
-//! The files of that last row are served compressed where the browser takes it.
-//! The bridge compresses them itself, in the background, as it starts — see
-//! [`assets`].
+//! There is nothing to deploy beside the executable: the client is built into
+//! it, brotli-compressed, and unpacked when the bridge starts — see [`assets`].
+//! The files of that last row are served compressed where the browser takes
+//! it, from copies made once at startup rather than per request.
 //!
 //! # Security
 //!
@@ -48,13 +49,11 @@ pub mod http;
 pub mod ws;
 
 use std::net::TcpStream;
-use std::sync::Arc;
 use std::time::Duration;
 
 use b070_proto::kvmmsg::SocketType;
 use tungstenite::protocol::frame::coding::CloseCode;
 
-use crate::assets::Assets;
 use crate::http::Request;
 
 /// Everything a connection thread needs, cloned per connection.
@@ -63,8 +62,6 @@ pub struct Bridge {
     pub host: String,
     pub https_port: u16,
     pub session_port: u16,
-    /// The web client to serve, and the compressed copies of it.
-    pub assets: Option<Arc<Assets>>,
     pub timeout: Duration,
 }
 
@@ -100,16 +97,10 @@ pub fn route(bridge: &Bridge, stream: &mut TcpStream) -> std::io::Result<()> {
             )
             .as_bytes(),
         ),
-        ("GET", path) => match &bridge.assets {
-            Some(assets) => {
-                let accepted = request
-                    .header("accept-encoding")
-                    .unwrap_or_default()
-                    .to_string();
-                http::serve_static(stream, assets, path, &accepted)
-            }
-            None => http::respond_status(stream, 404, "Not Found"),
-        },
+        ("GET", path) => {
+            let accepted = request.header("accept-encoding").unwrap_or_default();
+            http::serve_static(stream, assets::assets(), path, accepted)
+        }
         _ => http::respond_status(stream, 405, "Method Not Allowed"),
     }
 }

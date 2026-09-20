@@ -1,8 +1,12 @@
 #!/bin/sh
 # Build the browser client into crates/b070-web/dist.
 #
-# The bridge serves whatever this produces:
-#   b070-bridge --host <device> --static-dir crates/b070-web/dist
+# b070-bridge embeds whatever this produces, so building the client is the
+# first of two steps:
+#   tools/build-web.sh
+#   cargo build --release -p b070-bridge
+# and the resulting binary is the whole service — there is nothing to deploy
+# beside it.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -63,9 +67,12 @@ else
   fi
 fi
 
-# Nothing is compressed here. b070-bridge compresses what it serves itself,
-# in the background as it starts, so the files in this directory are the plain
-# ones and a rebuild cannot leave a stale .br or .gz behind next to them.
+# Nothing is compressed here. b070-bridge's build script brotli-compresses what
+# it embeds, so the files in this directory are the plain ones and a rebuild
+# cannot leave a stale .br or .gz behind next to them.
 
 echo "wrote $out"
 ls -la "$out"
+echo
+echo "now build the bridge, which embeds this:"
+echo "  cargo build --release -p b070-bridge"
