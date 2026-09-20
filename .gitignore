@@ -1,6 +1,8 @@
 /target
 /result
 /result-*
+/oci-amd64
+/oci-arm64
 
 # Bytecode from the tools/ scripts.
 __pycache__/

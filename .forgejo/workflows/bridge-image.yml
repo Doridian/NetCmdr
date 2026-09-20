@@ -48,7 +48,6 @@ jobs:
             trusted-substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
             substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
       - run: nix registry add nixpkgs github:NixOS/nixpkgs/nixos-26.05
-      - run: start-docker
       # This also builds both bridges and the wasm client they share, and runs
       # the bridge's Go tests on the way through. The tests run once, under the
       # amd64 build: nothing here can execute an aarch64 test binary, so the
@@ -57,62 +56,55 @@ jobs:
         run: |
           nix build '.#netcmdr-bridge-image-amd64' -o result-amd64
           nix build '.#netcmdr-bridge-image-arm64' -o result-arm64
-      # What the tarballs call themselves, asked of the flake rather than
-      # scraped out of `docker load`'s output.
-      - id: image
-        name: Load the images
+      # regctl is the whole registry side of this job: it reads the tarballs
+      # the flake produced and it writes the index. Out of the nixpkgs pinned
+      # above rather than out of an action, so it is the store path this
+      # workflow already trusts and not a binary fetched at run time.
+      - id: regctl
+        name: Fetch regctl
+        run: echo "bin=$(nix build --no-link --print-out-paths 'nixpkgs#regclient')/bin/regctl" >> "$GITHUB_OUTPUT"
+      # An OCI layout per architecture, which is what the index is built from
+      # below. This is where a pull request stops, and it is the step that
+      # would notice a tarball nothing can read.
+      - name: Pack the images
         run: |
-          docker load < result-amd64
-          docker load < result-arm64
-          echo "name=$(nix eval --raw '.#netcmdr-bridge-image-amd64.imageName')" >> "$GITHUB_OUTPUT"
-          echo "amd64=$(nix eval --raw '.#netcmdr-bridge-image-amd64.imageTag')" >> "$GITHUB_OUTPUT"
-          echo "arm64=$(nix eval --raw '.#netcmdr-bridge-image-arm64.imageTag')" >> "$GITHUB_OUTPUT"
-      - name: Log in to Docker Registry
-        uses: https://data.forgejo.org/docker/login-action@v4
-        with:
-          registry: git.foxden.network
-          username: forgejo
-          password: ${{ steps.jwt.outputs.jwt }}
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
-      # One moving tag and nothing else, as before, except that it now names an
-      # index over both architectures. The two images are pushed under that tag
-      # first and the index replaces it: an index can only name manifests the
-      # registry already holds, and this tag is the only name published, so for
-      # the length of the push it points at one architecture at a time.
+          regctl='${{ steps.regctl.outputs.bin }}'
+          "$regctl" image import ocidir://oci-amd64:img result-amd64
+          "$regctl" image import ocidir://oci-arm64:img result-arm64
+      # One moving tag and nothing else: the index takes it, and the two
+      # manifests under the index are never tagged at all. That is the part
+      # three earlier attempts got wrong. They pushed each architecture to the
+      # tag in turn and then tried to name both digests, which cannot work on
+      # this registry — taking the tag away from a manifest that nothing else
+      # refers to deletes it, so by the time the index was written the first
+      # architecture was a 404. An untagged manifest that an index refers to is
+      # the ordinary shape of a multi-architecture image and keeps fine; it is
+      # what every buildx push here produces.
       #
-      # The index is put there by regctl, after `docker manifest` and `docker
-      # buildx imagetools` both reached the registry unauthenticated — `denied`
-      # and `unauthorized` from the first, `insufficient_scope` from the second
-      # — while the `docker push` two lines above them, in the same shell with
-      # the same config, authenticated fine. That is the asymmetry to know
-      # about: a push is the daemon's work and the CLI hands it the
-      # credentials, whereas an index is the client's own, and neither client
-      # picked up what docker/login-action left behind. This registry answers
-      # an unauthenticated caller with a token whose scope is empty rather than
-      # with a refusal, which is where `insufficient_scope` comes from. regctl
-      # is handed the credential outright, so there is nothing for it to
-      # discover, and `index create --digest` names manifests already in the
-      # repository instead of copying anything into it.
+      # `index create --ref` uploads each layout and writes the index over
+      # them, so nothing is tagged in between and the tag moves once, at the
+      # end, from whatever it pointed at to the finished index.
+      #
+      # regctl is also given the credential outright rather than left to find
+      # one. `docker manifest` and `docker buildx imagetools` both reached the
+      # registry unauthenticated — `denied` and `unauthorized` from the first,
+      # `insufficient_scope` from the second — although `docker push` in the
+      # same shell, with the same config, authenticated fine: a push is the
+      # daemon's work and the CLI hands it the credentials, whereas an index is
+      # the client's own, and neither client picked up what login-action left
+      # behind. (The odd wording of the second is this registry answering an
+      # unauthenticated caller with a token whose scope is empty instead of
+      # refusing it.) Nothing here needs a docker daemon any more, so the job
+      # no longer starts one.
       - name: Push the image
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
         env:
           REGISTRY_TOKEN: ${{ steps.jwt.outputs.jwt }}
         run: |
+          regctl='${{ steps.regctl.outputs.bin }}'
           dockertag='git.foxden.network/${{ steps.repository_case.outputs.lowercase }}:${{ vars.OCI_TAG || 'latest' }}'
-          amd64='${{ steps.image.outputs.name }}:${{ steps.image.outputs.amd64 }}'
-          arm64='${{ steps.image.outputs.name }}:${{ steps.image.outputs.arm64 }}'
-          # Each image by the digest the registry gave it, read back off the
-          # image as soon as it is pushed rather than scraped out of what
-          # `docker push` printed. The digest alone is enough: the index lands
-          # in the repository they were just pushed to.
-          digests=()
-          for image in "$amd64" "$arm64"; do
-            docker tag "$image" "$dockertag"
-            docker push "$dockertag"
-            repodigest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")"
-            digests+=(--digest "${repodigest##*@}")
-          done
-          regctl="$(nix build --no-link --print-out-paths 'nixpkgs#regclient')/bin/regctl"
           printf '%s' "$REGISTRY_TOKEN" |
             "$regctl" registry login git.foxden.network --user forgejo --pass-stdin
-          "$regctl" index create "$dockertag" "${digests[@]}"
+          "$regctl" index create "$dockertag" \
+            --ref ocidir://oci-amd64:img \
+            --ref ocidir://oci-arm64:img
