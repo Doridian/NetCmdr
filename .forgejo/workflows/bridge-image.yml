@@ -1,0 +1,74 @@
+# The bridge's container image comes out of the flake, not out of a Dockerfile:
+# `.#netcmdr-bridge-image` is the static binary and nothing else, so there is
+# nothing here for buildx to do. That is why this does not use the shared
+# docker.yml template, and why it is not named docker.yml — a central deploy of
+# that template would land on top of it.
+name: Bridge image
+
+concurrency:
+  group: bridge-image-${{ github.ref }}
+  cancel-in-progress: true
+
+enable-openid-connect: true
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  bridge-image:
+    runs-on: ${{ vars.MANAGED_RUNNER_TAG || 'ubuntu-26.04' }}
+    steps:
+      - id: jwt
+        run: get-actions-jwt
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
+      - id: repository_case
+        uses: https://github.com/ASzc/change-string-case-action@v8
+        with:
+          string: ${{ github.repository }}
+      - name: Check out the repo
+        uses: https://data.forgejo.org/actions/checkout@v7
+      - uses: https://github.com/cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.EXT_GITHUB_TOKEN }}
+          enable_kvm: false
+          install_options: --no-daemon
+          extra_nix_config: |
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M=
+            trusted-substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
+            substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
+      - run: nix registry add nixpkgs github:NixOS/nixpkgs/nixos-26.05
+      - run: start-docker
+      # This also builds the static bridge and the wasm client it embeds, and
+      # runs the bridge crate's tests on the way through.
+      - name: Build the image
+        run: nix build '.#netcmdr-bridge-image'
+      # What the tarball calls itself, asked of the flake rather than scraped
+      # out of `docker load`'s output.
+      - id: image
+        name: Load the image
+        run: |
+          docker load < result
+          echo "name=$(nix eval --raw '.#netcmdr-bridge-image.imageName')" >> "$GITHUB_OUTPUT"
+          echo "tag=$(nix eval --raw '.#netcmdr-bridge-image.imageTag')" >> "$GITHUB_OUTPUT"
+      - name: Log in to Docker Registry
+        uses: https://data.forgejo.org/docker/login-action@v4
+        with:
+          registry: git.foxden.network
+          username: forgejo
+          password: ${{ steps.jwt.outputs.jwt }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
+      # Pushed under the crate's version and under a moving tag, so a deploy can
+      # pin one or follow the other.
+      - name: Push the image
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
+        run: |
+          local='${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}'
+          remote='git.foxden.network/${{ steps.repository_case.outputs.lowercase }}'
+          for tag in '${{ steps.image.outputs.tag }}' '${{ vars.OCI_TAG || 'latest' }}'; do
+            docker tag "$local" "$remote:$tag"
+            docker push "$remote:$tag"
+          done
