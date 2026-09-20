@@ -4,7 +4,7 @@
 __pycache__/
 
 # The built web client; `tools/build-web.sh` regenerates it.
-/crates/b070-web/dist/
+/crates/netcmdr-web/dist/
 
 # Vendor material — firmware images, client JARs and native libraries,
 # decompiled or disassembled output, manuals, datasheets, device certificates.

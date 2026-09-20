@@ -1,16 +1,16 @@
 #!/bin/sh
-# Build the browser client into crates/b070-web/dist.
+# Build the browser client into crates/netcmdr-web/dist.
 #
-# b070-bridge embeds whatever this produces, so building the client is the
+# netcmdr-bridge embeds whatever this produces, so building the client is the
 # first of two steps:
 #   tools/build-web.sh
-#   cargo build --release -p b070-bridge
+#   cargo build --release -p netcmdr-bridge
 # and the resulting binary is the whole service — there is nothing to deploy
 # beside it.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-out="$root/crates/b070-web/dist"
+out="$root/crates/netcmdr-web/dist"
 profile="${1:-release}"
 
 case "$profile" in
@@ -28,8 +28,8 @@ $(grep -A1 '^name = "wasm-bindgen"$' "$root/Cargo.lock" | sed -n 's/^version = "
   exit 1
 }
 
-echo "building b070-web ($profile)"
-cargo build -p b070-web --target wasm32-unknown-unknown $flags
+echo "building netcmdr-web ($profile)"
+cargo build -p netcmdr-web --target wasm32-unknown-unknown $flags
 
 rm -rf "$out"
 mkdir -p "$out"
@@ -37,13 +37,13 @@ wasm-bindgen \
   --target web \
   --no-typescript \
   --out-dir "$out" \
-  "$root/target/wasm32-unknown-unknown/$target_dir/b070_web.wasm"
+  "$root/target/wasm32-unknown-unknown/$target_dir/netcmdr_web.wasm"
 
-cp "$root/crates/b070-web/web/index.html" "$out/"
+cp "$root/crates/netcmdr-web/web/index.html" "$out/"
 
 # wasm-opt is optional: it roughly halves the module, but a build without it
 # still works, so a missing binaryen is a note rather than a failure.
-wasm="$out/b070_web_bg.wasm"
+wasm="$out/netcmdr_web_bg.wasm"
 if [ "$profile" = release ] && command -v wasm-opt >/dev/null 2>&1; then
   before=$(wc -c < "$wasm")
   # -Oz is size over speed, which is the right trade for a module the browser
@@ -67,7 +67,7 @@ else
   fi
 fi
 
-# Nothing is compressed here. b070-bridge's build script brotli-compresses what
+# Nothing is compressed here. netcmdr-bridge's build script brotli-compresses what
 # it embeds, so the files in this directory are the plain ones and a rebuild
 # cannot leave a stale .br or .gz behind next to them.
 
@@ -75,4 +75,4 @@ echo "wrote $out"
 ls -la "$out"
 echo
 echo "now build the bridge, which embeds this:"
-echo "  cargo build --release -p b070-bridge"
+echo "  cargo build --release -p netcmdr-bridge"

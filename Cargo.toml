@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/b070-proto",
-    "crates/b070-mgmt",
-    "crates/b070-session",
-    "crates/b070-bridge",
-    "crates/b070-ui",
-    "crates/b070-web",
-    "crates/b070-cli",
-    "crates/b070-view",
+    "crates/netcmdr-proto",
+    "crates/netcmdr-mgmt",
+    "crates/netcmdr-session",
+    "crates/netcmdr-bridge",
+    "crates/netcmdr-ui",
+    "crates/netcmdr-web",
+    "crates/netcmdr-cli",
+    "crates/netcmdr-view",
 ]
 
 [workspace.package]
@@ -16,7 +16,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/doridian/B070-008-19-IP"
+repository = "https://git.foxden.network/FoxDen/NetCmdr"
 
 [workspace.dependencies]
 anyhow = "1"

@@ -188,7 +188,7 @@ Key corrections:
 
 3. **Management is `POST /message.pv`, not `/config/`.** The old `/config/`
    `client=*XML` endpoint (§5.2) is **404** on current firmware. See §5.2 for
-   the replacement, which is implemented and verified in `b070-mgmt` —
+   the replacement, which is implemented and verified in `netcmdr-mgmt` —
    including **writing** configuration (§5.2.1), which is one whole-document
    `CMA_CONFIG` between two `CMA_PERMISSION` calls, not a per-setting update.
 
@@ -197,7 +197,7 @@ Key corrections:
    header's fields are now known exactly (they are *not* the "reserved" words
    the RE assumed): server/client timestamps, `cmd_flag`, `command`, `id`,
    `key_frame`. Full enums (`MagicNumber`, `CmdFlag`, `Cmd`, `SocketType`) are
-   transcribed in `crates/b070-proto/src/kvmmsg.rs`.
+   transcribed in `crates/netcmdr-proto/src/kvmmsg.rs`.
 
 5. **The session is four sockets, not one.** `SocketType` = cmd(0), kbmouse(1),
    video(2), virtualmedia(3). Each opens with a **plaintext** handshake — write
@@ -270,7 +270,7 @@ handful get a dedicated encoding:
 So the `Cmd` code is *not* uniform across the vocabulary: `config` documents and
 everything-else documents differ, and two entries never reach the device at all.
 
-`change_port` is implemented in `b070-session` as `Session::change_target` and
+`change_port` is implemented in `netcmdr-session` as `Session::change_target` and
 **verified against the hardware**: sending it on a live session moved the same
 three channels from port 1 (1360×768) to port 2 (1024×768) and back, emitting a
 new `Resolution` and a fresh client config each time, with no re-login and no
@@ -290,7 +290,7 @@ Timed against the device, tiles of the *previous* target keep arriving from
 So the first frame after a `change_port` is **not** a usable "the switch is
 done" signal. The usable ones, in the order they arrive, are `Resolution` (or
 `NoSignal` for a dead port) and then the client config naming the new active
-port. A client has to treat the gap as "picture unknown" — `b070-view` blanks
+port. A client has to treat the gap as "picture unknown" — `netcmdr-view` blanks
 the window over it. Two targets at the same resolution emit no `Resolution`
 event at all, which is why the config document is needed as well.
 
@@ -307,7 +307,7 @@ HTTPS only, **TLS 1.2** (`DHE-RSA-AES256-GCM-SHA384`) on firmware 2.2.1258.1.0;
 
 **Current firmware (verified live):** one endpoint, `POST /message.pv`, body is a
 `CMA_Message` XML document, response is a `PV_*` XML document (`Content-Type:
-text/plain`, `Content-Length`-framed). This is implemented in `b070-mgmt` and
+text/plain`, `Content-Length`-framed). This is implemented in `netcmdr-mgmt` and
 run against the device; captured request/response fixtures are in
 `research/notes/analysis/live-fixtures/`.
 
@@ -360,7 +360,7 @@ document and applies all of it, so changing one setting means fetching the
 configuration, editing it, and posting the whole thing back. That is what the
 vendor's client does: `FetchCfgHttpCmd` → the dialogs mutate one XStream object
 graph → `SaveCfgHttpCmd` serializes the lot. Implemented in
-`b070-mgmt`'s `config.rs` (the lossless document) and driven by `b070 <area> set`.
+`netcmdr-mgmt`'s `config.rs` (the lossless document) and driven by `netcmdr <area> set`.
 
 The full sequence, from `com.ext.SetConfigCmd`:
 
@@ -411,7 +411,7 @@ fixture's device had none:
 Both server lists are `<server>` on the wire; the client's XStream cannot have
 two classes on one tag, so `HttpUtils.replaceXpvMessageServerTokens` renames the
 LDAP ones to `<lserver>` on the way in (they are the ones carrying `proto=`) and
-back on the way out. Working on the document directly, as `b070-mgmt` does,
+back on the way out. Working on the document directly, as `netcmdr-mgmt` does,
 makes that substitution unnecessary.
 
 `security_policy/@aaa_order` is the enabled sources in priority order, as the
@@ -422,7 +422,7 @@ present and always first. The live unit reads `3,1`.
 **A side effect worth knowing:** hiding a serial port (`serial_device/@active`
 = `false`) also strips that port from every account's `starget_ports`, and
 showing the port again does **not** put those grants back. Measured on firmware
-2.2.1258.1.0; `b070 serial set --visible off` names the accounts that lose it.
+2.2.1258.1.0; `netcmdr serial set --visible off` names the accounts that lose it.
 
 Secrets — the LDAP bind password, RADIUS shared secrets and the SNMP community —
 are stored in the clear and come back in **every** configuration fetch, so any
@@ -454,7 +454,7 @@ Two things the vendor's client does not tell you, both measured on 2.2.1258.1.0:
 Note also that `FetchRoccVersionsHttpCmd.composeData` emits `"\t< action
 type=\"roc_version\"/>"` — with a space after the `<`, which is not
 well-formed XML. The device accepts a properly formed `<action …/>` just as
-happily, so `b070-mgmt` sends that; the firmware's parser is evidently lenient
+happily, so `netcmdr-mgmt` sends that; the firmware's parser is evidently lenient
 about the vendor's own typo rather than matching on the literal string.
 
 **Legacy firmware (2013, from the old web UI, now 404):** a single ISAPI
@@ -468,11 +468,11 @@ still run it, but not present on the current unit.
 
 **`<action type="backup"/>` needs the configuration permission**, exactly as a
 `CMA_CONFIG` write does, and answers `reply_error` id `32004` (*access denied*)
-without it — which is what `b070 backup` used to do, because `Client::backup`
+without it — which is what `netcmdr backup` used to do, because `Client::backup`
 sent the action bare. The sequence is the one §5.2.1 lists for a save:
 `CMA_PERMISSION level="config"`, the action, `CMA_PERMISSION level="normal"`.
 It is a read, but the device gates it like a write. `restore_from_backup` and
-the factory `restore` take the same bracket in `b070-mgmt`; neither has been
+the factory `restore` take the same bracket in `netcmdr-mgmt`; neither has been
 run against hardware, for the obvious reason, and neither can give the
 permission back afterwards because the device reboots.
 
@@ -489,7 +489,7 @@ it the same way: write it to a file, hand it back verbatim on a restore.
 
 Transcribed from the current client's own Java
 (`com.minicom.plugin.serialization.KVMMsgHeaderEncoder` / `KVMMSgHeaderDecoder`,
-`com.minicom.plugin.data.*`), implemented in `crates/b070-proto/src/kvmmsg.rs`.
+`com.minicom.plugin.data.*`), implemented in `crates/netcmdr-proto/src/kvmmsg.rs`.
 Every session channel (cmd, keyboard/mouse, video, virtual media) uses this one
 message.
 
@@ -531,8 +531,8 @@ enum is in the decompiled `Cmd.java`; the actively-used subset is named in
 
 #### 5.4.1 Video, keyboard and mouse — IMPLEMENTED AND HARDWARE-VERIFIED (2026-09-18)
 
-Ported to `crates/b070-session/` and run against the live device: the viewer
-`b070-view` shows a target's screen and passes keyboard and mouse through.
+Ported to `crates/netcmdr-session/` and run against the live device: the viewer
+`netcmdr-view` shows a target's screen and passes keyboard and mouse through.
 Transcribed from `com.minicom.plugin.{video_impl,LZW.decoder,ycbcr}`.
 
 **Video is tile-based.** A `CmdFlag::BMP` message on the video channel carries a
@@ -646,8 +646,8 @@ time can simply always compute it. Once a second the native library formats
 through JNI as `OnEvent("status_change", …)`; `EventsController` matches the
 substring `statistics noise_level` and routes it to the dialog's `JProgressBar`.
 
-`crates/b070-session/src/video.rs` (`NoiseMeter`) transcribes this, ungated, and
-`b070-view` shows it as a bar in the menu bar rather than hiding it in a dialog.
+`crates/netcmdr-session/src/video.rs` (`NoiseMeter`) transcribes this, ungated, and
+`netcmdr-view` shows it as a bar in the menu bar rather than hiding it in a dialog.
 
 #### Analog capture position — HARDWARE-MEASURED (2026-09-19)
 
@@ -790,8 +790,8 @@ the signal; it was in the element.
 The config backup (§5.2.3) is therefore no longer the only route to the stored
 table, and does not need its passphrase recovered to correct a capture position.
 
-`crates/b070-session/src/align.rs` implements the measurement and the state
-machine that drives it; `b070-view --align` and the viewer's *Video → Re-align
+`crates/netcmdr-session/src/align.rs` implements the measurement and the state
+machine that drives it; `netcmdr-view --align` and the viewer's *Video → Re-align
 capture* are the two front ends. A run probes with session sets and ends in one
 stored write carrying every axis it touched — the answer where it has one, the
 figure the device started with where it does not — so a correction outlives the

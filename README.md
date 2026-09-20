@@ -1,4 +1,4 @@
-# B070-008-19-IP
+# NetCmdr
 
 Cross-platform client for the Tripp-Lite B070-008-19-IP KVM (and possibly others).
 
@@ -8,15 +8,15 @@ The vendor ships a Java client. This project replaces it.
 
 Verified against real hardware (a B070-008-19-IP on firmware **2.2.1258.1.0**).
 
-- **Management CLI works end to end.** `b070` reads and *writes* every setting
+- **Management CLI works end to end.** `netcmdr` reads and *writes* every setting
   the device has — network, users, LDAP, RADIUS, security policy, serial ports,
   SNMP, power — over the device's real `/message.pv` API, and can power-control,
   back up, restore and reboot.
-- **The KVM session works end to end.** `b070-view` opens a window on a target's
+- **The KVM session works end to end.** `netcmdr-view` opens a window on a target's
   screen with keyboard and mouse passed through: live video decoded from the
   device's own LZW + tile codec, verified against hardware.
-- **The viewer runs in a browser.** `b070-bridge` terminates the device's
-  un-negotiable TLS and relays for `b070-web`, which is the same viewer
+- **The viewer runs in a browser.** `netcmdr-bridge` terminates the device's
+  un-negotiable TLS and relays for `netcmdr-web`, which is the same viewer
   compiled to WebAssembly — the device's LZW video decoded in the browser and
   drawn by the same code the desktop window uses.
 
@@ -35,18 +35,18 @@ cargo build --release
 
 Needs Rust 1.95 or newer (the viewer's egui version sets the floor).
 
-### `b070` — management CLI
+### `netcmdr` — management CLI
 
 ```sh
-b070 --host 192.0.2.10 status     # firmware, LAN, per-port state (+ SIU detection)
-b070 --host 192.0.2.10 config     # every setting, in one page
-b070 --host 192.0.2.10 targets    # ports and names
-b070 --host 192.0.2.10 users      # local accounts
+netcmdr --host 192.0.2.10 status     # firmware, LAN, per-port state (+ SIU detection)
+netcmdr --host 192.0.2.10 config     # every setting, in one page
+netcmdr --host 192.0.2.10 targets    # ports and names
+netcmdr --host 192.0.2.10 users      # local accounts
 ```
 
 Credentials default to the factory `admin` / `access`; override with `--user` /
-`--password` or `B070_USER` / `B070_PASSWORD`. `--host` also comes from
-`B070_HOST`. The device speaks **TLS 1.2** with a self-signed cert, so the
+`--password` or `NETCMDR_USER` / `NETCMDR_PASSWORD`. `--host` also comes from
+`NETCMDR_HOST`. The device speaks **TLS 1.2** with a self-signed cert, so the
 client does not verify it — treat the management network as trusted or tunnel
 it. See [TLS](#tls) for why this is OpenSSL and not rustls.
 
@@ -72,24 +72,24 @@ Settings are grouped by area, and every area answers to `show` and `set`:
 | `pdu` | power strips: `list`, `models`, `add`, `remove`, `outlet` |
 
 ```sh
-b070 network set --ipv4 static --address 192.0.2.10 --subnet 255.255.255.0 \
+netcmdr network set --ipv4 static --address 192.0.2.10 --subnet 255.255.255.0 \
                  --gateway 192.0.2.1 --dns-source static --dns 192.0.2.53
-b070 security set --max-attempts 5 --attempt-window 3m --block-for 30m
-b070 ldap server add ldap.example.com --protocol ldaps
-b070 ldap set --mode group --search-base dc=example,dc=com --user-attribute uid
-b070 auth set --order local,ldap
-b070 user add alice --new-password-stdin --targets 1-4 --serial 1
-b070 target set 3 --name ntp-pi
-b070 time set --now
+netcmdr security set --max-attempts 5 --attempt-window 3m --block-for 30m
+netcmdr ldap server add ldap.example.com --protocol ldaps
+netcmdr ldap set --mode group --search-base dc=example,dc=com --user-attribute uid
+netcmdr auth set --order local,ldap
+netcmdr user add alice --new-password-stdin --targets 1-4 --serial 1
+netcmdr target set 3 --name ntp-pi
+netcmdr time set --now
 ```
 
 A `set` applies only the options you give it and prints what it changed; with
 no options it changes nothing, so it is safe to run just to see what it offers.
 
 One firmware behaviour to know about: hiding a serial port
-(`b070 serial set 2 --visible off`) also strips that port from every account's
+(`netcmdr serial set 2 --visible off`) also strips that port from every account's
 serial access, and showing the port again does **not** put those grants back.
-`b070` names the accounts that lose it so you can re-grant them.
+`netcmdr` names the accounts that lose it so you can re-grant them.
 
 Stored secrets — the LDAP bind password, RADIUS shared secrets, the SNMP
 community — are masked in every `show` unless you pass `--show-secrets`. The
@@ -104,32 +104,32 @@ changes at once — or to keep a configuration in version control — use the
 document directly:
 
 ```sh
-b070 export config.xml     # the device's own <config_data>, verbatim
+netcmdr export config.xml     # the device's own <config_data>, verbatim
 $EDITOR config.xml
-b070 import config.xml --confirm
+netcmdr import config.xml --confirm
 ```
 
-Changing the network settings or the session port reboots the device; `b070`
+Changing the network settings or the session port reboots the device; `netcmdr`
 says so when it happens.
 
 #### Operating the device
 
 ```sh
-b070 power cycle 3              # power-cycle the target on port 3
-b070 disconnect 3               # kick whoever is holding port 3
-b070 lock / b070 unlock         # keep everyone else out while you work
-b070 backup device.bak          # the device's own backup blob
-b070 restore device.bak --confirm
-b070 factory-reset --keep-network --confirm
-b070 certificate --certificate cert.pem --key key.pem --confirm
-b070 reboot --confirm
-b070 fetch config               # raw XML (config|status|switch|…)
+netcmdr power cycle 3              # power-cycle the target on port 3
+netcmdr disconnect 3               # kick whoever is holding port 3
+netcmdr lock / netcmdr unlock         # keep everyone else out while you work
+netcmdr backup device.bak          # the device's own backup blob
+netcmdr restore device.bak --confirm
+netcmdr factory-reset --keep-network --confirm
+netcmdr certificate --certificate cert.pem --key key.pem --confirm
+netcmdr reboot --confirm
+netcmdr fetch config               # raw XML (config|status|switch|…)
 ```
 
 Everything destructive takes `--confirm`, including `factory-reset`, which also
 takes `--keep-network` so the device comes back reachable.
 
-The two firmware commands (`b070 upgrade`, `b070 siu upgrade`) are the
+The two firmware commands (`netcmdr upgrade`, `netcmdr siu upgrade`) are the
 exception: they take **`--please-brick-my-device`** instead, and `--confirm`
 deliberately does not work on them. They are built from the vendor client's own
 request format and have **never been run against hardware** — nothing has
@@ -137,21 +137,21 @@ confirmed the device accepts what they send, and a firmware write that is wrong
 or interrupted leaves hardware that cannot be recovered over the network. Do not
 use them without a way to reflash out of band.
 
-`b070 siu versions` reads the hardware and firmware revision of the Server
+`netcmdr siu versions` reads the hardware and firmware revision of the Server
 Interface Unit on each port. The device answers for **one port per request**, so
 a sweep is one round trip per port, at a second or two each; rows print as they
 arrive, and a port with nothing plugged in says so.
 
 Everything else above has been run against a live device.
 
-### `b070-view` — KVM viewer
+### `netcmdr-view` — KVM viewer
 
 ```sh
-b070-view --host 192.0.2.10 --target 1      # open a window on target 1
-b070-view --host 192.0.2.10 --list          # list targets
-b070-view --host 192.0.2.10 -t 1 --auto-adjust   # the device's own adjustment
-b070-view --host 192.0.2.10 -t 1 --align    # measure the capture offsets and fix them
-b070-view --host 192.0.2.10 -t 1 --snapshot out.ppm   # headless frame capture
+netcmdr-view --host 192.0.2.10 --target 1      # open a window on target 1
+netcmdr-view --host 192.0.2.10 --list          # list targets
+netcmdr-view --host 192.0.2.10 -t 1 --auto-adjust   # the device's own adjustment
+netcmdr-view --host 192.0.2.10 -t 1 --align    # measure the capture offsets and fix them
+netcmdr-view --host 192.0.2.10 -t 1 --snapshot out.ppm   # headless frame capture
 ```
 
 In the window, keyboard and mouse go to the target and the image scales to the
@@ -210,7 +210,7 @@ sitting at 352 it stored 380, which is worse than where it started. Reconnect
 first, then adjust. (This is what made earlier versions of this file say the
 adjustment *undoes* a correction: every test of it followed a manual set.)
 
-*Video → Re-align capture* (Ctrl+Alt+Shift+A, or `--align` on `b070-view`)
+*Video → Re-align capture* (Ctrl+Alt+Shift+A, or `--align` on `netcmdr-view`)
 measures the position from the picture instead of asking the device to. Lowering
 an offset by one moves the picture one pixel right and brings one lane of the
 scan line's blanking into view, so the error counts itself: probe a little below
@@ -284,17 +284,17 @@ happened, longer for work still running, which each progress report renews. The
 device never says an auto-adjust or a calibration has finished, so the bar times
 those out rather than sitting on the last thing it was told.
 
-### `b070-web` — the viewer in a browser
+### `netcmdr-web` — the viewer in a browser
 
 ```sh
-tools/build-web.sh                        # build into crates/b070-web/dist
-cargo build --release -p b070-bridge      # ... which the bridge embeds
-b070-bridge --host 192.0.2.10
+tools/build-web.sh                        # build into crates/netcmdr-web/dist
+cargo build --release -p netcmdr-bridge      # ... which the bridge embeds
+netcmdr-bridge --host 192.0.2.10
 ```
 
 Then open <http://127.0.0.1:8080>, and log in with the same credentials the
 desktop client takes. Everything is the same viewer: the menu bar, the target
-switch, the manual video adjustment and the noise meter are `b070-ui`, compiled
+switch, the manual video adjustment and the noise meter are `netcmdr-ui`, compiled
 once for the desktop and once for WebAssembly. The device's LZW and tile codec
 is decoded in the browser, from the bytes the device itself sent — the bridge
 re-encodes nothing.
@@ -326,7 +326,7 @@ asks the person's permission — and the page's CSS reaches nothing egui draws.
 
 Carrying egui's four stock faces whole cost 1.3 MiB, close to a quarter of the
 module and 673 KiB of the brotli download, to draw a login form, a menu bar and
-one submenu arrow. So `default_fonts` is off and `crates/b070-web/fonts` holds
+one submenu arrow. So `default_fonts` is off and `crates/netcmdr-web/fonts` holds
 three faces cut down to what can actually appear: ASCII, Latin-1 and the
 punctuation the viewer uses, plus the four triangles and the warning sign that
 egui's own widgets draw. That is 42 KiB rather than 1.4 MiB. Each face's licence
@@ -351,17 +351,17 @@ Two things a browser does differently, both of them the keyboard's fault:
   and F11 stay the browser's whatever a page asks. They are on the Keyboard
   menu, which is where a desktop window manager's claims are handled too.
 
-`b070-web` compiles to nothing on a desktop target, so `cargo test --workspace`,
+`netcmdr-web` compiles to nothing on a desktop target, so `cargo test --workspace`,
 clippy and rustfmt still cover the repository in one pass.
 
-### `b070-bridge` — the web bridge
+### `netcmdr-bridge` — the web bridge
 
 ```sh
-b070-bridge --host 192.0.2.10   # serve the client and the protocol on 127.0.0.1:8080
+netcmdr-bridge --host 192.0.2.10   # serve the client and the protocol on 127.0.0.1:8080
 ```
 
 The device's TLS is why this exists. As [TLS](#tls) explains, it offers no ECDHE
-suite at all, no TLS 1.3 and a 1024-bit DHE group; `b070` and `b070-view` reach
+suite at all, no TLS 1.3 and a 1024-bit DHE group; `netcmdr` and `netcmdr-view` reach
 it by asking OpenSSL for security level 1, and a browser has no equivalent
 switch. The handshake fails before a certificate is ever considered, so no
 amount of clicking through a warning helps.
@@ -406,7 +406,7 @@ are fixed at startup, and no request can steer them.
 #### One binary
 
 The bridge is a single file. The web client is inside it, put there by the
-crate's build script from `crates/b070-web/dist` — or from `$B070_WEB_DIST`, if
+crate's build script from `crates/netcmdr-web/dist` — or from `$NETCMDR_WEB_DIST`, if
 that is set — and there is nothing to deploy, mount or point it at beside the
 executable. It cannot be served a client that has drifted from the bridge it
 came with, and there is no directory under it for a file to appear in.
@@ -438,7 +438,7 @@ All of this has been run against a live device: a management login, the TLS
 command channel answering with its `CONFIG_XML`, and video decoding to the same
 picture the native viewer produces.
 
-The client it serves is [`b070-web`](#b070-web--the-viewer-in-a-browser).
+The client it serves is [`netcmdr-web`](#netcmdr-web--the-viewer-in-a-browser).
 
 ## Protocols
 
@@ -479,19 +479,19 @@ weaker than stock, but the session is only as private as the network it crosses.
 
 ```
 crates/
-  b070-proto/    KVMMsg framing + enums (authoritative), command vocabulary
-  b070-mgmt/     /message.pv client, PV_* XML models and the editable
+  netcmdr-proto/    KVMMsg framing + enums (authoritative), command vocabulary
+  netcmdr-mgmt/     /message.pv client, PV_* XML models and the editable
                  configuration document (OpenSSL, see TLS above)
-  b070-session/  the KVM session: channels, login, video codec, input
-  b070-ui/       the viewer's interface — menu, screen, input routing — with
+  netcmdr-session/  the KVM session: channels, login, video codec, input
+  netcmdr-ui/       the viewer's interface — menu, screen, input routing — with
                  nothing in it that knows whether it is a window or a tab
-  b070-cli/      the `b070` binary
-  b070-view/     the `b070-view` viewer: a window, a GL context and raw input,
-                 over `b070-ui` (winit + egui on OpenGL)
-  b070-bridge/   the `b070-bridge` WebSocket and HTTPS bridge, so a browser can
+  netcmdr-cli/      the `netcmdr` binary
+  netcmdr-view/     the `netcmdr-view` viewer: a window, a GL context and raw input,
+                 over `netcmdr-ui` (winit + egui on OpenGL)
+  netcmdr-bridge/   the `netcmdr-bridge` WebSocket and HTTPS bridge, so a browser can
                  speak a protocol its TLS stack cannot
-  b070-web/      the browser client: WebSockets, `fetch` and raw DOM keys,
-                 over `b070-ui` (eframe on WebGL)
+  netcmdr-web/      the browser client: WebSockets, `fetch` and raw DOM keys,
+                 over `netcmdr-ui` (eframe on WebGL)
 research/        the protocol write-up, provenance for the vendor material it
                  was derived from, and the live fixtures the tests parse
 ```

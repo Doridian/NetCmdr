@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 Doridian
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regenerate the browser client's subsetted fonts in crates/b070-web/fonts.
+"""Regenerate the browser client's subsetted fonts in crates/netcmdr-web/fonts.
 
 egui rasterises glyphs itself, so the web client has to carry real font files —
 a browser's installed fonts are not reachable from WebAssembly. Carrying
@@ -28,7 +28,7 @@ except ImportError:
     sys.exit("fontTools not found. Install it with: pip install fonttools")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "crates", "b070-web", "fonts")
+OUT = os.path.join(ROOT, "crates", "netcmdr-web", "fonts")
 
 # The epaint version these are cut from. Bumping egui means bumping this, and
 # the subsetting is worth re-running: upstream has changed faces before.
@@ -83,7 +83,7 @@ ICONS = codepoints((0x23F4, 0x23F7), 0x26A0)
 # to keep the original name and add something that tells it apart. This is that
 # something; the other two faces carry it as well, so that no copy here claims
 # to be the face it was cut from.
-DERIVATIVE = "derivative B070"
+DERIVATIVE = "derivative NetCmdr"
 
 # (upstream file, output file, wanted codepoints, licence to carry alongside)
 JOBS = [

@@ -10,7 +10,7 @@ of vendor material came from, so the analysis can be redone from the originals.
 ```
 notes/FINDINGS.md               the write-up
 notes/analysis/live-fixtures/   captured /message.pv XML, sanitized
-                                (b070-mgmt's tests parse these)
+                                (netcmdr-mgmt's tests parse these)
 firmware/work/unpack.py         parser for the firmware's file containers
 SOURCES.md                      provenance and download URLs
 ```

@@ -1,0 +1,19 @@
+[package]
+name = "netcmdr-mgmt"
+description = "HTTPS management client for Tripp Lite NetCommander / Minicom Smart IP KVM switches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+netcmdr-proto = { path = "../netcmdr-proto" }
+quick-xml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# The device's TLS is spoken natively; in a browser `netcmdr-bridge` has already
+# terminated it, so only the request builders and parsers cross over.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+openssl = "0.10"

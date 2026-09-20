@@ -1,0 +1,21 @@
+[package]
+name = "netcmdr-cli"
+description = "Command-line management tool for Tripp Lite NetCommander IP KVM switches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "netcmdr"
+path = "src/main.rs"
+
+[dependencies]
+netcmdr-mgmt = { path = "../netcmdr-mgmt" }
+netcmdr-proto = { path = "../netcmdr-proto" }
+anyhow.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

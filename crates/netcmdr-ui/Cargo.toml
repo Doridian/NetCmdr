@@ -1,0 +1,22 @@
+[package]
+name = "netcmdr-ui"
+description = "Shared viewer UI for Tripp Lite NetCommander / Minicom Smart IP KVM switches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+netcmdr-mgmt = { path = "../netcmdr-mgmt" }
+netcmdr-proto = { path = "../netcmdr-proto" }
+netcmdr-session = { path = "../netcmdr-session" }
+egui = { version = "0.36", default-features = false }
+tracing.workspace = true
+
+# Only the native shell needs to translate winit's key codes; the web reads
+# `KeyboardEvent.code` strings, which the table already speaks.
+winit = { version = "0.30", optional = true }
+
+[features]
+winit = ["dep:winit"]

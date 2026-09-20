@@ -1,0 +1,30 @@
+[package]
+name = "netcmdr-view"
+description = "KVM viewer for Tripp Lite NetCommander / Minicom Smart IP KVM switches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "netcmdr-view"
+path = "src/main.rs"
+
+[dependencies]
+netcmdr-mgmt = { path = "../netcmdr-mgmt" }
+netcmdr-proto = { path = "../netcmdr-proto" }
+netcmdr-session = { path = "../netcmdr-session" }
+netcmdr-ui = { path = "../netcmdr-ui", features = ["winit"] }
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+winit = "0.30"
+egui = "0.36"
+egui-winit = { version = "0.36", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+egui_glow = "0.36"
+glow = "0.17"
+glutin = "0.32"
+glutin-winit = "0.5"
+raw-window-handle = "0.6"
