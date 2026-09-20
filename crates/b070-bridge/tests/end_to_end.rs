@@ -51,7 +51,7 @@ fn start_bridge(session_port: u16) -> u16 {
         host: "127.0.0.1".into(),
         https_port: 443,
         session_port,
-        static_dir: None,
+        assets: None,
         timeout: Duration::from_secs(5),
     };
     std::thread::spawn(move || {

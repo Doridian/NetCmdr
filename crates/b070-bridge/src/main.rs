@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use b070_bridge::assets::Assets;
 use b070_bridge::{serve, Bridge};
 use clap::Parser;
 
@@ -58,11 +59,18 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    // Compressing starts now and finishes somewhere into the first minute; the
+    // listener below does not wait for it.
+    let assets = args.static_dir.map(|dir| {
+        let assets = Assets::new(dir);
+        assets.warm_in_background();
+        assets
+    });
     let bridge = Bridge {
         host: args.host,
         https_port: args.https_port,
         session_port: args.session_port,
-        static_dir: args.static_dir,
+        assets,
         timeout: Duration::from_secs(args.timeout),
     };
 
@@ -78,7 +86,7 @@ fn main() -> Result<()> {
             "listening off-loopback: anything that can reach this can reach the device"
         );
     }
-    if bridge.static_dir.is_none() {
+    if bridge.assets.is_none() {
         tracing::info!("no --static-dir: serving the protocol routes only");
     }
 

@@ -26,6 +26,10 @@
 //! | `GET /api/info` | what device this bridge is pointed at |
 //! | anything else | a file from `--static-dir`, for the web client itself |
 //!
+//! The files of that last row are served compressed where the browser takes it.
+//! The bridge compresses them itself, in the background, as it starts — see
+//! [`assets`].
+//!
 //! # Security
 //!
 //! **The bridge does not authenticate anyone.** It cannot: the only credential
@@ -39,16 +43,18 @@
 //! What it does *not* do is act as an open relay: the device address and both
 //! ports are fixed at startup and cannot be steered by a request.
 
+pub mod assets;
 pub mod http;
 pub mod ws;
 
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use b070_proto::kvmmsg::SocketType;
 use tungstenite::protocol::frame::coding::CloseCode;
 
+use crate::assets::Assets;
 use crate::http::Request;
 
 /// Everything a connection thread needs, cloned per connection.
@@ -57,7 +63,8 @@ pub struct Bridge {
     pub host: String,
     pub https_port: u16,
     pub session_port: u16,
-    pub static_dir: Option<PathBuf>,
+    /// The web client to serve, and the compressed copies of it.
+    pub assets: Option<Arc<Assets>>,
     pub timeout: Duration,
 }
 
@@ -93,13 +100,13 @@ pub fn route(bridge: &Bridge, stream: &mut TcpStream) -> std::io::Result<()> {
             )
             .as_bytes(),
         ),
-        ("GET", path) => match &bridge.static_dir {
-            Some(root) => {
+        ("GET", path) => match &bridge.assets {
+            Some(assets) => {
                 let accepted = request
                     .header("accept-encoding")
                     .unwrap_or_default()
                     .to_string();
-                http::serve_static(stream, root, path, &accepted)
+                http::serve_static(stream, assets, path, &accepted)
             }
             None => http::respond_status(stream, 404, "Not Found"),
         },

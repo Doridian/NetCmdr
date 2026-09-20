@@ -10,13 +10,16 @@
 //! and polling where it must.
 //!
 //! What is *not* implemented is as important as what is: no chunked transfer
-//! encoding, no keep-alive, no compression. Every response closes the
-//! connection. The bridge answers three kinds of request — a file, a
+//! encoding, no keep-alive, and no compressing per request — a static file goes
+//! out from the copy [`crate::assets`] made of it at startup, or as it is.
+//! Every response closes the connection. The bridge answers three kinds of request — a file, a
 //! `/message.pv` forward and a WebSocket upgrade — and none of them are helped
 //! by pipelining.
 
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+
+use crate::assets::{Assets, Encoding};
 
 /// Refuse a request head larger than this. Real ones are a few hundred bytes.
 const MAX_HEAD: usize = 16 * 1024;
@@ -238,23 +241,23 @@ pub fn respond_status(out: &mut impl Write, status: u16, reason: &str) -> io::Re
     )
 }
 
-/// Serve a file from `root`, or 404.
+/// Serve a file from the static directory, or 404.
 ///
 /// `/` means `index.html`. Anything that is not a plain relative path — a
 /// parent reference, a root anchor, a Windows prefix — is refused outright
 /// rather than normalised, because normalising is where directory traversal
 /// bugs come from.
 ///
-/// If a precompressed twin sits next to the file — `app.wasm.br` beside
-/// `app.wasm` — and the client said it would take that encoding, the twin is
-/// sent instead. It matters here more than it usually would: the client is a
-/// WebAssembly module of several megabytes that the browser must have in full
-/// before anything appears, and it compresses to under a third of that. The
-/// compressing is `tools/build-web.sh`'s job, so this costs the bridge nothing
-/// per request and needs no compressor in it.
+/// If [`Assets`] has a compressed copy of the file and the client said it
+/// would take that encoding, the copy is sent instead. It matters here more
+/// than it usually would: the client is a WebAssembly module of several
+/// megabytes that the browser must have in full before anything appears, and
+/// it compresses to under a third of that. The compressing happened at
+/// startup, so this costs nothing per request; until it has finished, the file
+/// goes out as it is rather than making anyone wait for it.
 pub fn serve_static(
     out: &mut impl Write,
-    root: &Path,
+    assets: &Assets,
     path: &str,
     accepted: &str,
 ) -> io::Result<()> {
@@ -265,7 +268,7 @@ pub fn serve_static(
         relative
     };
 
-    let mut full = PathBuf::from(root);
+    let mut full = PathBuf::from(assets.root());
     for component in Path::new(relative).components() {
         match component {
             Component::Normal(part) => full.push(part),
@@ -275,19 +278,13 @@ pub fn serve_static(
 
     // Brotli first: it is the better of the two and every browser that speaks
     // it also speaks gzip, so preferring it costs nothing.
-    let encoding = ["br", "gzip"].into_iter().find(|encoding| {
-        let suffix = if *encoding == "br" { "br" } else { "gz" };
-        accepts(accepted, encoding) && precompressed(&full, suffix).is_some()
-    });
+    let cached = [Encoding::Brotli, Encoding::Gzip]
+        .into_iter()
+        .filter(|encoding| accepts(accepted, encoding.name()))
+        .find_map(|encoding| assets.get(&full, encoding).map(|body| (encoding, body)));
 
-    let (body, chosen) = match encoding {
-        Some(encoding) => {
-            let suffix = if encoding == "br" { "br" } else { "gz" };
-            match precompressed(&full, suffix) {
-                Some(twin) => (std::fs::read(twin), Some(encoding)),
-                None => (std::fs::read(&full), None),
-            }
-        }
+    let (body, chosen) = match cached {
+        Some((encoding, body)) => (Ok(body.to_vec()), Some(encoding.name())),
         None => (std::fs::read(&full), None),
     };
 
@@ -300,15 +297,6 @@ pub fn serve_static(
             respond_status(out, 500, "Internal Server Error")
         }
     }
-}
-
-/// The precompressed twin of `path`, if there is one.
-fn precompressed(path: &Path, suffix: &str) -> Option<PathBuf> {
-    let mut twin = path.as_os_str().to_owned();
-    twin.push(".");
-    twin.push(suffix);
-    let twin = PathBuf::from(twin);
-    twin.is_file().then_some(twin)
 }
 
 /// Whether an `Accept-Encoding` header offers `encoding`.
@@ -406,7 +394,8 @@ mod tests {
     #[test]
     fn traversal_is_refused_rather_than_normalised() {
         let mut out = Vec::new();
-        serve_static(&mut out, Path::new("/nonexistent"), "/../etc/passwd", "").unwrap();
+        let assets = Assets::new(PathBuf::from("/nonexistent"));
+        serve_static(&mut out, &assets, "/../etc/passwd", "").unwrap();
         assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 403 "));
     }
 
@@ -423,43 +412,55 @@ mod tests {
         assert!(!accepts("brotli", "br"));
     }
 
-    /// A precompressed twin is sent in place of the file, with the original's
+    /// Something that compresses, and clears the size floor `assets` applies.
+    fn compressible() -> Vec<u8> {
+        "const module = 'plain-bytes';\n".repeat(64).into_bytes()
+    }
+
+    /// A compressed copy is sent in place of the file, with the original's
     /// type and an encoding beside it.
     #[test]
-    fn a_precompressed_twin_is_served_when_the_client_takes_it() {
+    fn a_compressed_copy_is_served_when_the_client_takes_it() {
         let dir = std::env::temp_dir().join(format!("b070-http-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("app.wasm"), b"plain-bytes").unwrap();
-        std::fs::write(dir.join("app.wasm.br"), b"squeezed").unwrap();
+        std::fs::write(dir.join("app.wasm"), compressible()).unwrap();
+
+        let assets = Assets::new(dir.clone());
+        assets.warm();
 
         let mut out = Vec::new();
-        serve_static(&mut out, &dir, "/app.wasm", "gzip, br").unwrap();
+        serve_static(&mut out, &assets, "/app.wasm", "gzip, br").unwrap();
         let sent = String::from_utf8_lossy(&out).into_owned();
         assert!(sent.contains("Content-Encoding: br"), "{sent}");
         assert!(sent.contains("Vary: Accept-Encoding"), "{sent}");
         assert!(sent.contains("Content-Type: application/wasm"), "{sent}");
-        assert!(sent.ends_with("squeezed"), "{sent}");
 
         // A client that does not offer it gets the file itself.
         let mut out = Vec::new();
-        serve_static(&mut out, &dir, "/app.wasm", "identity").unwrap();
+        serve_static(&mut out, &assets, "/app.wasm", "identity").unwrap();
         let sent = String::from_utf8_lossy(&out).into_owned();
         assert!(!sent.contains("Content-Encoding"), "{sent}");
-        assert!(sent.ends_with("plain-bytes"), "{sent}");
+        assert!(
+            sent.ends_with(&String::from_utf8(compressible()).unwrap()),
+            "{sent}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// No twin on disk means the file is served plainly, however eager the
-    /// client's header is.
+    /// Nothing compressed yet — the startup pass is still running, or the file
+    /// is one it skips — means the file itself, not a wait and not an error.
     #[test]
-    fn a_missing_twin_is_not_an_error() {
+    fn an_uncompressed_file_is_not_an_error() {
         let dir = std::env::temp_dir().join(format!("b070-http-bare-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.html"), b"<!doctype html>").unwrap();
 
+        let assets = Assets::new(dir.clone());
         let mut out = Vec::new();
-        serve_static(&mut out, &dir, "/", "gzip, br").unwrap();
+        serve_static(&mut out, &assets, "/", "gzip, br").unwrap();
         let sent = String::from_utf8_lossy(&out).into_owned();
         assert!(sent.starts_with("HTTP/1.1 200 "), "{sent}");
         assert!(!sent.contains("Content-Encoding"), "{sent}");

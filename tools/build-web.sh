@@ -63,21 +63,9 @@ else
   fi
 fi
 
-# Precompress what the browser has to download before anything appears. The
-# bridge serves these when the client offers the encoding, so the compressing
-# happens once here rather than per request.
-if [ "$profile" = release ]; then
-  for f in "$out/b070_web_bg.wasm" "$out/b070_web.js" "$out/index.html"; do
-    [ -f "$f" ] || continue
-    gzip -9 -k -f "$f"
-    if command -v brotli >/dev/null 2>&1; then
-      brotli -q 11 -f -o "$f.br" "$f"
-    fi
-  done
-  wire=$(wc -c < "$out/b070_web_bg.wasm.br" 2>/dev/null \
-      || wc -c < "$out/b070_web_bg.wasm.gz")
-  echo "module over the wire: $((wire / 1024)) KiB"
-fi
+# Nothing is compressed here. b070-bridge compresses what it serves itself,
+# in the background as it starts, so the files in this directory are the plain
+# ones and a rebuild cannot leave a stale .br or .gz behind next to them.
 
 echo "wrote $out"
 ls -la "$out"

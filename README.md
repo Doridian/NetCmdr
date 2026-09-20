@@ -251,8 +251,9 @@ matches the `wasm-bindgen` crate in `Cargo.lock`; the script says so, with the
 version, if it is missing. `wasm-opt` (from **binaryen**) is used if it is
 there and skipped with a note if it is not.
 
-The module is what a browser must have in full before anything appears, so the
-script also precompresses it and `b070-bridge` serves the result:
+The module is what a browser must have in full before anything appears, so
+`b070-bridge` compresses it — once, at startup, in memory — and serves the
+result:
 
 | | size |
 |---|---|
@@ -301,7 +302,7 @@ WebSockets:
 | `POST /message.pv` | forwarded verbatim to the device's management API |
 | `GET /kvm?type=cmd\|video\|km\|vm` | a WebSocket carrying one session socket |
 | `GET /api/info` | which device this bridge is pointed at |
-| anything else | a file from `--static-dir`, precompressed where one exists |
+| anything else | a file from `--static-dir`, compressed where the browser takes it |
 
 Each `/kvm` WebSocket is one of the session's four TCP connections. The client
 sends its `SESSIONID` as the **first message**, as text; the bridge then
@@ -312,10 +313,19 @@ does not understand `KVMMsg`: WebSocket message boundaries have nothing to do
 with protocol message boundaries, and the client reassembles the stream exactly
 as it would from a socket.
 
-Static files are served from disk as they are, except that a `.br` or `.gz`
-sitting next to a file is sent instead when the client offers that encoding.
-The compressing is `tools/build-web.sh`'s job, so this costs the bridge nothing
-per request and keeps a compressor out of it.
+Static files are compressed by the bridge itself, once, as it starts: it walks
+`--static-dir`, keeps a brotli and a gzip copy of every compressible file in
+memory, and sends whichever the client's `Accept-Encoding` allows. Nothing is
+written beside the files and nothing is baked into the executable, so the same
+binary serves any build of the client.
+
+That work runs on a thread of its own and the listener does not wait for it —
+brotli at quality 11 takes tens of seconds on a module this size. Until a
+file's copy is ready it is served as it is on disk, so the bridge is usable
+immediately and merely gets cheaper to download from over the following minute;
+gzip is done first, for every file, so an early client still gets something.
+A file that changes underneath a running bridge — a rebuild, typically — is
+detected by size and mtime and served uncompressed until the next restart.
 
 The token travels in the socket rather than the URL for two measured reasons.
 It is base64 — on firmware 2.2.1258.1.0 a 44-character string routinely

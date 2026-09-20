@@ -16,7 +16,12 @@ b070-mgmt = { path = "../b070-mgmt" }
 b070-proto = { path = "../b070-proto" }
 b070-session = { path = "../b070-session" }
 anyhow.workspace = true
+# The static files are compressed once, in the bridge, at startup: brotli for
+# the browsers that take it and gzip for the rest. Both are pure Rust, so the
+# bridge still builds with nothing but OpenSSL on the system.
+brotli = "9"
 clap.workspace = true
+flate2 = "1"
 # OpenSSL is already the device's TLS stack here; the WebSocket accept key is
 # a SHA-1 and a base64, so it supplies those too rather than pulling in crates
 # that would duplicate them.
