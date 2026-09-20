@@ -249,7 +249,11 @@ values a restore would be sending. Auto adjust is the way back to them.
 
 These settings are per session and are **not** persisted — the device reads its
 own defaults again at the next login, so a mode it has wrong needs correcting
-each time you connect.
+each time you connect. There is no way around that from a client: every signal
+in the vendor's protocol that might have meant *keep this* was tried against
+the device and none of them writes anything (`research/notes/FINDINGS.md`
+§5.4). Only the device's own automatic adjustment writes to its stored config,
+and the figures it writes are the ones that were wrong.
 
 The right-hand end of the bar carries a **Noise** bar next to the resolution:
 how much of the picture is changing, per second, the same reading the stock

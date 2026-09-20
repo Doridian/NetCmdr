@@ -464,6 +464,25 @@ schemas are in the 2013 web UI, under `config/` in the firmware's first
 container. Kept for sibling devices that may
 still run it, but not present on the current unit.
 
+#### 5.2.3 Backup and restore — HARDWARE-VERIFIED (2026-09-20)
+
+**`<action type="backup"/>` needs the configuration permission**, exactly as a
+`CMA_CONFIG` write does, and answers `reply_error` id `32004` (*access denied*)
+without it — which is what `b070 backup` used to do, because `Client::backup`
+sent the action bare. The sequence is the one §5.2.1 lists for a save:
+`CMA_PERMISSION level="config"`, the action, `CMA_PERMISSION level="normal"`.
+It is a read, but the device gates it like a write. `restore_from_backup` and
+the factory `restore` take the same bracket in `b070-mgmt`; neither has been
+run against hardware, for the obvious reason, and neither can give the
+permission back afterwards because the device reboots.
+
+**The blob is encrypted.** 15,319 bytes on this unit, and it is an OpenSSL
+`Salted__` header in base64 — `openssl enc` output with an unknown passphrase,
+not a document. Nothing in it is greppable, so it is no route to reading or
+editing stored settings (the per-video-mode capture table among them, see §5.4)
+until the passphrase is recovered from firmware. The vendor's own client treats
+it the same way: write it to a file, hand it back verbatim on a restore.
+
 ### 5.4 Session framing
 
 #### 5.4.0 `KVMMsg` — AUTHORITATIVE (current firmware)
@@ -696,6 +715,49 @@ of the screen empty, the vertical probe read 41 blank rows and produced 64 — p
 
 **Corrections die on logout and on a target switch**, the latter because the
 device re-announces its defaults along with the new port's config.
+
+#### Nothing on the session channel makes a setting stick — HARDWARE-TESTED (2026-09-20)
+
+The device's own automatic adjustment writes its result into the stored config
+(it moved a target's `phase` permanently), so a path from a session to the
+stored video-mode table exists. **No command a client can send takes it.** The
+vendor's vocabulary has no save, and the signals that look like one are not:
+
+| Sent while the knob held a value known to have reached the picture | Stored value afterwards |
+|---|---|
+| nothing (control) | unchanged |
+| `CmdFlag::General` + `Cmd::VideoStopAdjust` (65) | unchanged |
+| `<video_settings manual_adjust_dlg='open'/>` … `<command name='gui' active='false'/>` | unchanged |
+| `<video_settings manual_adjust_dlg='open'/>` … `<video_settings manual_adjust_dlg='close'/>` | unchanged |
+| all three of the above together | unchanged |
+| `<command name='disconnect'/>` | unchanged |
+
+Method: log in, set `hoffset` to 352 and confirm the picture answers with
+exactly the 12 blank columns the measurement predicts, set it to 364, send one
+candidate signal, drop the session, log in again and read `<video_settings>`.
+Target 1 (1360×768@60, stored `hoffset` 368), firmware 2.2.1258.1.0. Every set
+was confirmed at the picture first, so these are real negatives rather than
+sets the device dropped.
+
+Two details worth keeping:
+
+- **Only the `disconnect` drew any response at all.** The device honoured it
+  and closed the connection; the other five it accepted and ignored in
+  silence. So 65 is what its provenance says it is — the `state='end'` half of
+  `auto_video_adjust`, which aborts a *running* adjustment — and not a commit.
+  `manual_adjust_dlg` and `gui active` likewise only gate what the stock client
+  draws.
+- **`brightness` behaves exactly like the two offsets**: set 49 → 30, the
+  measured black level moved 11 → 0, and the next login read 49 again. The
+  session overlay covers the whole `<video_settings>` element, not just the two
+  knobs with the drop-if-equal-to-default filter. Client sets have no route
+  into the stored table for *any* knob.
+
+The remaining candidate is the config backup, and it is behind a key: the blob
+is OpenSSL salted-base64 ciphertext (§5.2.3), so reading the stored video table
+out of it means recovering the passphrase from firmware. Until then, a
+correction is per session and a client that wants it back has to re-apply it —
+which is what the viewer does.
 
 `crates/b070-session/src/align.rs` implements the measurement and the state
 machine that drives it; `b070-view --align` and the viewer's *Video → Re-align

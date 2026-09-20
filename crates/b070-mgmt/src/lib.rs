@@ -371,8 +371,10 @@ impl Client {
 
     /// Take or release exclusive configuration access (`CMA_PERMISSION`).
     ///
-    /// [`Client::save_config`] does this around a save; call it directly only
-    /// to release a permission a crashed run left behind.
+    /// The calls that need it take it themselves — [`Client::save_config`],
+    /// [`Client::backup`], [`Client::restore`], [`Client::factory_restore`] —
+    /// so call this directly only to release a permission a crashed run left
+    /// behind.
     pub fn permission(&self, level: Permission) -> Result<(), Error> {
         self.message(
             "CMA_PERMISSION",
@@ -380,6 +382,33 @@ impl Client {
             None,
         )?;
         Ok(())
+    }
+
+    /// Run one request with exclusive configuration access held.
+    ///
+    /// The device answers `backup` and the two restores with *access denied*
+    /// unless the caller holds it, the same as a configuration write. Without
+    /// the release afterwards it stays locked against the next writer until
+    /// its own timeout, so the release runs even when the request failed —
+    /// warned about rather than returned, because the request's own error is
+    /// the one worth having.
+    ///
+    /// `release` is false for the requests that reboot the device: the session
+    /// is gone by the time they answer, and there is nothing left to hand
+    /// back.
+    fn holding_config_permission<T>(
+        &self,
+        release: bool,
+        f: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.permission(Permission::Config)?;
+        let out = f();
+        if release || out.is_err() {
+            if let Err(e) = self.permission(Permission::Normal) {
+                tracing::warn!(error = %e, "could not release config permission");
+            }
+        }
+        out
     }
 
     /// Write the configuration back.
@@ -443,11 +472,13 @@ impl Client {
     /// The payload is opaque: the device's own client writes it to a file
     /// verbatim and hands it back on a restore without looking inside.
     pub fn backup(&self) -> Result<String, Error> {
-        let xml = self.message(
-            "CMA_ACTION",
-            "<action type=\"backup\"/>",
-            Some(Duration::from_secs(60)),
-        )?;
+        let xml = self.holding_config_permission(true, || {
+            self.message(
+                "CMA_ACTION",
+                "<action type=\"backup\"/>",
+                Some(Duration::from_secs(60)),
+            )
+        })?;
         model::reply_data(&xml).ok_or_else(|| Error::Device("backup reply carried no data".into()))
     }
 
@@ -457,26 +488,24 @@ impl Client {
     /// unit can be restored onto another without taking it off the network.
     /// The device reboots when this succeeds.
     pub fn restore(&self, backup: &str, preserve: bool) -> Result<(), Error> {
-        self.message(
-            "CMA_ACTION",
-            &format!(
-                "<action type=\"restore_from_backup\" preserve=\"{}\"/><data><![CDATA[{}]]></data>",
-                preserve,
-                cdata_safe(backup)?,
-            ),
-            Some(Duration::from_secs(120)),
-        )?;
+        let body = format!(
+            "<action type=\"restore_from_backup\" preserve=\"{}\"/><data><![CDATA[{}]]></data>",
+            preserve,
+            cdata_safe(backup)?,
+        );
+        self.holding_config_permission(false, || {
+            self.message("CMA_ACTION", &body, Some(Duration::from_secs(120)))
+        })?;
         Ok(())
     }
 
     /// Reset to factory defaults, optionally keeping the network settings.
     /// The device reboots.
     pub fn factory_restore(&self, preserve_network: bool) -> Result<(), Error> {
-        self.message(
-            "CMA_ACTION",
-            &format!("<action type=\"restore\" preserve=\"{preserve_network}\"/>"),
-            Some(Duration::from_secs(60)),
-        )?;
+        let body = format!("<action type=\"restore\" preserve=\"{preserve_network}\"/>");
+        self.holding_config_permission(false, || {
+            self.message("CMA_ACTION", &body, Some(Duration::from_secs(60)))
+        })?;
         Ok(())
     }
 
