@@ -1,6 +1,6 @@
 # The bridge's container image comes out of the flake, not out of a Dockerfile:
 # `.#netcmdr-bridge-image-<arch>` is the static binary and nothing else, so
-# there is nothing here for buildx to do. That is why this does not use the
+# there is nothing here for buildx to build. That is why this does not use the
 # shared docker.yml template, and why it is not named docker.yml — a central
 # deploy of that template would land on top of it.
 #
@@ -74,27 +74,38 @@ jobs:
           username: forgejo
           password: ${{ steps.jwt.outputs.jwt }}
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
+      # For `imagetools` below, which is a buildx subcommand. Nothing here
+      # builds with buildx, so the builder this creates goes unused; it is the
+      # plugin itself that is wanted, and the runner image does not carry it.
+      - name: Set up Docker Buildx
+        uses: https://data.forgejo.org/docker/setup-buildx-action@v4
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
       # One moving tag and nothing else, as before, except that it now names a
       # manifest list over both architectures. The two images are pushed under
       # that tag first and the list replaces it: a list can only name manifests
       # the registry already holds, and this tag is the only name published, so
       # for the length of the push it points at one architecture at a time.
+      #
+      # The list is assembled by `docker buildx imagetools`, not by `docker
+      # manifest`. The two do the same job here, but `docker manifest` is the
+      # one piece of the CLI that talks to the registry itself rather than
+      # handing the work to the daemon, and it does not read the credentials
+      # `docker/login-action` leaves behind: both images push, and the list
+      # naming them comes back `unauthorized: authentication required`.
+      # imagetools authenticates the way everything else here does.
       - name: Push the image
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
-        env:
-          # Where `docker manifest` is still gated, this is the gate.
-          DOCKER_CLI_EXPERIMENTAL: enabled
         run: |
           dockertag='git.foxden.network/${{ steps.repository_case.outputs.lowercase }}:${{ vars.OCI_TAG || 'latest' }}'
           amd64='${{ steps.image.outputs.name }}:${{ steps.image.outputs.amd64 }}'
           arm64='${{ steps.image.outputs.name }}:${{ steps.image.outputs.arm64 }}'
+          # Each image by the digest the registry gave it, read back off the
+          # image as soon as it is pushed rather than scraped out of what
+          # `docker push` printed.
+          digests=()
           for image in "$amd64" "$arm64"; do
             docker tag "$image" "$dockertag"
             docker push "$dockertag"
+            digests+=("$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")")
           done
-          # Each image by the digest the registry gave it, read back off the
-          # image rather than scraped out of what `docker push` printed.
-          docker manifest create "$dockertag" \
-            "$(docker image inspect --format '{{index .RepoDigests 0}}' "$amd64")" \
-            "$(docker image inspect --format '{{index .RepoDigests 0}}' "$arm64")"
-          docker manifest push "$dockertag"
+          docker buildx imagetools create -t "$dockertag" "${digests[@]}"
