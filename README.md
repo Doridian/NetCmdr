@@ -440,6 +440,41 @@ picture the native viewer produces.
 
 The client it serves is [`netcmdr-web`](#netcmdr-web--the-viewer-in-a-browser).
 
+#### In a container
+
+`nix build .#netcmdr-bridge-static` links the whole of it — musl and OpenSSL
+included — into one static-pie: no interpreter, no `DT_NEEDED`, nothing on the
+host to match. Nothing outside the file is read at runtime either. No
+certificate is verified here, so there is no CA bundle to carry, and only a
+`--host` given as a name needs so much as `/etc/resolv.conf`.
+
+`nix build .#netcmdr-bridge-image` puts that in an image whose one layer holds
+that one file. There is no base image under it and no shell in it, so there is
+nothing to `exec` into and nothing to patch but the binary itself.
+
+```sh
+docker load < $(nix build --no-link --print-out-paths .#netcmdr-bridge-image)
+docker run -d -e NETCMDR_HOST=192.0.2.10 -p 8080:8080 netcmdr-bridge:0.1.0
+```
+
+The device address is in the environment rather than in the command, so that
+passing an argument — a longer timeout, another port — does not silently drop
+it along with the rest of the default command. The image listens on
+`0.0.0.0:8080` where the binary's own default is loopback, because loopback
+inside a network namespace reaches nobody; everything said above about what
+reaching that port means still holds, and whatever publishes it is the reverse
+proxy that should be authenticating. It runs as uid 65534, which is all it
+needs: it writes nothing, and 8080 is not privileged.
+
+`docker stop` is prompt rather than a ten-second wait and a `SIGKILL`: the
+bridge installs a handler for `SIGTERM` and `SIGINT`, which PID 1 has to do for
+itself, since the kernel drops a signal a process of that number has no handler
+for.
+
+Both are Linux's only — neither `pkgsStatic` nor `dockerTools` is a thing on
+macOS, where the bridge is still an ordinary `nix build .#netcmdr-bridge` or
+`cargo build`.
+
 ## Protocols
 
 | Layer | Transport | Status |
@@ -509,6 +544,16 @@ Standard cargo: `cargo build`, `cargo test --workspace`. Formatting is plain
 rustfmt defaults, pinned in `rustfmt.toml` so the style does not drift with the
 toolchain; `cargo fmt --all --check` and `cargo clippy --workspace
 --all-targets` are both clean and expected to stay that way.
+
+There is a flake as well, for the builds with something to get right beyond
+cargo:
+
+| Command | What it builds |
+|---|---|
+| `nix build` | the CLI and the viewer, the viewer's dlopened libraries on its RPATH |
+| `nix build .#netcmdr-bridge` | the bridge, with the wasm client built and embedded — no `tools/build-web.sh` by hand, and wasm-bindgen's CLI pinned to the version `Cargo.lock` says the module was compiled against |
+| `nix build .#netcmdr-bridge-static` | the same bridge, linked static (Linux) |
+| `nix build .#netcmdr-bridge-image` | that binary as a container image (Linux) |
 
 ## License
 
