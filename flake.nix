@@ -6,9 +6,9 @@
 
   outputs =
     {
-      self,
       nixpkgs,
       flake-utils,
+      ...
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -238,7 +238,6 @@
           default = native;
           netcmdr = native;
           netcmdr-bridge = bridge;
-          netcmdr-web = web;
         };
       }
     );
