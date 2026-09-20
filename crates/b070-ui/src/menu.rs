@@ -22,10 +22,12 @@
 //! viewer keeps up to date. Anything that needs confirming goes through
 //! [`Menu::confirm`] instead of calling straight through.
 
-use std::time::{Duration, Instant};
-
 use b070_mgmt::{PowerCommand, Target};
 use b070_proto::command::{VideoFilter, VideoSetting};
+// Not `std::time`: `Instant::now()` panics in a browser, and a status line is
+// set from a click handler, so that panic would take the whole page with it.
+// See `b070_session::time`.
+use b070_session::time::{Duration, Instant};
 use b070_session::{Knob, Noise, VideoSettings};
 
 use crate::macros;
