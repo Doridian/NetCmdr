@@ -6,7 +6,7 @@
 //!
 //! Each 32-bit word holds two luma samples and a chroma pair. The low bit of
 //! each luma byte (bits 0 and 16) forms a selector: 0 = self-contained, 1/2 =
-//! borrow a chroma half from a later word ([`find_next_order`]), 3 = skip.
+//! borrow a chroma half from a later word (`find_next_order`), 3 = skip.
 //! Hence samples are masked to 7 bits and doubled.
 //!
 //! R and B outputs are crossed over, and the caller crosses them back, as in

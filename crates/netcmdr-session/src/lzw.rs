@@ -13,7 +13,7 @@
 //!   driven by in-band control words, read LSB-first over 32-bit words.
 //!
 //! The Java's hand-written per-width switches (`BufData.GetNext17Bits` etc.)
-//! reduce to one LSB-first [`BitReader`]; tests pin some cases against it.
+//! reduce to one LSB-first `BitReader`; tests pin some cases against it.
 //!
 //! State persists across messages (delta frames extend the key frame's
 //! dictionary), so one [`Expander`] lives per session, [`Expander::reset`] on

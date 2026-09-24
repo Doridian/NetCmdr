@@ -115,7 +115,7 @@ fn user_level_error(level: i32) -> Option<&'static str> {
 
 /// A `<server servername port active/>` from the client config
 /// (`com.minicom.app.video.data.xml.cfg.XServer`). Authoritative for which
-/// target is active, and refreshed after [`Session::change_target`].
+/// target is active, and refreshed after [`SessionCore::change_target`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Server {
     pub port: u32,
@@ -181,7 +181,7 @@ impl Knob {
 /// the client config. Sent at login and after auto-adjust, stored writes and
 /// mode changes.
 ///
-/// These are the *stored* values: [`Session::set_video_setting`] affects the
+/// These are the *stored* values: [`SessionCore::set_video_setting`] affects the
 /// picture but not these, and is lost at next login;
 /// [`VideoSettings::stored_write`] updates both.
 ///

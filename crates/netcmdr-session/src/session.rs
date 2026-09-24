@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The native session: one thread pumping a [`SessionCore`] over non-blocking
-//! sockets, backing off when idle (see [`backoff`]). Protocol logic lives in
+//! sockets, backing off when idle (see `backoff`). Protocol logic lives in
 //! [`crate::core`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
