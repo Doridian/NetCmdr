@@ -14,11 +14,10 @@ quick-xml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-# The device's TLS is spoken natively; in a browser `netcmdr-bridge` has already
-# terminated it, so nothing here needs a TLS stack.
+# Native only; the browser goes through `netcmdr-bridge`.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 openssl = "0.10"
 
-# std's Instant compiles for wasm and then panics when called; see src/time.rs.
+# See src/time.rs.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"

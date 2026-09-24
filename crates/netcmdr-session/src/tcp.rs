@@ -1,24 +1,17 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The native transport: a TCP socket, the device's handshake on it, and the
-//! optional TLS upgrade.
+//! Native transport: TCP, the device handshake, and optional TLS.
 //!
 //! Transcribed from `com.minicom.plugin.socket.{KVMSocket,SocketUtils}`.
 //!
-//! A session is **four separate TCP connections** to the same port, one per
-//! [`SocketType`]. Each opens the same way:
+//! A session is four TCP connections to one port, one per [`SocketType`]:
 //!
-//! 1. write the management session id followed by `#`, as ASCII,
-//! 2. write the socket-type code as a 4-byte little-endian integer,
-//! 3. read 4 bytes back and check the device echoed the same code,
-//! 4. for the command and keyboard/mouse sockets only, start TLS.
+//! 1. write the session id and `#` (ASCII),
+//! 2. write the socket type as a 4-byte LE integer,
+//! 3. read back and check the 4-byte echo,
+//! 4. start TLS for command and keyboard/mouse only.
 //!
-//! **Video and virtual media stay in the clear** — that is the device's design,
-//! not a shortcut taken here.
-//!
-//! This module is the only part of the session that knows what a socket is.
-//! Everything above it works through [`Transport`], which is what lets the same
-//! framing and the same state machine run in a browser over a WebSocket.
+//! **Video and virtual media are unencrypted** by the device's design.
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -30,12 +23,8 @@ use openssl::ssl::{SslConnector, SslMethod, SslStream, SslVerifyMode, SslVersion
 use crate::channel::{Channel, Transport};
 use crate::Error;
 
-/// One session socket once its handshake is done: plaintext for video and
-/// virtual media, TLS for command and keyboard/mouse.
-///
-/// It is public in its own right because the handshake is where the TLS
-/// decision lives, so a relay that only needs to move bytes — the web bridge —
-/// can call [`connect_stream`] and then stay out of the protocol entirely.
+/// A handshaken session socket: TLS for command and keyboard/mouse, plain
+/// otherwise. Public so a byte relay can use [`connect_stream`] directly.
 pub enum Stream {
     Plain(TcpStream),
     Tls(Box<SslStream<TcpStream>>),
@@ -49,25 +38,20 @@ impl Stream {
         }
     }
 
-    /// Set the read timeout, or clear it for blocking reads.
+    /// `None` for blocking reads.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.tcp().set_read_timeout(timeout)
     }
 
-    /// Switch between blocking and non-blocking reads.
-    ///
-    /// A relay pumping both directions on one thread needs this; a reader that
-    /// can park on the socket wants a timeout instead.
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.tcp().set_nonblocking(nonblocking)
     }
 
-    /// Close the underlying socket, unblocking a reader.
+    /// Unblocks a reader.
     pub fn shutdown(&self) {
         let _ = self.tcp().shutdown(std::net::Shutdown::Both);
     }
 
-    /// A handle that can shut this stream down from another thread.
     pub fn shutdown_handle(&self) -> io::Result<ShutdownHandle> {
         Ok(ShutdownHandle(self.tcp().try_clone()?))
     }
@@ -103,8 +87,7 @@ impl Write for Stream {
     }
 }
 
-/// Lets another thread drop a channel's connection, which is how a blocked
-/// reader is woken for shutdown.
+/// Shuts a connection down from another thread, waking a blocked reader.
 pub struct ShutdownHandle(TcpStream);
 
 impl ShutdownHandle {
@@ -113,16 +96,8 @@ impl ShutdownHandle {
     }
 }
 
-/// Open one session socket and complete the device's handshake.
-///
-/// This is the whole device-specific part of opening a channel, and the only
-/// place that decides whether TLS is started, so everything that talks to a
-/// session port goes through here — the framing client above and the web
-/// bridge alike. See the module docs for the four steps.
-///
-/// `session_id` is the `SESSIONID` from the HTTPS login — the same token the
-/// management API returns, which is also what the command channel sends as its
-/// "password" when verifying the user.
+/// Open a session socket and do the handshake (see module docs).
+/// `session_id` is the `SESSIONID` from the HTTPS login.
 pub fn connect_stream(
     host: &str,
     port: u16,
@@ -161,16 +136,10 @@ pub fn connect_stream(
     Ok(stream)
 }
 
-/// Start TLS on an already-handshaken socket.
+/// Start TLS (1.2, `AES256-GCM-SHA384`). Security level 1 because port 443's
+/// DHE group is 1024-bit and the connector is shared.
 ///
-/// The session sockets negotiate TLS 1.2 with `AES256-GCM-SHA384`. The only
-/// concession the device still needs is security level 1, because the DHE group
-/// it offers on port 443 is 1024-bit and one connector is used for both.
-///
-/// The certificate is self-signed, so there is no trust anchor to check it
-/// against. The vendor's own client installs a trust-all `X509TrustManager`
-/// here, so this is no weaker than the stock client — but it does mean the
-/// session is only as private as the network it crosses.
+/// The certificate is self-signed and not verified, as in the vendor client.
 fn start_tls(host: &str, tcp: TcpStream) -> Result<SslStream<TcpStream>, Error> {
     let mut builder = SslConnector::builder(SslMethod::tls_client())?;
     builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
@@ -185,11 +154,10 @@ fn start_tls(host: &str, tcp: TcpStream) -> Result<SslStream<TcpStream>, Error> 
         .map_err(|e| Error::Tls(e.to_string()))
 }
 
-/// The native channel: `KVMMsg` framing over a TCP session socket.
+/// `KVMMsg` framing over a TCP session socket.
 pub type TcpChannel = Channel<Stream>;
 
 impl Channel<Stream> {
-    /// Open a channel and complete its handshake.
     pub fn connect(
         host: &str,
         port: u16,
@@ -201,24 +169,22 @@ impl Channel<Stream> {
         Ok(Channel::new(stream, socket_type))
     }
 
-    /// Set the read timeout, or clear it for blocking reads.
+    /// `None` for blocking reads.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), Error> {
         self.transport().set_read_timeout(timeout)?;
         Ok(())
     }
 
-    /// Switch between blocking and non-blocking reads.
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), Error> {
         self.transport().set_nonblocking(nonblocking)?;
         Ok(())
     }
 
-    /// Close the socket, unblocking a reader.
+    /// Unblocks a reader.
     pub fn shutdown(&self) {
         self.transport().shutdown();
     }
 
-    /// A handle that can shut this channel down from another thread.
     pub fn shutdown_handle(&self) -> Result<ShutdownHandle, Error> {
         Ok(self.transport().shutdown_handle()?)
     }
@@ -232,8 +198,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    /// Stand in for the device: complete the handshake, then play a script of
-    /// bytes back at the client.
+    /// Fake device: handshake, then send `script`.
     fn fake_device(script: Vec<u8>, expect_type: SocketType) -> (String, u16) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -254,7 +219,7 @@ mod tests {
             assert_eq!(code, expect_type.code());
             sock.write_all(&code.to_le_bytes()).unwrap();
             sock.write_all(&script).unwrap();
-            // Hold the socket open so the client sees EOF only when we drop it.
+            // Keep open so EOF comes only on drop.
             std::thread::sleep(Duration::from_millis(200));
         });
         (addr.ip().to_string(), addr.port())
@@ -324,7 +289,7 @@ mod tests {
             Duration::from_millis(30),
         )
         .unwrap();
-        // Poll until the whole message arrives; the early polls time out.
+        // Early polls time out.
         let mut timed_out = false;
         let got = loop {
             match ch.poll().unwrap() {

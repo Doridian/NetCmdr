@@ -1,39 +1,24 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Video frame decoding: DIB parsing, decompression, colour conversion and the
-//! tile blit into the framebuffer.
+//! Video decoding: DIB parsing, decompression, colour conversion and tile blit.
 //!
 //! Transcribed from `com.minicom.plugin.video_impl.{VideoPayloadReader,
 //! VideoServiceImpl,VideoModel}` and `com.minicom.plugin.data.DibSection`.
 //!
-//! # How a frame arrives
+//! # Frames
 //!
-//! Video is **tile-based**, not full-frame. Each `CmdFlag::Bmp` message carries
+//! Each `CmdFlag::Bmp` message carries a bitfield of changed tiles and the
+//! pixels for those tiles, stacked vertically `tile_cx` wide. Stages
+//! (`VideoServiceImpl.onBmp`):
 //!
-//! * a **bitfield** with one bit per tile of the screen, marking which tiles
-//!   changed, and
-//! * the pixel data for exactly those tiles, stacked vertically as if they were
-//!   one narrow image `tile_cx` wide.
+//! 1. Resize the framebuffer on resolution change.
+//! 2. *restore*: decompress the bitfield, then the pixels. zlib and LZW are
+//!    streaming until an `_INIT`/`_START` method resets them; zlib shares one
+//!    stream between bitfield and pixels, so order matters.
+//! 3. *post-uncompress*: palette, RGB555 or YCbCr to 32-bit pixels.
+//! 4. *unpack*: blit tiles and report the changed rect.
 //!
-//! Decoding runs in four stages, in this order (`VideoServiceImpl.onBmp`):
-//!
-//! 1. [`VideoDecoder::on_bmp`] notices resolution changes and sizes the
-//!    framebuffer.
-//! 2. *restore* — decompress the bitfield, then the pixel payload, into the
-//!    scratch buffer. Both zlib and LZW modes are **streaming**: state carries
-//!    from frame to frame until an `_INIT`/`_START` method restarts it. The zlib
-//!    modes share one inflate stream between the bitfield and the pixels, so the
-//!    two must be inflated in that order or the stream desynchronises.
-//! 3. *post-uncompress* — palette lookup, RGB555 expansion or YCbCr conversion
-//!    into 32-bit pixels.
-//! 4. *unpack* — blit each decoded tile to its place in the framebuffer and
-//!    report the rectangle that changed.
-//!
-//! # Pixel format
-//!
-//! The framebuffer holds one `u32` per pixel as `0x00RRGGBB`. That is what the
-//! vendor's client ends up with too: it stores bytes B, G, R, x and then reads
-//! them back with a little-endian `getInt` into a `TYPE_INT_RGB` image.
+//! Pixels are `0x00RRGGBB`, as in the vendor client.
 
 use crate::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
@@ -78,10 +63,8 @@ const MAX_TILES: usize = 30000;
 /// larger (`m_wIdxSizeComp > 3750`).
 const BITFIELD_BYTES: usize = 3750;
 
-/// A rectangle of the framebuffer, in pixels. `right`/`bottom` are exclusive.
-///
-/// The vendor packs these into an AWT `Rectangle`'s `width`/`height` fields
-/// without converting, so the names there are misleading; these are not.
+/// Framebuffer rect in pixels; `right`/`bottom` exclusive. (The vendor stores
+/// these in AWT `Rectangle.width`/`height` unconverted.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
     pub left: u16,
@@ -96,7 +79,7 @@ impl Rect {
     }
 }
 
-/// The header of one video message (`DibSection`), parsed from the payload.
+/// Video message header (`DibSection`).
 #[derive(Debug, Clone, Default)]
 pub struct Dib {
     pub compress_method: i16,
@@ -106,15 +89,14 @@ pub struct Dib {
     pub tile_cy: u16,
     pub source_cx: u16,
     pub source_cy: u16,
-    /// Number of changed tiles this message describes.
+    /// Changed tile count.
     pub idx_size: u16,
     pub bitfield_comp: Vec<u8>,
     pub frame_count: i32,
 }
 
 impl Dib {
-    /// Whether this format carries tile geometry, i.e. whether the fields after
-    /// the pixel payload are present at all.
+    /// Whether tile geometry follows the pixel payload.
     fn is_tiled(alx_format: i16) -> bool {
         matches!(
             alx_format,
@@ -123,10 +105,7 @@ impl Dib {
     }
 }
 
-/// A little-endian or big-endian cursor over the message payload.
-///
-/// The stream announces its own byte order with a magic short — `GY`/`YG` —
-/// which is what `VideoPayloadReader` tests for before reading anything else.
+/// Payload cursor; byte order is set by an optional `GY`/`YG` marker.
 struct Cursor<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -144,7 +123,6 @@ impl<'a> Cursor<'a> {
         Ok(slice)
     }
 
-    /// A 16-bit read in the payload's declared byte order.
     fn i16(&mut self) -> Result<i16, Error> {
         let b = self.take(2)?;
         Ok(if self.le {
@@ -164,11 +142,8 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Parse one `CmdFlag::Bmp` payload, copying the pixel bytes into `scratch`.
-///
-/// Mirrors `VideoPayloadReader.readDib`, including its sanity checks — those
-/// bounds are what keep a corrupt frame from being turned into a huge
-/// allocation or an out-of-range blit.
+/// Parse a `CmdFlag::Bmp` payload, copying pixels into `scratch`. Mirrors
+/// `VideoPayloadReader.readDib`, including its bounds checks.
 pub fn parse_dib(payload: &[u8], scratch: &mut [u8]) -> Result<Dib, Error> {
     let mut cur = Cursor {
         buf: payload,
@@ -176,9 +151,8 @@ pub fn parse_dib(payload: &[u8], scratch: &mut [u8]) -> Result<Dib, Error> {
         le: true,
     };
 
-    // The byte-order marker is itself read little-endian: "YG" seen as 0x4759
-    // means the rest is big-endian, "GY" (0x5947) means little-endian, and
-    // anything else is already the compression method with no marker present.
+    // Read LE: 0x4759 ("YG") = big-endian, 0x5947 ("GY") = little-endian,
+    // anything else is the compression method (no marker).
     let first = cur.i16()?;
     let compress_method = match first {
         0x4759 => {
@@ -210,14 +184,14 @@ pub fn parse_dib(payload: &[u8], scratch: &mut [u8]) -> Result<Dib, Error> {
     if bi_header_size == 4 {
         dib.frame_count = cur.i32()?;
     } else {
-        // A BITMAPINFOHEADER we have no use for; the geometry below supersedes it.
+        // Unused BITMAPINFOHEADER.
         cur.take(bi_header_size as usize)?;
     }
 
     scratch[..dib.compressed_size].copy_from_slice(cur.take(dib.compressed_size)?);
 
     if !Dib::is_tiled(dib.alx_format) {
-        // The client never stores such a message, so there is nothing to draw.
+        // The vendor client ignores these too.
         return Err(Error::UnsupportedFormat(dib.alx_format));
     }
 
@@ -259,20 +233,18 @@ pub fn parse_dib(payload: &[u8], scratch: &mut [u8]) -> Result<Dib, Error> {
     Ok(dib)
 }
 
-/// The decoded screen.
 #[derive(Debug)]
 pub struct Framebuffer {
     pub width: u16,
     pub height: u16,
-    /// `width * height` pixels, each `0x00RRGGBB`.
+    /// `0x00RRGGBB`.
     pub pixels: Vec<u32>,
 }
 
-/// A framebuffer shared between the decoder and whoever is drawing it.
 pub type SharedFrame = Arc<Mutex<Framebuffer>>;
 
-/// A palette handed over from the command channel, picked up by the decoder
-/// before its next frame (`VideoServiceImpl.onPalette`).
+/// Palette from the command channel, applied before the next frame
+/// (`VideoServiceImpl.onPalette`).
 pub type SharedPalette = Arc<Mutex<Option<[u32; 256]>>>;
 
 impl Default for Framebuffer {
@@ -298,36 +270,23 @@ impl Framebuffer {
     }
 }
 
-/// How much of the picture is changing, as the stock client measures it.
-///
-/// This is the value behind the vendor viewer's "Noise / Level" bar, and it is
-/// meant to be read as an analogue-noise reading: on a quiet desktop almost no
-/// tiles change, so a steady non-zero level means the capture is picking up
-/// noise on the VGA link rather than real activity. Turning the gain down —
-/// with the device's video auto-adjust — is what settles it.
+/// The vendor viewer's "Noise / Level" reading. A quiet desktop changes few
+/// tiles, so a steady non-zero level indicates VGA noise; auto-adjust fixes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Noise {
-    /// 0..=100. Percent of the screen changing per second, clamped, and
-    /// rounded up to 1 whenever anything changed at all.
+    /// 0..=100: percent of screen changing per second, clamped, and at least
+    /// 1 if anything changed.
     pub level: u8,
-    /// Tiles that changed over the reporting interval, unscaled.
+    /// Changed tiles over the interval.
     pub changes: u32,
 }
 
-/// Accumulates [`Noise`] over one-second intervals.
-///
-/// Transcribed from `KVMClientProxy::SetNoiseLevel(bool)` in the vendor's
-/// native client library (`libkvmipjproxy.so`,
-/// `0x440c0`), which is where the number is computed — the device sends only
-/// the per-frame changed-tile count that feeds it. Per frame the vendor adds
-/// that count as a percentage of the tiles on screen; once a second it divides
-/// the running total by the elapsed seconds, so the reading is a *rate*: the
-/// per-frame percentage multiplied by the frame rate, capped at 100.
+/// Accumulates [`Noise`] per second. From `KVMClientProxy::SetNoiseLevel` in
+/// `libkvmipjproxy.so` (`0x440c0`): sum each frame's changed-tile percentage,
+/// divide by elapsed seconds, cap at 100.
 #[derive(Debug)]
 struct NoiseMeter {
-    /// Running total of per-frame changed-tile percentages.
     sum_percent: u32,
-    /// Running total of raw changed-tile counts.
     sum_changes: u32,
     last_report: Instant,
 }
@@ -341,28 +300,17 @@ impl NoiseMeter {
         }
     }
 
-    /// Fold one decoded frame in.
     fn record(&mut self, dib: &Dib) {
-        // `parse_dib` has already rejected zero tile sizes, tiles bigger than
-        // the screen and more changed tiles than the screen holds, so the
-        // divisor is at least 1 and the percentage is at most 100. The vendor
-        // guards all three here instead, having validated none of them.
+        // `parse_dib` guarantees tiles >= 1 and idx_size <= tiles.
         let tiles = (dib.source_cx as u32 * dib.source_cy as u32)
             / (dib.tile_cx as u32 * dib.tile_cy as u32);
         self.sum_percent += dib.idx_size as u32 * 100 / tiles.max(1);
         self.sum_changes += dib.idx_size as u32;
     }
 
-    /// Report, if a whole second has passed since the last one.
-    ///
-    /// The vendor compares `time()` values, so its interval is whole seconds
-    /// and the report lands on the first frame after the second turns over;
-    /// this keeps that cadence but off the monotonic clock. The interval is
-    /// advanced by the seconds it actually covered rather than reset to *now*,
-    /// which is what the vendor's integer clock does implicitly and which keeps
-    /// the sub-second remainder from being dropped every report. A gap of
-    /// several seconds — a frozen or idle target — divides by that many, so it
-    /// reads as quiet rather than as one large spike.
+    /// Report once a whole second has passed. Advances by whole seconds (like
+    /// the vendor's `time()`) to keep the remainder; a multi-second gap divides
+    /// by its length so an idle target reads as quiet, not a spike.
     fn take(&mut self) -> Option<Noise> {
         let secs = self.last_report.elapsed().as_secs();
         if secs == 0 {
@@ -373,7 +321,6 @@ impl NoiseMeter {
         let rate = self.sum_percent as u64 / secs;
         self.sum_percent = 0;
         self.sum_changes = 0;
-        // A screen that is changing, however little, should not read as silent.
         let level = match rate {
             0 if changes != 0 => 1,
             r => r.min(100) as u8,
@@ -382,18 +329,14 @@ impl NoiseMeter {
     }
 }
 
-/// Stateful video decoder. One instance decodes a whole session: the zlib and
-/// LZW streams, the tile bitfield and the framebuffer all persist between
-/// messages.
+/// Per-session decoder; stream state persists between messages.
 pub struct VideoDecoder {
-    /// Receives the compressed payload, then the converted 32-bit pixels
-    /// (`DibSection.m_dbCashBits`).
+    /// Compressed payload, then 32-bit pixels (`DibSection.m_dbCashBits`).
     cash: Vec<u8>,
-    /// Decompressed pixel data (`VideoModel.m_dbCashUncompBits`).
+    /// `VideoModel.m_dbCashUncompBits`.
     uncomp: Vec<u8>,
     bitfield: Vec<u8>,
-    /// Tile indices for the current frame. Deliberately *not* cleared between
-    /// frames — the vendor leaves stale entries past the ones it refills.
+    /// Not cleared between frames, matching the vendor.
     indexes: Vec<u16>,
     lzw: Expander,
     ycbcr: YCbCrToRgb,
@@ -402,8 +345,7 @@ pub struct VideoDecoder {
     palette_in: SharedPalette,
     tile_cx: u16,
     tile_cy: u16,
-    /// Cached copy of the shared frame's geometry, so the common path does not
-    /// have to take the lock.
+    /// Cached frame size, to avoid locking.
     width: u16,
     height: u16,
     resolution_changed: bool,
@@ -412,8 +354,6 @@ pub struct VideoDecoder {
 }
 
 impl VideoDecoder {
-    /// Build a decoder that draws into `frame` and picks up palettes posted to
-    /// `palette_in` by the command channel.
     pub fn new(frame: SharedFrame, palette_in: SharedPalette) -> Self {
         VideoDecoder {
             cash: vec![0; SCRATCH_BYTES],
@@ -435,19 +375,15 @@ impl VideoDecoder {
         }
     }
 
-    /// The framebuffer this decoder draws into.
     pub fn frame(&self) -> &SharedFrame {
         &self.frame
     }
 
-    /// Where to post a palette for the next frame to pick up.
     pub fn palette_slot(&self) -> &SharedPalette {
         &self.palette_in
     }
 
-    /// Decode one video message into the framebuffer, returning the rectangle
-    /// that changed. `payload` is the message body; the caller has already read
-    /// it in full.
+    /// Decode one message body, returning the changed rect.
     pub fn decode(&mut self, payload: &[u8]) -> Result<Rect, Error> {
         if let Ok(mut pending) = self.palette_in.try_lock() {
             if let Some(lut) = pending.take() {
@@ -471,8 +407,7 @@ impl VideoDecoder {
         Ok(self.unpack_bitmap(&dib))
     }
 
-    /// True when the last [`decode`](Self::decode) changed the frame geometry.
-    /// Reading it clears the flag.
+    /// New size if the last [`decode`](Self::decode) changed it; clears the flag.
     pub fn take_resolution_change(&mut self) -> Option<(u16, u16)> {
         if std::mem::take(&mut self.resolution_changed) {
             Some((self.width, self.height))
@@ -481,17 +416,14 @@ impl VideoDecoder {
         }
     }
 
-    /// The [`Noise`] reading, once a second's worth of frames has gone by.
-    /// Returns `None` in between, so the caller can poll it per frame.
+    /// A [`Noise`] reading about once a second; poll per frame.
     pub fn take_noise(&mut self) -> Option<Noise> {
         self.noise.take()
     }
 
     fn update_resolution(&mut self, dib: &Dib) {
         if self.width != dib.source_cx || self.height != dib.source_cy {
-            // Note the vendor sets its reported tile height from the tile
-            // *width* here; that bug only affects the `<resolution_change/>`
-            // string it publishes, so we keep both dimensions honest.
+            // The vendor sets tile height from tile width here (a bug).
             self.tile_cx = dib.tile_cx;
             self.tile_cy = dib.tile_cy;
             self.width = dib.source_cx;
@@ -548,7 +480,7 @@ impl VideoDecoder {
         Ok(())
     }
 
-    /// One `Inflater.inflate` call's worth: as much as the output holds.
+    /// One `Inflater.inflate` call.
     fn inflate_pixels(&mut self, n: usize) -> Result<(), Error> {
         self.inflate
             .decompress(&self.cash[..n], &mut self.uncomp, FlushDecompress::None)
@@ -569,7 +501,7 @@ impl VideoDecoder {
                 rle_decode(src, &mut self.bitfield)?;
             }
             _ => {
-                // Shares the pixel stream, and must be inflated before it.
+                // Shares the pixel stream; must come first.
                 self.inflate
                     .decompress(src, &mut self.bitfield, FlushDecompress::None)
                     .map_err(|e| Error::Inflate(e.to_string()))?;
@@ -626,8 +558,7 @@ impl VideoDecoder {
                 } else {
                     (InputMode::Ycbcr400, pixels)
                 };
-                // Frames that came through the LZW expander are already in the
-                // byte order the converter wants; zlib frames are not.
+                // LZW output is already in converter byte order; zlib isn't.
                 let byte_swap = !matches!(
                     dib.compress_method,
                     compress::LZW_TCB_UNC_START
@@ -730,10 +661,8 @@ impl VideoDecoder {
     }
 }
 
-/// Decode a `CmdFlag::Palette` payload: 256 little-endian `0x00RRGGBB` words.
-///
-/// Palettes arrive on the *command* channel, so the session hands the result to
-/// the video decoder through a [`SharedPalette`].
+/// Decode a `CmdFlag::Palette` payload: 256 LE `0x00RRGGBB` words. Arrives on
+/// the command channel and reaches the decoder via [`SharedPalette`].
 pub fn parse_palette(data: &[u8]) -> Result<[u32; 256], Error> {
     if data.len() < 1024 {
         return Err(Error::BadVideoField("palette shorter than 256 entries"));
@@ -745,10 +674,8 @@ pub fn parse_palette(data: &[u8]) -> Result<[u32; 256], Error> {
     Ok(lut)
 }
 
-/// The bitfield's run-length coding (`VideoModel.decompressRLE`).
-///
-/// A control byte under 0x80 introduces `b + 1` literal bytes; 0x80 or above
-/// repeats the next byte `(b & 0x7F) + 2` times.
+/// Bitfield RLE (`VideoModel.decompressRLE`): `b < 0x80` is `b + 1` literals,
+/// otherwise the next byte repeated `(b & 0x7F) + 2` times.
 fn rle_decode(input: &[u8], out: &mut [u8]) -> Result<(), Error> {
     let mut i = 0usize;
     let mut o = 0usize;
@@ -822,8 +749,7 @@ mod tests {
         assert!(rle_decode(&[0xFF, 0xAA], &mut out).is_err());
     }
 
-    /// Build the payload `VideoPayloadReader` expects, with no byte-order
-    /// marker (so little-endian) and uncompressed pixels.
+    /// Little-endian payload with no byte-order marker.
     fn make_payload(
         method: i16,
         alx_format: i16,
@@ -926,8 +852,6 @@ mod tests {
         ));
     }
 
-    /// An end-to-end frame: one uncompressed RGB555 tile, in the top-left
-    /// corner, drawn into a fresh framebuffer.
     #[test]
     fn decodes_an_uncompressed_tile_into_the_framebuffer() {
         // RGB555 0x7C00 is full red in the top five bits.
@@ -962,7 +886,6 @@ mod tests {
         assert_eq!(pixel(&frame, 8), 0, "outside the tile");
     }
 
-    /// The tile index picks where the blit lands.
     #[test]
     fn blits_a_tile_at_its_bitfield_position() {
         let mut pixels = Vec::new();
@@ -1036,7 +959,6 @@ mod tests {
         ));
     }
 
-    /// A `Dib` carrying only the fields the noise meter reads.
     fn noise_dib(idx_size: u16) -> Dib {
         Dib {
             tile_cx: 16,

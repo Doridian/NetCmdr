@@ -2,33 +2,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The editable device configuration: `<config_data>` and its vocabulary.
 //!
-//! The device has no way to change one setting. Its only write verb,
-//! `CMA_CONFIG`, takes the whole `<config_data>` document and applies it, so
-//! every change is a read-modify-write of the entire configuration — which is
-//! exactly what the vendor's client does (`FetchCfgHttpCmd` → dialogs →
-//! `SaveCfgHttpCmd`).
+//! The only write verb, `CMA_CONFIG`, replaces the whole `<config_data>`, so
+//! every change is read-modify-write. [`ConfigDoc`] holds it as a lossless
+//! [`crate::xml`] tree; [`crate::model::DeviceConfig`] is the typed read-only
+//! view.
 //!
-//! [`ConfigDoc`] is that document, held as a lossless [`crate::xml`] tree so
-//! that everything this crate has no model for survives the round trip
-//! untouched. It offers handles onto the sections a caller wants to change;
-//! [`crate::model::DeviceConfig`] is the typed, read-only view of the same
-//! document for display.
+//! Rules copied from the vendor client:
 //!
-//! Three things the device's own client does, which a writer has to do too:
+//! - **`<system_time>` is a command.** It's blanked on save unless
+//!   [`ConfigDoc::set_system_time`] was called (`DatePanel.saveUIToPvXml`).
+//! - **`<aaa>` may be missing**; [`ConfigDoc::ldap`] and [`ConfigDoc::radius`]
+//!   insert a stub as `FetchCfgHttpCmd` does.
+//! - **Passwords are write-only**: set via a `password` attribute for one save.
 //!
-//! - **`<system_time>` is a command, not a setting.** The client blanks all six
-//!   fields unless the user actually set the clock (`DatePanel.saveUIToPvXml`),
-//!   because sending back the time that was read would set the clock to a value
-//!   that is by then stale. [`ConfigDoc`] blanks it on save unless
-//!   [`ConfigDoc::set_system_time`] was called.
-//! - **`<aaa>` may be missing** from what the device sends. `FetchCfgHttpCmd`
-//!   inserts a stub when it is, so LDAP and RADIUS always have somewhere to
-//!   live; [`ConfigDoc::ldap`] and [`ConfigDoc::radius`] do the same.
-//! - **A user's password is write-only.** It never comes back in a fetch, and
-//!   setting it means adding a `password` attribute for that one save.
-//!
-//! Saving is gated by a permission handshake (`CMA_PERMISSION`); see
-//! [`crate::Client::save_config`].
+//! Saving requires `CMA_PERMISSION`; see [`crate::Client::save_config`].
 
 use std::fmt;
 use std::str::FromStr;
@@ -36,16 +23,14 @@ use std::str::FromStr;
 use crate::xml::{self, Element};
 use crate::Error;
 
-/// The `<config_data>` document, ready to be edited and saved back.
+/// An editable `<config_data>` document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigDoc {
     data: Element,
-    /// Whether the caller asked to set the device clock in this save.
     set_time: bool,
 }
 
-/// Sections of `<proxyview>`, in the order the firmware emits them. Used to
-/// place a section the device did not send where the vendor's client puts it.
+/// `<proxyview>` sections in firmware order, for placing missing ones.
 const SECTION_ORDER: &[&str] = &[
     "connection",
     "SSH",
@@ -62,7 +47,7 @@ const SECTION_ORDER: &[&str] = &[
 ];
 
 impl ConfigDoc {
-    /// Parse a `PV_CONFIG` reply into its editable `<config_data>`.
+    /// Parse a `PV_CONFIG` reply.
     pub fn parse(xml: &str) -> Result<Self, Error> {
         let data = xml::find_element(xml, "config_data")?
             .ok_or_else(|| Error::Device("reply has no <config_data>".into()))?;
@@ -75,27 +60,24 @@ impl ConfigDoc {
         })
     }
 
-    /// The `config_id` the device stamped this document with.
     pub fn config_id(&self) -> Option<&str> {
         self.data.attr("config_id")
     }
 
-    /// The `<proxyview>` element: the device itself.
+    /// `<proxyview>`: the device itself.
     pub fn device(&self) -> &Element {
         self.data.child("proxyview").expect("checked in parse")
     }
 
-    /// The `<proxyview>` element, mutably.
     pub fn device_mut(&mut self) -> &mut Element {
         self.data.child_mut("proxyview").expect("checked in parse")
     }
 
-    /// A section of `<proxyview>`, or `None` if this device does not have one.
     pub fn section(&self, name: &str) -> Option<&Element> {
         self.device().child(name)
     }
 
-    /// A section of `<proxyview>`, created in its usual place if absent.
+    /// A `<proxyview>` section, created in firmware order if absent.
     pub fn section_mut(&mut self, name: &str) -> &mut Element {
         if self.device().child(name).is_none() {
             let after = SECTION_ORDER
@@ -103,7 +85,7 @@ impl ConfigDoc {
                 .position(|s| *s == name)
                 .map(|i| &SECTION_ORDER[..i])
                 .unwrap_or(&[]);
-            // Land after the latest earlier section this device actually has.
+            // After the last earlier section present.
             let anchor = after
                 .iter()
                 .rev()
@@ -145,14 +127,14 @@ impl ConfigDoc {
         self.section_mut("kvm_manager")
     }
 
-    /// The first `<network_adapter>`. The hardware has one.
+    /// The (only) `<network_adapter>`.
     pub fn network(&mut self) -> Result<&mut Element, Error> {
         self.section_mut("network_adapters")
             .child_mut("network_adapter")
             .ok_or_else(|| Error::Config("device reported no network adapter".into()))
     }
 
-    /// One `<serial_device>` by its port number (1 or 2).
+    /// `<serial_device>` by port (1 or 2).
     pub fn serial(&mut self, port: u32) -> Result<&mut Element, Error> {
         let key = port.to_string();
         self.section_mut("serial_devices")
@@ -160,7 +142,7 @@ impl ConfigDoc {
             .ok_or_else(|| Error::Config(format!("device has no serial port {port}")))
     }
 
-    /// One `<target>` (a KVM port) by its port number.
+    /// `<target>` by KVM port.
     pub fn target(&mut self, port: u32) -> Result<&mut Element, Error> {
         let key = port.to_string();
         self.section_mut("targets")
@@ -168,12 +150,11 @@ impl ConfigDoc {
             .ok_or_else(|| Error::Config(format!("device has no target port {port}")))
     }
 
-    /// The `<users>` container, for adding and removing accounts.
     pub fn users(&mut self) -> &mut Element {
         self.section_mut("users")
     }
 
-    /// One `<user>` by name, matched case-insensitively as the device does.
+    /// `<user>` by name, case-insensitive like the device.
     pub fn user(&mut self, name: &str) -> Result<&mut Element, Error> {
         self.users()
             .children_named_mut("user")
@@ -181,13 +162,12 @@ impl ConfigDoc {
             .ok_or_else(|| Error::Config(format!("no such user: {name}")))
     }
 
-    /// The `<power>` container, holding `<pdu_types>` and the configured `<pdu>`s.
+    /// `<power>`: `<pdu_types>` and `<pdu>`s.
     pub fn power(&mut self) -> &mut Element {
         self.section_mut("power")
     }
 
-    /// `<aaa>/<ldap>`, with the stub the vendor's client injects when the
-    /// device sends no `<aaa>` at all.
+    /// `<aaa>/<ldap>`, created if the device sent no `<aaa>`.
     pub fn ldap(&mut self) -> &mut Element {
         self.aaa_child("ldap")
     }
@@ -200,9 +180,7 @@ impl ConfigDoc {
     fn aaa_child(&mut self, which: &str) -> &mut Element {
         let aaa = self.section_mut("aaa");
         if aaa.child(which).is_none() {
-            // The same defaults `FetchCfgHttpCmd.addAaaStubToDeviceResponseLinesIfNeeded`
-            // fills in, so a device that has never had AAA configured starts
-            // from what its own client would have shown.
+            // Defaults from `FetchCfgHttpCmd.addAaaStubToDeviceResponseLinesIfNeeded`.
             let mut stub = Element::new(which);
             if which == "ldap" {
                 stub.set("mode", LdapMode::Basic.as_str())
@@ -214,7 +192,6 @@ impl ConfigDoc {
             } else {
                 stub.set("realm", "").set("accounting", "false");
             }
-            // `ldap` before `radius`, as the stub has them.
             if which == "radius" {
                 aaa.push(stub);
             } else {
@@ -224,7 +201,7 @@ impl ConfigDoc {
         aaa.child_mut(which).expect("just inserted")
     }
 
-    /// Set the device clock. Without this, saving leaves the clock alone.
+    /// Set the clock on save (otherwise left alone).
     pub fn set_system_time(&mut self, t: SystemTime) {
         self.set_time = true;
         self.section_mut("system_time")
@@ -236,10 +213,8 @@ impl ConfigDoc {
             .set("year", t.year.to_string());
     }
 
-    /// The document to post as `CMA_CONFIG`.
-    ///
-    /// Applies the two rules the device's own client applies on the way out:
-    /// `value=""`, and a blank `<system_time>` unless the clock was set.
+    /// The `CMA_CONFIG` body: `value=""`, and `<system_time>` blanked unless
+    /// set.
     pub fn to_save_body(&self) -> String {
         let mut out = self.data.clone();
         out.set("value", "");
@@ -256,22 +231,19 @@ impl ConfigDoc {
         out.to_xml()
     }
 
-    /// The document as the device sent it, for export.
+    /// As the device sent it, for export.
     pub fn to_xml(&self) -> String {
         self.data.to_xml()
     }
 
-    /// Send the document's `<system_time>` as it stands, rather than blanking
-    /// it. Only an importer of a document that was written to carry a time
-    /// wants this: an exported configuration carries the clock as it read at
-    /// export, and applying that would wind the device back.
+    /// Keep `<system_time>` instead of blanking it. Exports carry a stale time,
+    /// so only use this for documents written to set one.
     pub fn send_system_time(&mut self) {
         self.set_time = true;
     }
 
-    /// Wrap an externally supplied `<config_data>` document (an import) so it
-    /// can be saved. Its `<system_time>` is blanked like any other save's,
-    /// unless [`ConfigDoc::send_system_time`] says otherwise.
+    /// Wrap an imported `<config_data>` for saving. `<system_time>` is blanked
+    /// unless [`ConfigDoc::send_system_time`] is called.
     pub fn from_element(data: Element) -> Result<Self, Error> {
         if data.name != "config_data" {
             return Err(Error::Config(format!(
@@ -289,7 +261,6 @@ impl ConfigDoc {
     }
 }
 
-/// Wall-clock time to set on the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemTime {
     pub year: u32,
@@ -300,10 +271,8 @@ pub struct SystemTime {
     pub second: u32,
 }
 
-/// An authentication source, as it appears in `security_policy/@aaa_order`.
-///
-/// The codes are the client's `MethodDescriptor` constants. Local is always
-/// present and always first; the device's own UI does not allow otherwise.
+/// An entry in `security_policy/@aaa_order` (`MethodDescriptor` codes). Local
+/// is always first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethod {
     Local,
@@ -322,7 +291,6 @@ impl AuthMethod {
         }
     }
 
-    /// The numeric code the wire uses.
     pub fn code(self) -> u8 {
         match self {
             AuthMethod::Ldap => 0,
@@ -340,11 +308,8 @@ impl AuthMethod {
         }
     }
 
-    /// Parse an `aaa_order` value, e.g. `"3,1"` → local, then RADIUS.
-    ///
-    /// Unknown codes (the firmware reserves 2 for TACACS+ and 4 for none) are
-    /// skipped rather than failing: a device configured through some other
-    /// path should still be readable.
+    /// Parse e.g. `"3,1"` → local, RADIUS. Unknown codes (2 = TACACS+,
+    /// 4 = none) are skipped.
     pub fn parse_order(value: &str) -> Vec<AuthMethod> {
         value
             .split(',')
@@ -353,7 +318,6 @@ impl AuthMethod {
             .collect()
     }
 
-    /// Render an `aaa_order` value.
     pub fn format_order(order: &[AuthMethod]) -> String {
         order
             .iter()
@@ -383,14 +347,14 @@ impl FromStr for AuthMethod {
     }
 }
 
-/// How the device maps an LDAP directory onto its own permissions.
+/// How LDAP maps to device permissions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LdapMode {
-    /// Authenticate only; permissions come from the local account.
+    /// Auth only; permissions from the local account.
     Basic,
-    /// Read permissions from an attribute on the user object.
+    /// From a user attribute.
     User,
-    /// Read permissions from the user's group.
+    /// From the user's group.
     Group,
 }
 
@@ -418,14 +382,11 @@ impl FromStr for LdapMode {
     }
 }
 
-/// Transport for one LDAP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LdapProtocol {
-    /// Plain LDAP, no encryption.
     Ldap,
-    /// LDAPS (implicit TLS, usually port 636).
+    /// Implicit TLS, usually port 636.
     Ldaps,
-    /// StartTLS on the plain port.
     Tls,
 }
 
@@ -453,14 +414,12 @@ impl FromStr for LdapProtocol {
     }
 }
 
-/// How the adapter gets its IPv6 address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ipv6Mode {
     Dhcp,
     /// SLAAC.
     Stateless,
     Static,
-    /// IPv6 off.
     None,
 }
 
@@ -490,7 +449,7 @@ impl FromStr for Ipv6Mode {
     }
 }
 
-/// Serial line parity, written as a single letter.
+/// Serial parity, a single letter on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parity {
     None,
@@ -513,7 +472,6 @@ impl Parity {
         }
     }
 
-    /// The spelled-out name, for display.
     pub fn name(self) -> &'static str {
         match self {
             Parity::None => "none",
@@ -524,7 +482,6 @@ impl Parity {
         }
     }
 
-    /// Read the single-letter wire form back.
     pub fn from_letter(letter: &str) -> Option<Self> {
         match letter.trim().to_ascii_uppercase().as_str() {
             "N" => Some(Parity::None),
@@ -551,14 +508,13 @@ impl FromStr for Parity {
     }
 }
 
-/// What a serial port is wired to, from `serial_device/@PDU`.
+/// What a serial port is connected to (`serial_device/@PDU`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerialAssign {
-    /// A plain serial console.
     None,
-    /// A keyboard-controlled power strip.
+    /// Keyboard-controlled power strip.
     KeyboardPower,
-    /// A port-operated controller (POC) power strip.
+    /// Port-operated controller (POC) power strip.
     Poc,
 }
 
@@ -603,22 +559,19 @@ impl FromStr for SerialAssign {
     }
 }
 
-/// Baud rates the device's own serial dialog offers.
 pub const BAUD_RATES: &[&str] = &[
     "110", "300", "600", "1200", "2400", "4800", "9600", "19200", "38400", "56000", "57600",
     "115200", "128000", "256000",
 ];
 
-/// Data-bit counts the device offers.
 pub const DATA_BITS: &[&str] = &["4", "5", "6", "7", "8"];
 
-/// Stop-bit counts the device offers. `1.5` is a real choice, so these are
-/// strings rather than numbers.
+/// Strings because of `1.5`.
 pub const STOP_BITS: &[&str] = &["1", "1.5", "2", "3"];
 
-/// Administrator, from `user/@userlevel`.
+/// `user/@userlevel` for admin.
 pub const USER_LEVEL_ADMIN: &str = "1";
-/// Standard user, from `user/@userlevel`.
+/// `user/@userlevel` for a standard user.
 pub const USER_LEVEL_USER: &str = "2";
 
 #[cfg(test)]
@@ -649,7 +602,7 @@ mod tests {
         d.connection().set("idle_time", "30");
         let body = d.to_save_body();
         assert!(body.contains(r#"idle_time="30""#));
-        // Everything the editor never touched is still there, verbatim.
+        // Untouched content survives verbatim.
         assert!(body.contains(r#"<target name="Server 08" port="8"/>"#));
         assert!(body.contains(r#"mac="00:15:9D:00:00:00""#));
         assert!(body.contains("PDUMH15ATNET"));
@@ -693,12 +646,11 @@ mod tests {
         let body = d.to_save_body();
         assert!(body.contains(r#"<ldap mode="basic""#));
         assert!(body.contains(r#"search_base="dc=example,dc=com""#));
-        // The stub carries a radius element too, as the vendor's client's does.
         d.radius();
         assert!(d
             .to_save_body()
             .contains(r#"<radius realm="" accounting="false"/>"#));
-        // And it lands where the client puts it: right after the security policy.
+        // Right after the security policy, as the vendor client puts it.
         let after_policy = d
             .to_save_body()
             .split("security_policy")

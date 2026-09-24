@@ -1,35 +1,25 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! A small, lossless XML element tree.
+//! A small lossless XML tree.
 //!
-//! Changing a setting on the device is a read-modify-write of its *whole*
-//! configuration document: the vendor's client fetches `config_data`, lets its
-//! dialogs mutate the object graph, and posts the entire thing back (see
-//! `SaveCfgHttpCmd`). Anything the client drops on the way is dropped on the
-//! device too, so the one safe way to change a single attribute is to hand the
-//! rest of the document back exactly as it arrived.
+//! Settings are changed by posting back the whole config document
+//! (`SaveCfgHttpCmd`), and anything dropped is dropped on the device. So this
+//! preserves attribute order and unknown content, unlike [`crate::model`].
 //!
-//! That is what this module is for. It keeps attribute order, keeps attributes
-//! and elements it has no model for, and does not rewrite what it does not
-//! understand — unlike [`crate::model`], which parses the same document into
-//! typed Rust for display and deliberately forgets the rest.
-//!
-//! It is not a general XML implementation: no namespaces, no DTDs, no
-//! processing instructions. The device emits none of those.
+//! No namespaces, DTDs or processing instructions; the device emits none.
 
 use quick_xml::events::{BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 
 use crate::Error;
 
-/// A node in the tree: an element, or the text between elements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     Element(Element),
     Text(String),
 }
 
-/// One XML element, with its attributes in the order they were written.
+/// An element with attributes in document order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Element {
     pub name: String,
@@ -46,10 +36,7 @@ impl Element {
         }
     }
 
-    /// An attribute's value, or `None` if the attribute is absent.
-    ///
-    /// The firmware embeds stray newlines inside some values (`name="D1214403\n"`),
-    /// so this trims; [`Element::set`] writes back untrimmed.
+    /// Trimmed, since the firmware adds stray newlines (`name="D1214403\n"`).
     pub fn attr(&self, name: &str) -> Option<&str> {
         self.attrs
             .iter()
@@ -57,12 +44,12 @@ impl Element {
             .map(|(_, v)| v.trim())
     }
 
-    /// An attribute's value, or `""` when absent.
+    /// `""` when absent.
     pub fn attr_or_empty(&self, name: &str) -> &str {
         self.attr(name).unwrap_or("")
     }
 
-    /// `"true"`/`"1"` → true; absent or anything else → false.
+    /// `"true"`/`"1"` → true; else false.
     pub fn attr_bool(&self, name: &str) -> bool {
         matches!(self.attr(name), Some(v) if v.eq_ignore_ascii_case("true") || v == "1")
     }
@@ -71,7 +58,7 @@ impl Element {
         self.attr(name).and_then(|v| v.parse().ok())
     }
 
-    /// The text (and CDATA) directly inside this element, concatenated.
+    /// Direct text and CDATA, concatenated.
     pub fn text(&self) -> String {
         self.children
             .iter()
@@ -82,8 +69,7 @@ impl Element {
             .collect()
     }
 
-    /// Set an attribute, keeping its position if it is already there so that a
-    /// modified document still reads like the one the device sent.
+    /// Set an attribute, keeping its position if present.
     pub fn set(&mut self, name: &str, value: impl Into<String>) -> &mut Self {
         let value = value.into();
         match self.attrs.iter_mut().find(|(k, _)| k == name) {
@@ -93,7 +79,6 @@ impl Element {
         self
     }
 
-    /// Set an attribute to `"true"` or `"false"`, the spelling the PV schema uses.
     pub fn set_bool(&mut self, name: &str, value: bool) -> &mut Self {
         self.set(name, if value { "true" } else { "false" })
     }
@@ -136,7 +121,6 @@ impl Element {
             .find(|e| e.attr(attr) == Some(value))
     }
 
-    /// The first `name` child whose `attr` equals `value`, mutably.
     pub fn child_where_mut(&mut self, name: &str, attr: &str, value: &str) -> Option<&mut Element> {
         self.children_named_mut(name)
             .find(|e| e.attr(attr) == Some(value))
@@ -147,10 +131,7 @@ impl Element {
         self
     }
 
-    /// Insert `child` directly after the first `after` element, or append it if
-    /// there is none. Element order in the document is not known to matter to
-    /// the device's parser, but keeping it where the vendor's client puts it
-    /// costs nothing.
+    /// Insert `child` after the first `after` element, else append.
     pub fn insert_after(&mut self, after: &str, child: Element) {
         let at = self
             .children
@@ -164,13 +145,12 @@ impl Element {
         }
     }
 
-    /// Drop every direct child element called `name`.
     pub fn remove_children(&mut self, name: &str) {
         self.children
             .retain(|n| !matches!(n, Node::Element(e) if e.name == name));
     }
 
-    /// The `name` child, created empty if it is not there yet.
+    /// The `name` child, created if missing.
     pub fn child_or_insert(&mut self, name: &str) -> &mut Element {
         if self.child(name).is_none() {
             self.push(Element::new(name));
@@ -178,7 +158,6 @@ impl Element {
         self.child_mut(name).expect("just inserted")
     }
 
-    /// Serialize back to XML.
     pub fn to_xml(&self) -> String {
         let mut writer = Writer::new(Vec::new());
         write_element(&mut writer, self);
@@ -211,18 +190,15 @@ fn write_element(writer: &mut Writer<Vec<u8>>, e: &Element) {
         .expect("in-memory");
 }
 
-/// Parse `xml` and return the first element called `want`, with its subtree.
-///
-/// Returns `Ok(None)` when the document has no such element.
+/// The first `want` element and its subtree, or `Ok(None)`.
 pub fn find_element(xml: &str, want: &str) -> Result<Option<Element>, Error> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
-    // Empty elements are reported as Start+End rather than Empty so that one
-    // arm handles both; the writer decides the output form from the children.
+    // Report empty elements as Start+End so one arm handles both.
     reader.config_mut().expand_empty_elements = true;
 
     let mut buf = Vec::new();
-    // Elements currently open, once we are inside the one we want.
+    // Open elements inside the wanted one.
     let mut stack: Vec<Element> = Vec::new();
 
     loop {
@@ -247,7 +223,6 @@ pub fn find_element(xml: &str, want: &str) -> Result<Option<Element>, Error> {
                     Some(parent) => {
                         parent.push(done);
                     }
-                    // The element we were asked for just closed.
                     None => return Ok(Some(done)),
                 }
             }
@@ -261,9 +236,7 @@ pub fn find_element(xml: &str, want: &str) -> Result<Option<Element>, Error> {
                 }
             }
 
-            // A backup blob and an installed certificate arrive as CDATA. It is
-            // kept as text; nothing here writes CDATA back out, and the payload
-            // is the same either way.
+            // Backups and certificates arrive as CDATA; kept as text.
             Event::CData(ref t) => {
                 if let Some(open) = stack.last_mut() {
                     let text = String::from_utf8_lossy(t.as_ref()).into_owned();
@@ -317,7 +290,6 @@ mod tests {
         assert_eq!(d.name, "config_data");
         assert_eq!(d.attr("config_id"), Some("00/00/00 00:00:00 0"));
         let pv = d.child("proxyview").unwrap();
-        // Entities are decoded on the way in and re-encoded on the way out.
         assert_eq!(pv.attr("name"), Some("kvm&rack"));
         assert_eq!(
             pv.child("connection").unwrap().attr_parsed("ip_port"),
@@ -334,11 +306,9 @@ mod tests {
     fn round_trips_unknown_attributes_and_elements() {
         let d = doc();
         let xml = d.to_xml();
-        // Nothing the model does not know about is lost.
         assert!(xml.contains(r#"secret="s3cr3t""#));
         assert!(xml.contains(r#"type="108""#));
         assert!(xml.contains(r#"name="kvm&amp;rack""#));
-        // And it parses back to the same tree.
         assert_eq!(find_element(&xml, "config_data").unwrap().unwrap(), d);
     }
 

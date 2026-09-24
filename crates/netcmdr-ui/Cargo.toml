@@ -14,8 +14,7 @@ netcmdr-session = { path = "../netcmdr-session" }
 egui = { version = "0.36", default-features = false }
 tracing.workspace = true
 
-# Only the native shell needs to translate winit's key codes; the web reads
-# `KeyboardEvent.code` strings, which the table already speaks.
+# Only the native shell uses winit key codes.
 winit = { version = "0.30", optional = true }
 
 [features]

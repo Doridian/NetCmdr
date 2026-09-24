@@ -47,8 +47,7 @@ func TestContentTypeByExtension(t *testing.T) {
 	}
 }
 
-// Whatever the packer wrote has to come back out of the binary intact, under
-// the URL path the client asks for rather than the suffix it was stored with.
+// Packed files must round-trip under their URL paths.
 func TestTheEmbeddedClientUnpacks(t *testing.T) {
 	assets, err := LoadAssets()
 	if err != nil {

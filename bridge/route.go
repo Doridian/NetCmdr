@@ -26,14 +26,8 @@ type Bridge struct {
 	Log    *slog.Logger
 }
 
-// Handler wires the routes up. Everything not claimed by one of the three
-// protocol routes is a file of the client.
-//
-// The methods are checked inside each route rather than declared in the
-// pattern, because the catch-all below matches every path: a pattern of
-// "POST /message.pv" would leave a PUT to that path falling through to the
-// static handler and coming back as a 404, where the wrong method on a route
-// that exists is a 405.
+// Handler wires up the routes. Methods are checked inside handlers, since a
+// method pattern would let wrong methods fall through to a 404 instead of 405.
 func (b *Bridge) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/message.pv", only(b.forwardMessagePV, http.MethodPost))
@@ -43,7 +37,7 @@ func (b *Bridge) Handler() http.Handler {
 	return refuseTraversal(mux)
 }
 
-// only answers anything but the named methods with a 405.
+// only answers other methods with a 405.
 func only(next http.HandlerFunc, methods ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		for _, method := range methods {
@@ -57,13 +51,8 @@ func only(next http.HandlerFunc, methods ...string) http.HandlerFunc {
 	}
 }
 
-// refuseTraversal turns away a path that tries to climb out of the client.
-//
-// It has to run before ServeMux, which would otherwise normalise such a path
-// and answer with a redirect to wherever it pointed. There is no filesystem
-// behind this, so the path could at worst miss the table; refusing it keeps the
-// answer to a traversal attempt an unambiguous no rather than a redirect or a
-// 404 that looks like a typo.
+// refuseTraversal rejects ".." paths before ServeMux turns them into
+// redirects.
 func refuseTraversal(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for _, segment := range strings.Split(r.URL.Path, "/") {
@@ -87,17 +76,11 @@ func (b *Bridge) info(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	// A write that fails here is a browser that has gone away mid-response:
-	// the status is already sent, so there is no second answer to give it.
+	// The client is gone; nothing to do.
 	_, _ = w.Write(body)
 }
 
-// forwardMessagePV hands a management request to the device and the answer
-// back.
-//
-// The body is opaque here — it is the device's own XML, and the bridge has no
-// reason to look inside it. That keeps every management call the web client
-// makes working without the bridge knowing any of them exist.
+// forwardMessagePV forwards an opaque management request and its reply.
 func (b *Bridge) forwardMessagePV(w http.ResponseWriter, r *http.Request) {
 	body, err := readLimited(r)
 	if err != nil {
@@ -108,7 +91,6 @@ func (b *Bridge) forwardMessagePV(w http.ResponseWriter, r *http.Request) {
 	reply, err := b.Device.PostMessagePV(string(body))
 	if err != nil {
 		b.Log.Warn("management request failed", "error", err)
-		// The device is upstream of us, so its failures are 502s.
 		http.Error(w, "device: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -118,11 +100,7 @@ func (b *Bridge) forwardMessagePV(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(reply))
 }
 
-// serveStatic serves a file of the embedded web client, or 404.
-//
-// "/" means index.html. Nothing is served that was not built in — there is no
-// directory behind this to grow a file in. A path that tries to climb out was
-// already refused by refuseTraversal above.
+// serveStatic serves an embedded client file ("/" is index.html), or 404.
 func (b *Bridge) serveStatic(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/")
 	if key == "" {
@@ -135,14 +113,11 @@ func (b *Bridge) serveStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The type is the original file's; the encoding is separate from it.
 	w.Header().Set("Content-Type", file.Type)
 	w.Header().Set("Cache-Control", "no-store")
 
 	body := file.Plain
 	if file.Gzip != nil && acceptsGzip(r.Header.Get("Accept-Encoding")) {
-		// Vary, or a cache in front would hand a gzip body to a client that
-		// never asked for one.
 		w.Header().Set("Content-Encoding", "gzip")
 		w.Header().Set("Vary", "Accept-Encoding")
 		body = file.Gzip
@@ -150,11 +125,7 @@ func (b *Bridge) serveStatic(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// maxBody caps a request body.
-//
-// Ordinary /message.pv calls are tiny, but a firmware upload is the whole image
-// base64-encoded inside the XML, so the ceiling has to clear that with room to
-// spare rather than sit at a "sensible" few hundred kilobytes.
+// maxBody caps a request body; large enough for a base64 firmware upload.
 const maxBody = 64 * 1024 * 1024
 
 func readLimited(r *http.Request) ([]byte, error) {

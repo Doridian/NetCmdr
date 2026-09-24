@@ -1,13 +1,10 @@
 #!/bin/sh
 # Build the browser client into crates/netcmdr-web/dist.
 #
-# netcmdr-bridge embeds whatever this produces, so building the client is the
-# first of three steps:
+# Step one of three (`nix build .#netcmdr-bridge` does all three):
 #   tools/build-web.sh
 #   tools/pack-web.sh
 #   go build ./bridge
-# and the resulting binary is the whole service — there is nothing to deploy
-# beside it. `nix build .#netcmdr-bridge` does all three.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -20,8 +17,7 @@ case "$profile" in
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 
-# wasm-bindgen must match the wasm-bindgen crate the build links against, or
-# the generated glue and the module disagree about their ABI.
+# wasm-bindgen must match the crate version.
 command -v wasm-bindgen >/dev/null 2>&1 || {
   echo "wasm-bindgen not found. Install the version matching Cargo.lock:" >&2
   echo "  cargo install wasm-bindgen-cli --version \
@@ -42,14 +38,11 @@ wasm-bindgen \
 
 cp "$root/crates/netcmdr-web/web/index.html" "$out/"
 
-# wasm-opt is optional: it roughly halves the module, but a build without it
-# still works, so a missing binaryen is a note rather than a failure.
+# wasm-opt is optional; it roughly halves the module.
 wasm="$out/netcmdr_web_bg.wasm"
 if [ "$profile" = release ] && command -v wasm-opt >/dev/null 2>&1; then
   before=$(wc -c < "$wasm")
-  # -Oz is size over speed, which is the right trade for a module the browser
-  # downloads once and then runs a video decoder in. The feature flags are the
-  # ones rustc emits by default; older binaryen refuses the module without them.
+  # Optimise for size. Older binaryen needs rustc's default features spelled out.
   wasm-opt -Oz \
     --enable-bulk-memory \
     --enable-nontrapping-float-to-int \
@@ -68,9 +61,7 @@ else
   fi
 fi
 
-# Nothing is compressed here. tools/pack-web.sh gzips what the bridge embeds, so
-# the files in this directory are the plain ones and a rebuild cannot leave a
-# stale .gz behind next to them.
+# tools/pack-web.sh does the gzipping.
 
 echo "wrote $out"
 ls -la "$out"

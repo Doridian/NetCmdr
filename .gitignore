@@ -7,25 +7,19 @@
 # Bytecode from the tools/ scripts.
 __pycache__/
 
-# The bridge built by hand rather than by the flake, under the name the README
-# builds it with and under the one `go build ./...` picks for it.
+# Hand-built bridge binaries.
 /bridge/netcmdr-bridge
 /bridge/bridge
 
 # The built web client; `tools/build-web.sh` regenerates it.
 /crates/netcmdr-web/dist/
 
-# The same client gzipped for netcmdr-bridge to embed; `tools/pack-web.sh`
-# regenerates it. .gitkeep stays, because go:embed needs the directory to
-# exist even in a tree nobody has packed.
+# Packed client (`tools/pack-web.sh`); go:embed needs .gitkeep.
 /bridge/web/dist/*
 !/bridge/web/dist/.gitkeep
 
-# Vendor material — firmware images, client JARs and native libraries,
-# decompiled or disassembled output, manuals, datasheets, device certificates.
-# All of it is copyrighted and none of it is redistributed from this repo; it
-# is only ever a local input to the write-up in research/notes/FINDINGS.md.
-# research/SOURCES.md says where to get it, research/README.md how to unpack it.
+# Copyrighted vendor material, never redistributed. See research/SOURCES.md
+# and research/README.md.
 /research/datasheets/
 /research/decompiled/
 /research/manuals/

@@ -30,8 +30,7 @@ except ImportError:
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "crates", "netcmdr-web", "fonts")
 
-# The epaint version these are cut from. Bumping egui means bumping this, and
-# the subsetting is worth re-running: upstream has changed faces before.
+# Keep in step with egui, and re-run on bumps.
 EPAINT_FONTS = "epaint_default_fonts-0.36.2"
 
 
@@ -58,8 +57,7 @@ def codepoints(*ranges) -> list:
     return out
 
 
-# What the viewer can put on screen: its own strings, anything the device sends
-# back as a name, and the few characters egui's own widgets draw.
+# Characters the viewer, device names and egui widgets may draw.
 TEXT = codepoints(
     (0x0020, 0x007E),  # printable ASCII
     (0x00A0, 0x00FF),  # Latin-1: device names, users and targets are not all ASCII
@@ -74,15 +72,11 @@ TEXT = codepoints(
     0x21E7, 0x2303, 0x2318, 0x2325,  # ⇧ ⌃ ⌘ ⌥, egui's keyboard-shortcut names
 )
 
-# egui draws combo-box arrows and checkmarks as shapes, not text. These four
-# triangles and the warning sign are the only glyphs its widgets really need:
-# SubMenuButton::RIGHT_ARROW is "⏵", and the viewer has nested menus.
+# The icon glyphs egui's widgets draw as text (e.g. SubMenuButton's "⏵").
 ICONS = codepoints((0x23F4, 0x23F7), 0x26A0)
 
-# A subset is a modified font, and the Ubuntu Font Licence §2(c) requires one
-# to keep the original name and add something that tells it apart. This is that
-# something; the other two faces carry it as well, so that no copy here claims
-# to be the face it was cut from.
+# The Ubuntu Font Licence §2(c) requires a modified font to be distinguished
+# by name; applied to all three.
 DERIVATIVE = "derivative NetCmdr"
 
 # (upstream file, output file, wanted codepoints, licence to carry alongside)
@@ -138,8 +132,7 @@ def main() -> None:
             src_path,
             "--output-file=" + out_path,
             "--unicodes=" + ",".join(f"{c:04X}" for c in keep),
-            # The viewer draws plain unshaped runs, so the layout tables are
-            # dead weight; epaint does not read them either.
+            # epaint doesn't use layout tables.
             "--layout-features=",
             "--no-hinting",
             "--desubroutinize",
@@ -148,7 +141,6 @@ def main() -> None:
 
         family = rename(out_path)
 
-        # The licence has to ride along with the glyphs it covers.
         with open(os.path.join(src, licence), "rb") as fh:
             blob = fh.read()
         with open(os.path.join(OUT, licence), "wb") as fh:

@@ -3,9 +3,8 @@
 //! KVM session client for Tripp Lite NetCommander / Minicom Smart IP switches:
 //! live video, keyboard and mouse.
 //!
-//! Everything here is transcribed from the current firmware's own Java client
-//! (firmware 2.2.1258.1.0, pulled live from a B070-008-19-IP). See
-//! `research/notes/FINDINGS.md` §5.4 for the protocol write-up.
+//! Transcribed from the firmware's Java client (2.2.1258.1.0, from a
+//! B070-008-19-IP). Protocol notes: `research/notes/FINDINGS.md` §5.4.
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -70,7 +69,6 @@ pub enum Error {
     #[error("OpenSSL error: {0}")]
     OpenSsl(#[from] openssl::error::ErrorStack),
 
-    /// The device did not echo the socket-type code back during the handshake.
     #[error("handshake failed: sent socket type {expected}, device echoed {got}")]
     Handshake { expected: i32, got: i32 },
 
@@ -95,7 +93,6 @@ pub enum Error {
     #[error("bad video field: {0}")]
     BadVideoField(&'static str),
 
-    /// A pixel format the vendor's own client does not decode either.
     #[error("unsupported pixel format {0}")]
     UnsupportedFormat(i16),
 

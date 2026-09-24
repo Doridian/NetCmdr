@@ -1,14 +1,9 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Operations on the device rather than on one of its settings: locking users
-//! out, backups, factory reset, certificates and firmware.
+//! Device operations: locking, backups, factory reset, certificates, firmware.
 //!
-//! The destructive ones take `--confirm`, because there is no undo on the
-//! device and several of them drop every session in progress.
-//!
-//! The firmware-upgrade commands are **written from the vendor client's own
-//! request format and have not been run against hardware**; everything else
-//! here follows the same `CMA_ACTION` path as `reboot` and `power`, which have.
+//! Destructive commands require `--confirm`. The firmware upgrades are
+//! **untested on hardware**.
 
 use std::path::{Path, PathBuf};
 
@@ -17,15 +12,8 @@ use clap::Args;
 
 use netcmdr_mgmt::{Client, ConfigDoc};
 
-/// What both firmware commands refuse with.
-///
-/// These two are the only commands in the tool that have never been run against
-/// hardware — the request format is transcribed from the vendor client and
-/// nothing has confirmed the device accepts it. A firmware write that goes
-/// wrong is not recoverable over the network, so the gate is named for the
-/// outcome rather than for the ceremony, and `--confirm` deliberately does not
-/// work here: reaching for the flag that works everywhere else should not be
-/// enough to start one.
+/// Refusal for the untested firmware commands. A failed flash can't be
+/// recovered remotely, so they need a scarier flag than `--confirm`.
 const BRICK_WARNING: &str = "\
 this writes firmware, and it has never been run against hardware. The request \
 format is transcribed from the vendor's client and nothing has confirmed the \
@@ -34,17 +22,14 @@ wrong, or is interrupted, leaves hardware that does not come back and cannot \
 be recovered over the network. If you can reflash it out of band and you want \
 to find out, pass --please-brick-my-device.";
 
-/// Read a file as text, with the path in the error.
 fn read(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
-/// Write a file, with the path in the error.
 fn write(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Refuse to clobber a file the user did not mean to name.
 fn refuse_to_overwrite(path: &Path, force: bool) -> Result<()> {
     if path.exists() && !force {
         bail!(
@@ -62,7 +47,6 @@ pub fn export(client: &Client, path: Option<&PathBuf>, force: bool) -> Result<()
     match path {
         Some(p) => {
             refuse_to_overwrite(p, force)?;
-            // A trailing newline, so the file behaves in a text editor.
             write(p, &format!("{}\n", doc.to_xml()))?;
             eprintln!("configuration written to {}", p.display());
         }
@@ -116,8 +100,7 @@ pub struct RestoreArgs {
     /// A file written by `netcmdr backup`.
     pub file: PathBuf,
 
-    /// Keep this device's own network settings instead of the ones in the
-    /// backup, so a backup from another unit can be restored over the network.
+    /// Keep this device's network settings instead of the backup's.
     #[arg(long)]
     pub keep_network: bool,
 
@@ -205,7 +188,7 @@ pub fn disconnect(client: &Client, port: u32) -> Result<()> {
     Ok(())
 }
 
-/// Release a configuration lock a crashed run left behind.
+/// Release a stale configuration lock.
 pub fn release_lock(client: &Client) -> Result<()> {
     client
         .permission(netcmdr_mgmt::Permission::Normal)
@@ -268,11 +251,7 @@ pub struct UpgradeArgs {
     /// The firmware file from the vendor.
     pub file: PathBuf,
 
-    /// Required, and named for what it may do.
-    ///
-    /// This path has never been run against hardware: it is built from the
-    /// vendor client's request format alone. If the format is wrong, or power
-    /// or the network goes part-way through, the device does not come back.
+    /// Required. Untested on hardware; a failed flash bricks the device.
     #[arg(long)]
     pub please_brick_my_device: bool,
 }
@@ -307,11 +286,7 @@ pub struct SiuUpgradeArgs {
     #[arg(long, value_name = "PORTS", default_value = "all")]
     pub ports: String,
 
-    /// Required, and named for what it may do.
-    ///
-    /// This path has never been run against hardware: it is built from the
-    /// vendor client's request format alone. A SIU interrupted mid-write stops
-    /// answering, and it is not recoverable over the Cat5 link.
+    /// Required. Untested on hardware; a failed flash bricks the SIU.
     #[arg(long)]
     pub please_brick_my_device: bool,
 }
@@ -358,9 +333,7 @@ pub fn siu_versions(client: &Client, spec: &str, port_count: u32) -> Result<()> 
         bail!("no ports selected");
     }
 
-    // One round trip per port — the device answers for only one at a time — and
-    // each takes a second or two, so print rows as they arrive rather than
-    // going quiet for the length of a sweep.
+    // One slow round trip per port, so print as we go.
     println!("{:>4}  {:<32} FIRMWARE", "PORT", "HARDWARE");
     let mut answered = 0;
     for port in &ports {

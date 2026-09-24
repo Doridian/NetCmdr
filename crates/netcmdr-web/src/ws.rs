@@ -1,20 +1,10 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! A session channel over a browser WebSocket.
+//! A session channel over a browser WebSocket. The bridge has done the
+//! handshake and TLS, so this carries the plain stream.
 //!
-//! `netcmdr-bridge` has already done the device's handshake and, where the socket
-//! type calls for it, its TLS — so what arrives here is the plain protocol
-//! stream, and this is only the adapter that lets [`netcmdr_session::Channel`]
-//! read it.
-//!
-//! # Turning an event into a stream
-//!
-//! A browser WebSocket pushes: it calls `onmessage` when it feels like it. The
-//! framing above wants to pull, with `read`. The join between them is a queue —
-//! `onmessage` appends, [`WsTransport::read`] drains, and an empty queue is
-//! reported as `WouldBlock`, which is exactly the "not yet" the framing already
-//! understands. Nothing blocks, which is just as well, because on the browser's
-//! main thread nothing may.
+//! `onmessage` fills a queue that [`WsTransport::read`] drains; empty means
+//! `WouldBlock`.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -26,30 +16,24 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{CloseEvent, MessageEvent, WebSocket};
 
-/// What the socket's callbacks write into, and `read` takes out of.
 #[derive(Default)]
 struct Inbox {
     bytes: VecDeque<u8>,
-    /// Set once the socket has closed; an empty queue then means end of stream
-    /// rather than "not yet".
+    /// Once closed, an empty queue means EOF.
     closed: bool,
 }
 
-/// One session channel, carried by a WebSocket to the bridge.
 pub struct WsTransport {
     socket: WebSocket,
     inbox: Rc<RefCell<Inbox>>,
-    /// Kept alive for as long as the socket is: dropping a `Closure` detaches
-    /// the JavaScript callback it stands behind.
+    /// Dropping a `Closure` detaches its callback.
     _on_message: Closure<dyn FnMut(MessageEvent)>,
     _on_close: Closure<dyn FnMut(CloseEvent)>,
 }
 
 impl WsTransport {
-    /// Attach to an open socket.
-    ///
-    /// The socket must already be open and must already have been given the
-    /// session id; see [`crate::connect`], which does both.
+    /// Attach to a socket that is open and has the session id
+    /// ([`crate::connect`]).
     pub fn attach(socket: WebSocket) -> WsTransport {
         socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
         let inbox = Rc::new(RefCell::new(Inbox::default()));
@@ -57,7 +41,7 @@ impl WsTransport {
         let queue = inbox.clone();
         let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
             let Ok(buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() else {
-                // The bridge only ever sends binary; anything else is not ours.
+                // The bridge only sends binary.
                 return;
             };
             let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
@@ -85,8 +69,6 @@ impl Read for WsTransport {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         let mut inbox = self.inbox.borrow_mut();
         if inbox.bytes.is_empty() {
-            // A closed socket with nothing left really is the end; an open one
-            // simply has not been given anything yet.
             return if inbox.closed {
                 Ok(0)
             } else {
@@ -103,8 +85,7 @@ impl Read for WsTransport {
 
 impl Write for WsTransport {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        // The browser buffers for us, so a send either takes everything or the
-        // socket is gone.
+        // The browser buffers; a send takes everything or fails.
         match self.socket.send_with_u8_array(data) {
             Ok(()) => Ok(data.len()),
             Err(e) => Err(io::Error::other(describe(&e))),

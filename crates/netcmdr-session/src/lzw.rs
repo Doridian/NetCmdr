@@ -2,27 +2,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The video stream's LZW expander.
 //!
-//! Transcribed from the current firmware's own client
+//! Transcribed from the firmware's client
 //! (`com.minicom.plugin.LZW.decoder.{CLZWExpander,BufData,LZW_dictionary,
 //! LZW_params,LZWStack}`).
 //!
-//! Two things make this variant unusual:
+//! Unusual in two ways:
 //!
-//! * **Symbols are 32-bit**, not bytes — the codec compresses whole 32-bit
-//!   pixels. A "character" is one `i32`; the dictionary maps codes to
-//!   (prefix, appended pixel) pairs exactly as textbook LZW does for bytes.
-//! * **The code width grows in place**, from 16 up to 20 bits and finally a
-//!   32-bit escape mode, driven by in-band control words. Each width is read
-//!   from a little-endian bit stream laid over the 32-bit input words.
+//! * **Symbols are 32-bit pixels**, not bytes.
+//! * **Code width grows** from 16 to 20 bits, then a 32-bit escape mode,
+//!   driven by in-band control words, read LSB-first over 32-bit words.
 //!
-//! The Java reads each width with a hand-written 32-case switch per width
-//! (`BufData.GetNext17Bits` and friends). Those tables are all equivalent to one
-//! LSB-first bit reader over the word array, which is what [`BitReader`] is; the
-//! tests pin a few of the transcribed cases against it.
+//! The Java's hand-written per-width switches (`BufData.GetNext17Bits` etc.)
+//! reduce to one LSB-first [`BitReader`]; tests pin some cases against it.
 //!
-//! The decoder is stateful across messages: a delta frame continues the
-//! dictionary built by the preceding key frame, so one [`Expander`] lives for
-//! the whole session and is only [`Expander::reset`] on a stream restart.
+//! State persists across messages (delta frames extend the key frame's
+//! dictionary), so one [`Expander`] lives per session, [`Expander::reset`] on
+//! stream restart.
 
 use crate::Error;
 
@@ -140,11 +135,8 @@ impl Stack {
     }
 }
 
-/// An LSB-first bit reader over the 32-bit input words (`BufData`).
-///
-/// `bit_pos` replaces the Java pair (`pbufmem`, `mode_cnt`): those two always
-/// agree with a single running bit offset, because every code width divides the
-/// 32-bit word grid over one switch cycle.
+/// LSB-first bit reader over 32-bit words (`BufData`). `bit_pos` replaces the
+/// Java's (`pbufmem`, `mode_cnt`) pair.
 struct BitReader<'a> {
     words: &'a [u32],
     bit_pos: usize,
@@ -165,8 +157,7 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// `BufData.SetOpMode`: mode 0 rewinds to the start of the buffer, any other
-    /// mode skips to the next word boundary if we are mid-word.
+    /// `BufData.SetOpMode`: mode 0 rewinds; others align to the next word.
     fn set_opmode(&mut self, mode: i32) {
         if mode == opmode::BITS16 {
             self.bit_pos = 0;
@@ -203,11 +194,8 @@ impl<'a> BitReader<'a> {
         Ok(out)
     }
 
-    /// `BufData.getNewBufData`: read one symbol at the current code width.
-    ///
-    /// At every width below 32 the escape value (all ones) introduces a control
-    /// word, a value with bit 15 set is a dictionary code, and anything else is
-    /// a literal whose upper half follows in a second read.
+    /// `BufData.getNewBufData`. Below 32 bits: all-ones escapes a control word,
+    /// bit 15 set is a code, else a literal whose high half follows.
     fn next_symbol(&mut self) -> Result<Symbol, Error> {
         let width: u32 = match self.opmode {
             opmode::BITS16 => 16,
@@ -255,9 +243,8 @@ impl<'a> BitReader<'a> {
                 is_code: true,
             };
         } else {
-            // A literal pixel: low 16 bits here, high 16 bits in the next read.
-            // The Java shifts a possibly-20-bit value left by 16 in an int, so
-            // the surplus high bits simply fall off the top.
+            // Literal: low 16 bits here, high 16 next. Bits shifted past 32
+            // are dropped, as in the Java.
             let hi = self.bits(width)?;
             self.ctrl_flag = false;
             self.data_val = Symbol {
@@ -319,8 +306,7 @@ impl Expander {
         }
     }
 
-    /// Drop the dictionary and all stream state, as the client does whenever a
-    /// key frame starts a new LZW stream.
+    /// Reset all state, for a new LZW stream.
     pub fn reset(&mut self) {
         self.dict.clear();
         self.params = Params::default();
@@ -351,8 +337,7 @@ impl Expander {
     /// `LZW_decode`. `freeze` suppresses the dictionary insert.
     fn decode(&mut self, freeze: bool) -> Result<(), Error> {
         if self.params.new_code.is_code && self.params.new_code.value == self.params.next_code {
-            // The classic KwKwK case: the code is the one we are about to
-            // define, so it expands to the previous match plus its first pixel.
+            // KwKwK: the code being defined is previous match + its first pixel.
             self.stack.push(self.params.character)?;
             let old = self.params.old_code;
             self.params.character = self.translate(old)?;
@@ -377,14 +362,9 @@ impl Expander {
         Ok(())
     }
 
-    /// Expand one message's worth of compressed data.
-    ///
-    /// `input[..len]` is read as big-endian 32-bit words (that is how
-    /// `CLZWExpander.LZW_expand(byte[], int, byte[])` packs them), and the
-    /// decoded pixels are written to `out` as little-endian 32-bit words. The
-    /// net byte swap is why the YCbCr stage skips its own swap on LZW frames.
-    ///
-    /// Returns the number of bytes written to `out`.
+    /// Expand one message. Reads `input[..len]` as big-endian words and writes
+    /// little-endian pixels to `out` (hence YCbCr skips its swap for LZW).
+    /// Returns bytes written.
     pub fn expand(&mut self, input: &[u8], len: usize, out: &mut [u8]) -> Result<usize, Error> {
         let len = len.min(input.len());
         if len == 0 {
@@ -415,8 +395,7 @@ impl Expander {
         buf.set_opmode(self.params.decoding_type);
         self.out.clear();
 
-        // `flush_mode`: after CW_FLUSH the stream carries raw 32-bit pixels
-        // with no dictionary coding until CW_COMPLETE.
+        // After CW_FLUSH: raw 32-bit pixels until CW_COMPLETE.
         let mut flush_mode = false;
         let mut in_ctrl = false;
 
@@ -498,8 +477,7 @@ impl Expander {
 mod tests {
     use super::*;
 
-    /// The Java reads each width with a switch whose cases were written out by
-    /// hand; these are those cases, checked against the generic bit reader.
+    /// The Java's hand-written switch cases, checked against the bit reader.
     #[test]
     fn bit_reader_matches_transcribed_switch_cases() {
         let words = [0x1234_5678u32, 0x9ABC_DEF0, 0x0F1E_2D3C, 0xC3B2_A190];
@@ -568,10 +546,8 @@ mod tests {
         assert_eq!(r.bit_pos, 32);
     }
 
-    /// Build a 16-bit-mode stream by hand and expand it.
-    ///
-    /// Literals are emitted as two 16-bit halves, control words as 0xFFFF plus
-    /// the word, matching `getNewBufData` in reverse.
+    /// Hand-built 16-bit-mode stream: literals as two halves, control words as
+    /// 0xFFFF plus the word.
     struct Writer {
         bits: Vec<bool>,
     }
@@ -641,8 +617,7 @@ mod tests {
         );
     }
 
-    /// The first dictionary code (32768) is defined by the first two symbols,
-    /// so referencing it afterwards must replay that pair's tail.
+    /// Code 32768 is defined by the first two symbols.
     #[test]
     fn expands_a_dictionary_code() {
         let mut w = Writer::new();
@@ -721,8 +696,7 @@ mod tests {
         ));
     }
 
-    /// A delta frame continues the dictionary the previous frame built, so a
-    /// reset must be observable: the same code means different things.
+    /// The same code must mean different things before and after a reset.
     #[test]
     fn dictionary_persists_until_reset() {
         let mut exp = Expander::new(DEF_LZW_CORDER);
@@ -744,9 +718,7 @@ mod tests {
         let n = exp.expand(&second, second.len(), &mut out).unwrap();
         assert_eq!(&out[..n], &[1, 0, 0, 0, 2, 0, 0, 0]);
 
-        // After a reset the dictionary is empty, so 32768 is now the
-        // yet-to-be-defined code and expands from the zeroed stream state
-        // instead of replaying (1, 2).
+        // After reset, 32768 is undefined (KwKwK from zeroed state), not (1, 2).
         exp.reset();
         let n = exp.expand(&second, second.len(), &mut out).unwrap();
         assert_eq!(&out[..n], &[0u8; 8]);

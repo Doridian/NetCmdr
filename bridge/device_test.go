@@ -94,10 +94,7 @@ func selfSigned(t *testing.T) tls.Certificate {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
-// deviceLikeTLS is a server offering what the device offers a Go client: TLS
-// 1.2 and static RSA only. The device also offers DHE, and prefers it, but Go
-// has no DHE implementation to meet it with — so this is the overlap, and the
-// whole of what deviceTLS has to negotiate against.
+// deviceLikeTLS offers what the device offers Go: TLS 1.2, static RSA.
 func deviceLikeTLS(t *testing.T) *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{selfSigned(t)},
@@ -107,9 +104,7 @@ func deviceLikeTLS(t *testing.T) *tls.Config {
 	}
 }
 
-// The management transport has to complete a handshake against that profile and
-// come back with the device's answer. This is the check that would fail first
-// if Go ever dropped RSA key exchange outright.
+// Would fail first if Go dropped RSA key exchange.
 func TestPostMessagePVAgainstADeviceLikeServer(t *testing.T) {
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", deviceLikeTLS(t))
 	if err != nil {
@@ -141,9 +136,7 @@ func TestPostMessagePVAgainstADeviceLikeServer(t *testing.T) {
 	}
 }
 
-// fakeDevice stands in for a session port: it completes the handshake exactly
-// as the device does — session id, '#', the socket-type code, and the code
-// echoed back — and then runs script.
+// fakeDevice does the session handshake like the device, then runs script.
 func fakeDevice(t *testing.T, want SocketType, serverTLS *tls.Config, script func(net.Conn, *bufio.Reader)) uint16 {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -181,8 +174,7 @@ func fakeDevice(t *testing.T, want SocketType, serverTLS *tls.Config, script fun
 		}
 
 		if serverTLS != nil {
-			// Anything the client pipelined behind the handshake belongs to
-			// the TLS stream.
+			// Pipelined bytes belong to the TLS stream.
 			server := tls.Server(bufferedConn{Conn: conn, Reader: br}, serverTLS)
 			if err := server.Handshake(); err != nil {
 				return

@@ -2,17 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `netcmdr` — command-line management for Tripp Lite NetCommander IP KVM switches.
 //!
-//! Talks to the device's `/message.pv` management API over HTTPS. It does not
-//! open a KVM video session; that is a separate protocol (see `netcmdr-proto`).
+//! Uses the `/message.pv` API over HTTPS; no KVM session.
 //!
-//! Settings are grouped by area, and every area answers to `show` and `set`:
-//! `netcmdr network show`, `netcmdr ldap set --search-base …`. `netcmdr config` prints
-//! every area at once.
-//!
-//! Each `set` is a read-modify-write of the device's whole configuration,
-//! because that is the only write the device has (see [`netcmdr_mgmt::config`]).
-//! One command is therefore one round trip and one save; to make several
-//! changes atomically, use `export`, edit the file, and `import` it.
+//! Each area has `show` and `set`; `netcmdr config` shows all. Each `set` is a
+//! full-config read-modify-write (see [`netcmdr_mgmt::config`]); for several
+//! changes at once, `export`, edit, and `import`.
 
 mod admin;
 mod args;
@@ -24,7 +18,6 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use netcmdr_mgmt::{Client, PowerCommand};
 
-/// Help heading for the options that apply to every command.
 const CONNECTION: &str = "Connection";
 
 #[derive(Parser)]
@@ -33,10 +26,8 @@ const CONNECTION: &str = "Connection";
     about = "Manage a Tripp Lite NetCommander / Minicom Smart IP KVM switch",
     version
 )]
-// The connection options are global so they can follow the subcommand
-// (`netcmdr ldap show --host …`). Each carries the heading itself, because a
-// global argument keeps its own heading when clap copies it into every
-// subcommand's help, and a heading set on the command would not travel with it.
+// Global so they can follow the subcommand. Each sets its own heading, since a
+// command-level heading doesn't propagate to subcommands.
 struct Cli {
     /// Device hostname or IP address.
     #[arg(long, short = 'H', env = "NETCMDR_HOST", global = true, help_heading = CONNECTION)]
@@ -195,9 +186,8 @@ enum Command {
         /// Required. This replaces every setting at once.
         #[arg(long)]
         confirm: bool,
-        /// Also set the device clock to the `<system_time>` in the file.
-        /// Without this the clock is left alone, because an exported document
-        /// carries the time it was exported at.
+        /// Also set the clock from the file's `<system_time>` (exports carry
+        /// a stale time).
         #[arg(long)]
         set_clock: bool,
     },
@@ -233,7 +223,6 @@ enum Command {
     },
 }
 
-/// The shape every settings area has: look at it, or change it.
 #[derive(Subcommand)]
 enum SetOrShow<T: clap::Args> {
     /// Print the current settings.
@@ -409,7 +398,6 @@ fn main() -> Result<()> {
 fn run(client: &Client, cli: &Cli) -> Result<()> {
     let secrets = cli.show_secrets;
 
-    // Most commands need the configuration; fetch it once, where needed.
     macro_rules! config {
         () => {
             client.config().context("fetching the configuration")?
@@ -542,7 +530,7 @@ fn run(client: &Client, cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// How many KVM ports this device has, for validating a port argument.
+/// KVM port count, for validation.
 fn port_count(client: &Client) -> Result<u32> {
     Ok(client
         .config()
@@ -588,10 +576,8 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
-    /// clap merges two arguments that share an id, which silently routes a
-    /// subcommand's positional into a global option — `netcmdr ldap server add
-    /// HOST` once landed in `--host` and made the tool connect to the LDAP
-    /// server. `debug_assert` catches every such collision.
+    /// clap silently merges arguments sharing an id (`ldap server add HOST`
+    /// once landed in `--host`); `debug_assert` catches that.
     #[test]
     fn command_tree_is_well_formed() {
         Cli::command().debug_assert();

@@ -17,10 +17,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::net;
 use crate::ws::WsTransport;
 
-/// The session, driven from the frame callback.
-///
-/// Natively a thread calls `pump`; here the browser's redraw does, which is the
-/// whole reason the session became a state machine.
+/// The session, pumped from the frame callback.
 pub struct WebSession {
     core: SessionCore<WsTransport>,
     next_beat: Instant,
@@ -34,7 +31,7 @@ impl WebSession {
         }
     }
 
-    /// Move the session on. Call once per frame, before draining events.
+    /// Call once per frame, before draining events.
     pub fn pump(&mut self) {
         self.core.pump();
         if Instant::now() >= self.next_beat {
@@ -98,11 +95,7 @@ impl SessionLink for WebSession {
     }
 }
 
-/// The management API over the bridge's HTTP.
-///
-/// Each request is a `fetch` that finishes whenever it finishes; the answer is
-/// pushed onto a queue the viewer drains on a later frame, which is the same
-/// arrangement the native client gets from its worker thread.
+/// The management API via `fetch` to the bridge; answers are queued.
 pub struct WebMgmt {
     session_id: String,
     replies: Rc<RefCell<VecDeque<MgmtReply>>>,
@@ -118,7 +111,6 @@ impl WebMgmt {
         }
     }
 
-    /// Run `body` against the device and queue whatever it makes of the answer.
     fn request(&mut self, body: String, interpret: fn(Result<String, String>) -> MgmtReply) {
         self.pending.set(self.pending.get() + 1);
         let replies = self.replies.clone();
@@ -150,7 +142,6 @@ impl MgmtLink for WebMgmt {
             PowerCommand::Up => "power on",
             PowerCommand::Down => "power off",
         };
-        // The closure has to be a plain fn, so the wording is finished here.
         let note = format!("{verb} sent to port {port}");
         let failed = format!("{verb} on port {port}");
         self.pending.set(self.pending.get() + 1);

@@ -1,18 +1,9 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The viewer: the menu bar, the remote screen, and the input routing between
-//! them.
+//! The viewer: menu bar, remote screen and input routing.
 //!
-//! Two things share one window, and the interesting part is deciding which gets
-//! an event. Everything is handed to egui first; whatever egui does not want
-//! goes to the target. That single rule keeps the menu usable without the
-//! target seeing stray clicks, and keeps typing going to the target without the
-//! menu swallowing it — the device wants **absolute coordinates in remote
-//! screen pixels**, so pointer positions are mapped back through the rectangle
-//! the image was actually drawn in.
-//!
-//! Nothing here knows whether it is in a window or a browser tab. What differs
-//! between the two is behind [`crate::platform`].
+//! Events go to egui first; the rest go to the target. Pointer positions are
+//! mapped to **absolute remote pixels** through the drawn image rect.
 
 use netcmdr_session::align::{self, Aligner, Step as AlignStep};
 use netcmdr_session::time::{Duration, Instant};
@@ -24,16 +15,11 @@ use crate::menu::{Action, Menu, Scaling, Work, NOTE_LINGER, WORKING_LINGER};
 use crate::platform::{Host, MgmtLink, MgmtReply, SessionLink};
 use crate::screen::Screen;
 
-/// How long to keep the screen blank waiting for a target switch to land.
-///
-/// The device takes its time: measured against the hardware, a port change
-/// answered after 4.5 s when the new target was driving video and 9.6 s when it
-/// was not. This is only a backstop so a switch that never completes cannot
-/// leave the window blank forever.
+/// Backstop for a target switch that never confirms. Measured switches took
+/// 4.5 s (with video) and 9.6 s (without).
 const SWITCH_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// Modifiers that must be released when the window loses focus, or the target
-/// is left believing one is still held.
+/// Released on focus loss so none stays stuck.
 const STICKY_MODIFIERS: [PhysicalKey; 8] = [
     PhysicalKey::ControlLeft,
     PhysicalKey::ControlRight,
@@ -45,26 +31,22 @@ const STICKY_MODIFIERS: [PhysicalKey; 8] = [
     PhysicalKey::MetaRight,
 ];
 
-/// A target change that has been asked for but not yet confirmed.
-///
-/// After `change_port` the device goes on sending the **old** target's video
-/// for several seconds before it re-syncs — so the picture on screen is a
-/// different machine from the one the title bar now names. Rather than show
-/// that, the screen is blanked until one of the device's own signals says the
-/// switch has landed.
+/// An unconfirmed target change. The device keeps sending the old target's
+/// video for seconds, so the screen stays blank until the switch lands.
 struct Switch {
     port: u32,
     name: String,
     since: Instant,
 }
 
-/// Why there is no picture to draw.
 enum Waiting {
-    /// A fresh session that has not decoded a frame yet.
+    /// No frame decoded yet.
     FirstFrame,
-    /// A target switch is in flight.
-    Switching { name: String, port: u32 },
-    /// The device says the target is not driving its video output.
+    Switching {
+        name: String,
+        port: u32,
+    },
+    /// No video signal.
     NoSignal,
 }
 
@@ -87,13 +69,12 @@ impl Waiting {
         }
     }
 
-    /// Whether to show a spinner: only while something is actually expected.
+    /// Whether something is expected.
     fn busy(&self) -> bool {
         !matches!(self, Waiting::NoSignal)
     }
 }
 
-/// What the viewer needs besides the session itself.
 pub struct Config {
     pub host: String,
     pub user: String,
@@ -107,47 +88,31 @@ pub struct Viewer<S: SessionLink, M: MgmtLink> {
     menu: Menu,
     screen: Screen,
 
-    /// Remote resolution, once the first frame has arrived.
     remote: Option<(u16, u16)>,
-    /// Where the image was drawn last frame, in egui points.
     video_rect: egui::Rect,
     pointer_over_video: bool,
 
-    /// A capture alignment in progress. See [`netcmdr_session::align`].
+    /// See [`netcmdr_session::align`].
     align: Option<Aligner>,
-    /// What the last alignment corrected, while that correction is still live.
-    ///
-    /// Corrections do not survive the device re-deriving its own capture
-    /// settings, and nothing announces that they have gone — so this is what
-    /// lets the bar say so when it happens.
+    /// The last alignment's live correction, so we can report when the
+    /// device silently discards it.
     aligned: Option<String>,
-    /// Config documents still expected as answers to this client's own stored
-    /// writes.
-    ///
-    /// The device publishes one after every write it keeps, and publishing one
-    /// is otherwise how it announces that it has re-derived the capture for
-    /// itself — which is the thing that throws a session's corrections away.
-    /// Counting our own keeps the one from being read as the other.
+    /// Config documents expected in reply to our own stored writes, so they
+    /// aren't mistaken for the device re-deriving its capture.
     own_config: u32,
 
-    /// A target change asked for but not yet confirmed by the device.
     switching: Option<Switch>,
-    /// The device last told us the target is not driving video.
     no_signal: bool,
 
     modifiers: Modifiers,
-    /// Repaint wanted: either new video or the UI asked for one.
     dirty: bool,
-    /// Set once the remote resolution has sized the window, so a later
-    /// resolution change does not fight a window the user has resized.
+    /// The window is only auto-sized once.
     sized_once: bool,
-    /// The menu asked to leave; acted on once the current frame is finished.
+    /// Quit after this frame.
     quitting: bool,
-    /// What the last frame's menu asked for, acted on after the pass.
     actions: Vec<Action>,
-    /// Why the session ended, once it has.
     end_reason: Option<String>,
-    /// Cached from the last frame so input routing needs no egui context.
+    /// Cached from the last frame.
     ui_wants_keyboard: bool,
     pixels_per_point: f32,
 }
@@ -190,60 +155,47 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         }
     }
 
-    /// Say what just happened, in the bar. The line goes away on its own.
+    /// A transient status note.
     fn note(&mut self, text: impl Into<String>) {
         self.menu.note(text, NOTE_LINGER);
         self.dirty = true;
     }
 
-    /// Say what the device is doing, for work we start and cannot see finish.
-    ///
-    /// Progress from the device renews the line, so an adjustment that keeps
-    /// reporting keeps its note; one that goes quiet loses it a few seconds
-    /// later rather than leaving the bar stuck on it.
+    /// A note for work with no completion signal; device progress renews it.
     fn working(&mut self, text: impl Into<String>) {
         self.menu.note(text, WORKING_LINGER);
         self.dirty = true;
     }
 
-    /// The same, for work whose end we *can* recognise: the line comes down
-    /// when [`Menu::work_done`] is told that answer arrived, and the linger is
-    /// only the backstop for an answer that never comes.
+    /// A note cleared by [`Menu::work_done`].
     fn working_on(&mut self, text: impl Into<String>, work: Work) {
         self.menu.note_work(text, WORKING_LINGER, work);
         self.dirty = true;
     }
 
-    /// Progress in the device's own words, about work already announced.
-    ///
-    /// Unlike [`Viewer::working`] this keeps whatever the line was waiting on,
-    /// so a report mid-adjustment does not cost the adjustment its ending.
+    /// Device progress text, keeping the note's [`Work`].
     fn progress(&mut self, text: impl Into<String>) {
         self.menu.renew_note(text, WORKING_LINGER);
         self.dirty = true;
     }
 
-    /// Report a command that failed, without taking the session down with it.
+    /// Report a failed command.
     fn failed(&mut self, what: &str, e: impl std::fmt::Display) {
         tracing::warn!(error = %e, "{what} failed");
         self.note(format!("{what} failed: {e}"));
     }
 
-    /// Why the session ended, if it has. The device gives a reason for most of
-    /// the ways a session can stop, and it is the only explanation a user gets.
+    /// Why the session ended, if it has.
     pub fn end_reason(&self) -> Option<&str> {
         self.end_reason.as_deref()
     }
 
-    /// The session underneath.
-    ///
-    /// The web client drives its own session state machine and needs to pump
-    /// it once a frame; natively a thread does that and this goes unused.
+    /// For the web client to pump each frame.
     pub fn session_mut(&mut self) -> &mut S {
         &mut self.session
     }
 
-    /// What the window should be called.
+    /// Window title.
     pub fn title(&self) -> String {
         format!(
             "{} — {}@{} — port {} ({})",
@@ -296,9 +248,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                 Err(e) => self.failed("stop adjusting", e),
             },
             Action::AlignCapture => self.start_align(),
-            // The control that sent this is on screen showing the value, and
-            // the picture answers for itself, so a note would only read the
-            // knob back. Say something only when the device refuses.
+            // Only report failures; the control shows the value.
             Action::SetVideoNumber(setting, value) => {
                 if let Err(e) = self.session.set_video_number(setting, value) {
                     self.failed(setting.as_str(), e);
@@ -311,17 +261,13 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                 };
                 self.expect_own_config();
                 match self.session.store_video_settings(&video, &changes) {
-                    // The device answers a stored write with a fresh config and
-                    // an overlay with silence, so there is nothing to say yet:
-                    // `on_config` is where this is either confirmed or not.
+                    // Confirmed (or not) in `on_config`.
                     Ok(()) => self.working_on("saving to the device…", Work::VideoAdjust),
                     Err(e) => self.failed("save", e),
                 }
             }
             Action::SetVideoFilter(filter) => match self.session.set_video_filter(filter) {
-                // Picking `auto` runs the adjustment rather than setting
-                // anything: that is work with no visible start, so it is worth
-                // a line where an ordinary filter change is not.
+                // `auto` runs auto-adjust, which deserves a note.
                 Ok(()) if filter == netcmdr_proto::command::VideoFilter::Auto => {
                     self.working_on("adjusting video…", Work::VideoAdjust)
                 }
@@ -349,11 +295,8 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                     self.menu.current_port = port;
                     self.menu.current_name = name.clone();
                     host.set_title(&self.title());
-                    // The old target's tiles keep arriving for seconds after
-                    // this, and the title bar already names the new one. Throw
-                    // the picture away and stop uploading until the device
-                    // confirms, so what is on screen is never the wrong
-                    // machine.
+                    // Blank until confirmed; the old target's tiles keep
+                    // arriving for seconds.
                     self.screen.blank();
                     self.no_signal = false;
                     self.menu.switching = true;
@@ -362,10 +305,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                         name: name.clone(),
                         since: Instant::now(),
                     });
-                    // Frames from the old target go on arriving for seconds
-                    // after this, and two targets can share a resolution — so
-                    // a run left going would measure one machine's picture and
-                    // set the offsets for another's mode.
+                    // Abort alignment: it would measure the wrong target.
                     if let Some(aligner) = &mut self.align {
                         aligner.abort("the target changed");
                     }
@@ -390,9 +330,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                 Err(e) => self.failed("exclusivity", e),
             },
             Action::Disconnect => {
-                // Tell the device rather than just dropping the sockets, so it
-                // frees the target now instead of on its own timeout. The
-                // session tears itself down either way.
+                // Tell the device so it frees the target immediately.
                 if let Err(e) = self.session.send_xml(&netcmdr_proto::command::disconnect()) {
                     tracing::debug!(error = %e, "disconnect command not sent");
                 }
@@ -401,14 +339,10 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         }
     }
 
-    /// Press a macro's keys in order, then release them in reverse.
-    ///
-    /// The modifier word sent with each event describes the state *including*
-    /// the key in it, which is what the vendor's client does and what the
-    /// target's keyboard controller expects.
+    /// Press a macro's keys in order, release in reverse. Each event's
+    /// modifier state includes its own key, as the vendor client does.
     fn send_macro(&mut self, m: &KeyMacro) {
-        // Start from a clean slate: whatever the user is physically holding
-        // while they click a menu item is not part of the macro.
+        // Ignore whatever the user is physically holding.
         self.release_held_keys();
 
         let mut mods = Modifiers {
@@ -443,7 +377,6 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         self.note(format!("sent {}", m.label));
     }
 
-    /// Send a key-up for every modifier, held or not.
     fn release_held_keys(&mut self) {
         for key in STICKY_MODIFIERS {
             let (scancode, extended) = key.scancode();
@@ -459,20 +392,17 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         self.modifiers.alt = false;
     }
 
-    /// The switch has landed (or given up): start drawing video again.
+    /// The switch landed or timed out; resume drawing.
     fn finish_switch(&mut self) {
         if self.switching.take().is_some() {
             self.menu.switching = false;
-            // "switching to X…" has stopped being true, whether the device
-            // confirmed it or the wait ran out. Anything the user has done
-            // since owns the bar instead, so only that line is taken down.
+            // Clear only the "switching" note.
             self.menu.work_done(Work::Switch);
             self.screen.blank();
             self.dirty = true;
         }
     }
 
-    /// Why there is no picture, if there is none.
     fn waiting(&self) -> Option<Waiting> {
         if let Some(switch) = &self.switching {
             return Some(Waiting::Switching {
@@ -491,12 +421,9 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
 
     // ----------------------------------------------------------------- align
 
-    /// Start measuring the capture offsets from the picture.
-    ///
-    /// This is the correction the device's own adjustment cannot make: that one
-    /// restores the figures in the firmware's video-mode table, which is
-    /// exactly what is wrong for a mode the table has no right entry for. See
-    /// [`netcmdr_session::align`] for the measurement.
+    /// Start measuring the capture offsets. Unlike auto-adjust, which restores
+    /// the firmware table's (possibly wrong) values, this measures the picture.
+    /// See [`netcmdr_session::align`].
     fn start_align(&mut self) {
         if self.align.is_some() {
             self.note("already aligning the capture");
@@ -510,18 +437,12 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         self.working_on("aligning the capture…", Work::Align);
     }
 
-    /// Give the alignment its frame, and carry out whatever it asks for.
-    ///
-    /// The state machine never blocks — it hands back one step per frame — so
-    /// this works the same in a window and in a browser tab, where there is
-    /// nowhere to block at all.
+    /// Poll the aligner and carry out its step.
     fn pump_align(&mut self) {
         let Some(mut aligner) = self.align.take() else {
             return;
         };
-        // The device's own view of the knobs, which is what it has stored: it
-        // never folds a session set back into the config it publishes. It is
-        // also where a stored write takes its gains from.
+        // Stored values (session sets aren't reflected).
         let Some(video) = self.menu.video.clone() else {
             self.note("the device stopped reporting its capture settings");
             return;
@@ -539,9 +460,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             AlignStep::Set(setting, value) => {
                 self.progress("aligning the capture…");
                 if let Err(e) = self.session.set_video_number(setting, value) {
-                    // Without the set there is nothing to measure, and the run
-                    // would only sit there waiting for a picture that is not
-                    // going to move.
+                    // Nothing to measure without the set.
                     aligner.abort(format!("could not set {}: {e}", setting.as_str()));
                 }
             }
@@ -569,23 +488,18 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             }
         }
 
-        // A run in flight is the only thing on screen that moves on its own,
-        // so it has to ask for the repaints that keep it being polled.
+        // Keep repainting so the run is polled.
         self.dirty = true;
         self.align = Some(aligner);
     }
 
-    /// A stored write is going out; the config document it draws back is ours.
+    /// Expect a config document in reply to our stored write.
     fn expect_own_config(&mut self) {
         self.own_config += 1;
     }
 
-    /// The device has re-derived its own capture settings, so any correction
-    /// this client made has gone with them.
-    ///
-    /// Nothing announces that. Saying so is the whole of the recovery: putting
-    /// it back is a ten-second run, and doing that unasked — possibly in a loop
-    /// with whatever moved the settings — is worse than a line in the bar.
+    /// The device re-derived its capture settings, discarding our correction.
+    /// Just report it; re-running automatically could loop.
     fn align_lost(&mut self, why: &str) {
         if self.align.is_some() {
             return;
@@ -606,23 +520,19 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             };
             match event {
                 Event::Frame(rect) => {
-                    // Frames arriving mid-switch are still the old target's;
-                    // they are decoded into the framebuffer either way, but
-                    // nothing is drawn from it until the switch lands.
+                    // Mid-switch frames are the old target's; decoded, not drawn.
                     if self.switching.is_none() {
                         self.no_signal = false;
                         self.screen.mark(rect);
-                        // A picture arriving is all the answer a refresh gets.
+                        // The only acknowledgement a refresh gets.
                         self.menu.work_done(Work::Repaint);
                         self.dirty = true;
                     }
                 }
                 Event::Resolution { width, height } => {
                     tracing::info!(width, height, "remote resolution");
-                    // A *changed* mode invalidates every offset measured so far,
-                    // and the range they were checked against with them. The
-                    // device also re-announces the mode it is already on, which
-                    // invalidates nothing.
+                    // Only a changed mode invalidates measurements; the device
+                    // also re-announces the current one.
                     if self.remote.is_some_and(|had| had != (width, height)) {
                         if let Some(aligner) = &mut self.align {
                             aligner.abort("the video mode changed");
@@ -632,14 +542,12 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                     self.remote = Some((width, height));
                     self.menu.remote = Some((width, height));
                     self.no_signal = false;
-                    // New geometry means the device has re-pointed its capture
-                    // at the new target: this is the switch landing.
+                    // New geometry: the switch landed.
                     self.finish_switch();
                     self.screen.mark_all();
                     self.dirty = true;
 
-                    // Size the window to the target once, on the first mode we
-                    // see. After that the user owns the window size.
+                    // Size to the first mode only.
                     if !self.sized_once {
                         self.sized_once = true;
                         host.request_size(width as u32, height as u32 + self.bar_height());
@@ -647,13 +555,11 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
                 }
                 Event::Noise(noise) => self.menu.noise = Some(noise),
                 Event::NoSignal => {
-                    // The switch landed on a target that is not driving video,
-                    // which is an answer too.
+                    // Also means the switch landed.
                     self.finish_switch();
                     self.no_signal = true;
                     self.screen.blank();
-                    // Nothing is being decoded, so no further noise reports
-                    // will arrive to replace the last one.
+                    // No more noise reports will arrive.
                     self.menu.noise = None;
                     self.note("no video signal from the target");
                 }
@@ -672,33 +578,22 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         }
     }
 
-    /// The device's own view of which target is on screen.
-    ///
-    /// It re-sends this after a port change, so it is what confirms the switch
-    /// actually happened rather than what we asked for.
+    /// The device's config; after a port change it confirms the switch.
     fn on_config(&mut self, xml: &str, host: &dyn Host) {
-        // The device re-derives these whenever it re-reads the video mode, and
-        // an auto-adjust answers with a fresh document — so whatever it says
-        // here supersedes anything the adjustment window has been told.
+        // Supersedes the adjustment window's values.
         if let Some(video) = netcmdr_session::parse_video_settings(xml) {
             self.menu.video = Some(video);
-            // Which makes this document the automatic adjustment's answer —
-            // the protocol has no "done" message, and this is the only thing
-            // that arrives when one finishes.
+            // This is how auto-adjust signals completion.
             self.menu.work_done(Work::VideoAdjust);
-            // A document answering this client's own stored write is not the
-            // device having second thoughts about the capture — it is the
-            // acknowledgement that the write landed.
+            // Our own stored write's acknowledgement.
             if self.own_config > 0 {
                 self.own_config -= 1;
-                // An alignment writes as part of its run and has its own
-                // progress line; saying this over it would only flicker.
+                // The aligner has its own progress note.
                 if self.align.is_none() {
                     self.note("saved to the device");
                 }
             } else {
-                // Otherwise the device re-derived the offsets on its own
-                // account, and whatever this session had set is gone with them.
+                // The device re-derived the offsets itself.
                 self.align_lost("the device re-adjusted its capture");
             }
             self.dirty = true;
@@ -706,8 +601,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
 
         let servers = netcmdr_session::parse_servers(xml);
         if let Some(active) = servers.iter().find(|s| s.active) {
-            // Two targets can share a resolution, in which case no `Resolution`
-            // event marks the switch — this document is what confirms it.
+            // Confirms a switch between targets with the same resolution.
             if self
                 .switching
                 .as_ref()
@@ -751,9 +645,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
 
     // ------------------------------------------------------------------- draw
 
-    /// Drain everything that has happened since the last call.
-    ///
-    /// Returns false once the session has ended and the viewer should close.
+    /// Process pending events; false once the session has ended.
     pub fn poll(&mut self, host: &dyn Host) -> bool {
         if self.quitting {
             return false;
@@ -763,7 +655,6 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             return false;
         }
         self.pump_align();
-        // A switch the device never confirms must not blank the screen forever.
         if self
             .switching
             .as_ref()
@@ -772,9 +663,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             tracing::warn!("target switch was never confirmed; showing video again");
             self.finish_switch();
         }
-        // Nothing else drives a note off the bar: a session that goes quiet
-        // draws no frames and answers nothing, and the line would otherwise
-        // sit there until something unrelated replaced it.
+        // Expire notes even when the session is quiet.
         if self.menu.expire_note() {
             self.dirty = true;
         }
@@ -787,9 +676,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         self.pixels_per_point = ctx.pixels_per_point();
         let waiting = self.waiting();
 
-        // Uploading inside the egui pass keeps the texture and the frame that
-        // draws it in step; the lock is held only for the copy. Mid-switch
-        // there is deliberately nothing to upload.
+        // Upload inside the pass; nothing mid-switch.
         if waiting.is_none() || matches!(waiting, Some(Waiting::FirstFrame)) {
             if let Ok(frame) = self.session.frame().lock() {
                 self.screen.upload(&ctx, &frame);
@@ -809,10 +696,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         host.set_cursor(self.pointer_over_video, self.menu.cursor);
     }
 
-    /// Act on what the frame just built asked for.
-    ///
-    /// Separate from [`Viewer::ui`] because an action may end the session or
-    /// resize the window, and neither is safe to do while egui is mid-pass.
+    /// Carry out the frame's actions, outside the egui pass.
     pub fn finish_frame(&mut self, host: &dyn Host) {
         self.dirty = false;
         for action in std::mem::take(&mut self.actions) {
@@ -820,12 +704,9 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         }
     }
 
-    /// Height of the menu bar in physical pixels, for sizing to the target.
+    /// Menu bar height in physical pixels.
     fn bar_height(&self) -> u32 {
-        // Before the first pass has drawn anything the rectangle is
-        // `Rect::NOTHING`, whose top is infinite — and the device's first
-        // resolution can well arrive before that pass. Nothing is known about
-        // the bar yet, so nothing is what it adds.
+        // `Rect::NOTHING` before the first pass.
         let top = self.video_rect.top() * self.pixels_per_point;
         if !top.is_finite() {
             return 0;
@@ -833,17 +714,15 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         top.round().max(0.0) as u32
     }
 
-    /// Whether a repaint is wanted.
     pub fn needs_repaint(&self) -> bool {
         self.dirty
     }
 
-    /// Note that something outside the viewer wants a repaint.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    /// A point in the window to a pixel on the target's screen.
+    /// Window point to remote pixel.
     fn to_remote(&self, pos: egui::Pos2) -> Option<(i32, i32)> {
         let (w, h) = self.remote?;
         let rect = self.video_rect;
@@ -858,63 +737,54 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
         ))
     }
 
-    /// Whether keystrokes belong to the target rather than to the UI.
     pub fn keyboard_goes_to_target(&self) -> bool {
         !self.ui_wants_keyboard && !self.menu.captures_keyboard()
     }
 
-    /// Whether the pointer is over the video rather than over the menu.
     pub fn pointer_over_video(&self) -> bool {
         self.pointer_over_video
     }
 
-    /// The local pointer moved, in egui points.
+    /// In egui points.
     pub fn on_pointer_moved(&mut self, point: egui::Pos2) {
         if let Some((x, y)) = self.to_remote(point) {
             self.send(Input::MouseMove { x, y });
         }
     }
 
-    /// A mouse button, only forwarded while the pointer is over the video.
+    /// Forwarded only over the video.
     pub fn on_mouse_button(&mut self, button: MouseButton, down: bool) {
         if self.pointer_over_video {
             self.send(Input::MouseButton { button, down });
         }
     }
 
-    /// Wheel notches, only forwarded while the pointer is over the video.
+    /// Forwarded only over the video.
     pub fn on_scroll(&mut self, notches: i32) {
         if notches != 0 && self.pointer_over_video {
             self.send(Input::MouseWheel(notches));
         }
     }
 
-    /// The live modifier state, which the platform tracks for us.
     pub fn set_modifiers(&mut self, shift: bool, ctrl: bool, alt: bool) {
         self.modifiers.shift = shift;
         self.modifiers.ctrl = ctrl;
         self.modifiers.alt = alt;
     }
 
-    /// Focus went elsewhere: let go of everything, or the target is left
-    /// believing a modifier is still held.
+    /// Release all modifiers on focus loss.
     pub fn on_focus_lost(&mut self) {
         self.release_held_keys();
         self.modifiers = Modifiers::default();
     }
 
-    /// A physical key went down or up.
     pub fn on_key(&mut self, code: PhysicalKey, down: bool, host: &dyn Host) {
-        // Local shortcuts, not forwarded: the target can never see
-        // Ctrl+Alt+Delete otherwise, and the pointer needs a resync whenever
-        // the target's own acceleration drifts from ours. Each has a menu entry
-        // too; these are the fast paths.
+        // Local shortcuts (also in the menu), not forwarded.
         if self.modifiers.ctrl && self.modifiers.alt && down {
             match code {
                 PhysicalKey::End => return self.act(Action::CtrlAltDel, host),
                 PhysicalKey::Home => return self.act(Action::SyncPointer, host),
-                // Shifted: our own measurement rather than the device's,
-                // which is the one that can move the capture position.
+                // Shifted: our aligner instead of the device's auto-adjust.
                 PhysicalKey::KeyA if self.modifiers.shift => {
                     return self.act(Action::AlignCapture, host)
                 }
@@ -923,8 +793,7 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
             }
         }
 
-        // Lock keys are tracked locally: the platform does not tell us the LED
-        // state, and the device only uses these as a hint.
+        // Tracked locally; the platform doesn't expose LED state.
         if down {
             match code {
                 PhysicalKey::CapsLock => self.modifiers.caps_lock = !self.modifiers.caps_lock,
@@ -945,13 +814,11 @@ impl<S: SessionLink, M: MgmtLink> Viewer<S, M> {
     }
 }
 
-/// The "there is nothing to show yet" panel, used on a fresh session, during a
-/// target switch, and when the target is not driving video.
+/// Placeholder shown when there's no picture.
 fn draw_placeholder(ui: &mut egui::Ui, waiting: &Waiting) {
     ui.centered_and_justified(|ui| {
         ui.vertical_centered(|ui| {
-            // `centered_and_justified` hands the child the whole panel, so the
-            // column has to be nudged down to sit on the middle of it.
+            // Nudge down to centre within `centered_and_justified`.
             ui.add_space(ui.available_height() / 2.0 - 32.0);
             if waiting.busy() {
                 ui.add(egui::Spinner::new().size(24.0));
@@ -975,10 +842,8 @@ fn apply_modifier(mods: &mut Modifiers, key: PhysicalKey, down: bool) {
     }
 }
 
-/// Draw the remote screen, returning the rectangle it landed in.
-///
-/// Returns [`egui::Rect::NOTHING`] when a placeholder is showing instead, which
-/// is also what stops the pointer being mapped onto a picture that is not there.
+/// Draw the remote screen and return its rect, or [`egui::Rect::NOTHING`] for
+/// a placeholder (which disables pointer mapping).
 fn draw_screen(
     ui: &mut egui::Ui,
     screen: &Screen,
@@ -1009,11 +874,8 @@ fn draw_screen(
                     ui.painter().image(id, rect, uv, egui::Color32::WHITE);
                 }
                 Scaling::Actual => {
-                    // One remote pixel per physical pixel. The target's screen
-                    // is usually bigger than the window at this scale, so it
-                    // pans — but only by dragging the bars. The wheel and
-                    // drags belong to the target: scrolling a document on the
-                    // far end matters more than panning this view.
+                    // 1:1. Pan only via scroll bars; wheel and drags go to the
+                    // target.
                     egui::ScrollArea::both()
                         .scroll_source(egui::scroll_area::ScrollSource {
                             scroll_bar: true,
@@ -1042,23 +904,19 @@ mod tests {
     use netcmdr_session::{Error, SharedFrame};
     use std::sync::{Arc, Mutex};
 
-    /// A session that records what was asked of it and shows a fixed picture.
-    ///
-    /// Enough to drive the alignment's first move, which is what the wiring
-    /// here is: the state machine itself is tested against a simulated device
-    /// in `netcmdr_session::align`.
+    /// Records requests and shows a fixed picture. The aligner itself is
+    /// tested in `netcmdr_session::align`.
     #[derive(Default)]
     struct FakeSession {
         frame: SharedFrame,
         events: Vec<Event>,
         sets: Vec<(VideoSetting, i32)>,
         auto_adjusts: u32,
-        /// Every stored write, as the knobs it carried.
         stores: Vec<Vec<(VideoSetting, i32)>>,
     }
 
     impl FakeSession {
-        /// A picture with enough lit pixels in it to be worth measuring.
+        /// Enough content to measure.
         fn with_picture() -> FakeSession {
             let mut fb = Framebuffer::new();
             fb.resize(64, 64);
@@ -1197,9 +1055,7 @@ mod tests {
         );
     }
 
-    /// The device answers a stored write with a config document, and an
-    /// alignment writes as part of its run — so while one is running the
-    /// document is its answer and not news of a correction being lost.
+    /// A config reply during alignment is its own write's acknowledgement.
     #[test]
     fn a_config_mid_run_belongs_to_the_run() {
         let mut v = viewer(FakeSession::with_picture());
@@ -1214,8 +1070,7 @@ mod tests {
         );
     }
 
-    /// The same document answers a save made from the adjustment window, and
-    /// that one is not news of anything being lost either.
+    /// Likewise for a save from the adjustment window.
     #[test]
     fn a_config_answering_a_save_is_not_a_correction_lost() {
         let mut v = viewer(FakeSession::with_picture());
@@ -1251,8 +1106,7 @@ mod tests {
         );
     }
 
-    /// A mode change invalidates every measurement, and the capture is left on
-    /// a probe value — so the abort writes it back.
+    /// A mode change aborts and restores the probed value.
     #[test]
     fn a_mode_change_abandons_a_run_and_restores_the_capture() {
         let mut v = viewer(FakeSession::with_picture());
@@ -1284,9 +1138,7 @@ mod tests {
         );
     }
 
-    /// Frames from the old target keep arriving for seconds after a switch,
-    /// and two targets can share a resolution — so the switch itself has to
-    /// end a run rather than waiting for a mode change that may never come.
+    /// A target switch aborts the run (resolutions may match).
     #[test]
     fn switching_target_abandons_a_run() {
         let mut v = viewer(FakeSession::with_picture());
@@ -1312,7 +1164,6 @@ mod tests {
         assert!(v.align.is_none());
     }
 
-    /// The device re-announcing the mode it is already on is not a mode change.
     #[test]
     fn the_same_mode_announced_again_leaves_a_run_alone() {
         let mut v = viewer(FakeSession::with_picture());

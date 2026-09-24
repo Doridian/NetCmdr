@@ -1,19 +1,12 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Argument types shared by the `show` and `set` commands.
-//!
-//! The device's closed value sets (parity, LDAP mode, …) live in
-//! [`netcmdr_mgmt::config`], because they are protocol vocabulary. What is here is
-//! only how they reach the command line: clap needs an owned type to derive
-//! `ValueEnum` on, and the wire spellings would make poor flag values anyway
-//! (`--assign 3` rather than `--assign poc`).
+//! Argument types for `show` and `set`. These wrap [`netcmdr_mgmt::config`]
+//! enums for clap, with friendlier spellings (`--assign poc`, not `3`).
 
 use anyhow::{bail, Result};
 use clap::ValueEnum;
 
-/// A setting that is on or off. Spelled out rather than taken as a bare flag so
-/// that "leave it alone" stays distinguishable from "turn it off": every `set`
-/// command applies only the options actually given.
+/// `on`/`off` rather than a bare flag, so omitting it means "unchanged".
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum OnOff {
     On,
@@ -26,7 +19,6 @@ impl From<OnOff> for bool {
     }
 }
 
-/// Render a device boolean for display.
 pub fn yes_no(v: bool) -> &'static str {
     if v {
         "yes"
@@ -35,7 +27,7 @@ pub fn yes_no(v: bool) -> &'static str {
     }
 }
 
-/// Render an optional string, showing `-` for absent and empty values.
+/// `-` for absent or empty.
 pub fn or_dash(v: Option<&str>) -> &str {
     match v {
         Some(s) if !s.is_empty() => s,
@@ -43,13 +35,8 @@ pub fn or_dash(v: Option<&str>) -> &str {
     }
 }
 
-/// A set of KVM ports, as the device stores them: a comma-separated list.
-///
-/// `all` and `none` are conveniences; the device itself only understands the
-/// list. An empty list is how the device says "no access", so `none` is written
-/// as `""` and not as a missing attribute.
-/// `kind` names what is being counted, so an out-of-range value says which
-/// ports it meant — a device with eight KVM ports has only two serial ones.
+/// A comma-separated port list. `all`/`none` expand locally; `none` is `""`.
+/// `kind` names the ports in range errors.
 pub fn parse_port_list(spec: &str, port_count: u32, kind: &str) -> Result<String> {
     let spec = spec.trim();
     match spec.to_ascii_lowercase().as_str() {
@@ -69,7 +56,6 @@ pub fn parse_port_list(spec: &str, port_count: u32, kind: &str) -> Result<String
         if part.is_empty() {
             continue;
         }
-        // Ranges read better than eight comma-separated numbers.
         if let Some((lo, hi)) = part.split_once('-') {
             let lo: u32 = lo.trim().parse().map_err(|_| bad_port(part))?;
             let hi: u32 = hi.trim().parse().map_err(|_| bad_port(part))?;
@@ -102,10 +88,8 @@ fn bad_port(part: &str) -> anyhow::Error {
     anyhow::anyhow!("not a port number: {part}")
 }
 
-/// Show a stored port list the way it was asked for.
 pub fn show_port_list(value: Option<&str>) -> String {
-    // The firmware leaves a trailing comma in some of these
-    // (`vmtarget_ports="1,2,3,4,5,6,7,8,"`), so trim before deciding.
+    // Some have a trailing comma (`vmtarget_ports="1,2,3,4,5,6,7,8,"`).
     match value.map(|v| v.trim().trim_end_matches(',')) {
         None => "-".to_string(),
         Some("") => "none".to_string(),
@@ -113,8 +97,7 @@ pub fn show_port_list(value: Option<&str>) -> String {
     }
 }
 
-/// Parse a span of time as `90s`, `30m`, `2h`, `1h30m` — or a bare number of
-/// seconds, which is what the device stores.
+/// Parse `90s`, `30m`, `2h`, `1h30m`, or bare seconds.
 pub fn parse_duration(s: &str) -> Result<u32> {
     let s = s.trim();
     if s.is_empty() {
@@ -152,7 +135,7 @@ pub fn parse_duration(s: &str) -> Result<u32> {
     Ok(total)
 }
 
-/// Parse `YYYY-MM-DD HH:MM[:SS]`, with `T` accepted in place of the space.
+/// Parse `YYYY-MM-DD HH:MM[:SS]` (`T` also accepted).
 pub fn parse_datetime(s: &str) -> Result<netcmdr_mgmt::SystemTime> {
     let s = s.trim();
     let (date, time) = s
@@ -190,10 +173,7 @@ pub fn parse_datetime(s: &str) -> Result<netcmdr_mgmt::SystemTime> {
     Ok(when)
 }
 
-/// The local wall-clock time, for `time set --now`.
-///
-/// The device stores a bare wall clock with no zone and no NTP, so what it
-/// wants is whatever the clock on the wall next to it says.
+/// Local time, for `time set --now` (the device has no time zone or NTP).
 pub fn local_now() -> netcmdr_mgmt::SystemTime {
     let now = chrono::Local::now();
     use chrono::{Datelike, Timelike};
@@ -207,8 +187,7 @@ pub fn local_now() -> netcmdr_mgmt::SystemTime {
     }
 }
 
-/// Split a `1,2,5-8` port argument into numbers, for commands that take ports
-/// as an argument rather than storing them.
+/// Split `1,2,5-8` into port numbers.
 pub fn parse_ports(spec: &str, port_count: u32) -> Result<Vec<u32>> {
     let list = parse_port_list(spec, port_count, "KVM")?;
     Ok(list
@@ -229,9 +208,7 @@ mod tests {
         assert_eq!(parse_port_list("", 8, "KVM").unwrap(), "");
         assert_eq!(parse_port_list("3", 8, "KVM").unwrap(), "3");
         assert_eq!(parse_port_list("1-3,5", 8, "KVM").unwrap(), "1,2,3,5");
-        // Sorted and deduplicated, so the device never sees "2,1,2".
         assert_eq!(parse_port_list("2,1,2", 8, "KVM").unwrap(), "1,2");
-        // "all" means all of whatever is being counted.
         assert_eq!(parse_port_list("all", 2, "serial").unwrap(), "1,2");
     }
 
@@ -241,7 +218,6 @@ mod tests {
         assert!(parse_port_list("0", 8, "KVM").is_err());
         assert!(parse_port_list("5-3", 8, "KVM").is_err());
         assert!(parse_port_list("two", 8, "KVM").is_err());
-        // The message names what ran out.
         let e = parse_port_list("3", 2, "serial").unwrap_err().to_string();
         assert!(e.contains("serial"), "{e}");
     }
@@ -287,7 +263,7 @@ mod tests {
         assert!(parse_duration("").is_err());
         assert!(parse_duration("h").is_err());
         assert!(parse_duration("30x").is_err());
-        // A trailing number with no unit is a typo, not "plus 30 seconds".
+        // A trailing unitless number is an error.
         assert!(parse_duration("1h30").is_err());
     }
 

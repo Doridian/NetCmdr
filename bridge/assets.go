@@ -15,24 +15,18 @@ import (
 	"git.foxden.network/FoxDen/NetCmdr/bridge/web"
 )
 
-// File is one file of the client, in every coding the bridge can send it in.
+// File is one client file in each encoding the bridge can serve.
 type File struct {
 	Plain []byte
-	// Gzip is nil where gzip did not make the file smaller, so there is no
-	// second copy worth the memory.
+	// Gzip is nil if gzip didn't help.
 	Gzip []byte
 	Type string
 }
 
-// Assets is the whole client, ready to serve.
-//
-// The bridge is one file: there is no directory to point it at, nothing to
-// deploy beside it and nothing it can be served a stale or hostile copy of. The
-// client it hands out is the one it was built with, so nothing needs
-// revalidating per request and no file can change underneath it.
+// Assets is the embedded web client.
 type Assets struct {
 	files map[string]*File
-	// Bytes held in memory, for the line the bridge logs.
+	// Bytes in memory, for logging.
 	Size int
 }
 
@@ -43,15 +37,8 @@ func (a *Assets) Get(key string) (*File, bool) {
 	return f, ok
 }
 
-// LoadAssets unpacks the embedded client.
-//
-// The stored copy is the gzip one, which is both the smaller thing to carry in
-// the binary and the copy most browsers are served, so the compression happens
-// once at build time and never again. What is left for startup is the cheap
-// half — gunzip each file for the clients that take no coding at all, which is
-// milliseconds for a client this size.
-//
-// A file that gzip did not shrink was packed as it is, under no suffix.
+// LoadAssets unpacks the embedded client. Files are stored gzipped (or raw,
+// unsuffixed, if gzip didn't help); startup gunzips an identity copy.
 func LoadAssets() (*Assets, error) {
 	assets := &Assets{files: make(map[string]*File)}
 
@@ -60,7 +47,7 @@ func LoadAssets() (*Assets, error) {
 			return err
 		}
 		key := strings.TrimPrefix(name, "dist/")
-		// .gitkeep, and anything else the packer did not put there.
+		// .gitkeep etc.
 		if strings.HasPrefix(path.Base(key), ".") {
 			return nil
 		}
@@ -75,11 +62,7 @@ func LoadAssets() (*Assets, error) {
 			key = strings.TrimSuffix(key, ".gz")
 			plain, err := gunzip(body)
 			if err != nil {
-				// These bytes were written by this repo's own packer and read
-				// from the executable's own image, so this means a corrupt
-				// binary. Serving a client with a hole in it would reach the
-				// browser as an unexplained failure to start, which is a worse
-				// way to find out.
+				// A corrupt binary; fail loudly rather than serve it.
 				return fmt.Errorf("embedded %s will not decompress: %w", key, err)
 			}
 			file = &File{Plain: plain, Gzip: body}
@@ -101,17 +84,13 @@ func gunzip(body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Nothing is read after this, so a close error has nothing left to spoil:
-	// io.ReadAll below is what reports a truncated or corrupt stream.
+	// io.ReadAll reports corruption; the close error doesn't matter.
 	defer func() { _ = r.Close() }()
 	return io.ReadAll(r)
 }
 
-// contentType is the type of a file by extension.
-//
-// application/wasm is the one that actually matters: browsers refuse to
-// stream-compile a module served as anything else, and the failure reads as a
-// generic instantiation error rather than a content-type complaint.
+// contentType is the type of a file by extension. application/wasm is
+// required for streaming compilation.
 func contentType(key string) string {
 	switch path.Ext(key) {
 	case ".html":
@@ -136,10 +115,8 @@ func contentType(key string) string {
 	return "application/octet-stream"
 }
 
-// acceptsGzip reports whether an Accept-Encoding header offers gzip.
-//
-// Naming an encoding at q=0 is how a client refuses that one specifically,
-// which is the one case where naming it does not mean accepting it.
+// acceptsGzip reports whether an Accept-Encoding header offers gzip (q=0
+// refuses it).
 func acceptsGzip(header string) bool {
 	for _, part := range strings.Split(header, ",") {
 		fields := strings.Split(part, ";")

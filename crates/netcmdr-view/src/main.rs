@@ -3,9 +3,8 @@
 //! `netcmdr-view` — a KVM viewer for Tripp Lite NetCommander / Minicom Smart IP
 //! switches.
 //!
-//! Logs in over the management API to obtain a session token, opens the KVM
-//! session with that token, and shows the target's screen in a window with
-//! keyboard and mouse passed through.
+//! Logs in via the management API, opens a KVM session, and shows the target
+//! with keyboard and mouse passthrough.
 
 mod link;
 mod render;
@@ -72,36 +71,21 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     frames: u32,
 
-    /// Run the device's automatic video adjustment on connect.
-    ///
-    /// The device digitises analog VGA; this re-centres and re-sharpens the
-    /// captured image for the target's current video mode and stores the
-    /// result. Its answer is only a good one from a session in which nothing
-    /// has been set by hand — it measures against a capture window an earlier
-    /// set has already moved, and corrects against its own stored figure.
+    /// Run the device's automatic video adjustment on connect. Unreliable
+    /// after manual changes in the same session.
     #[arg(long)]
     auto_adjust: bool,
 
-    /// Align the capture window with the target's picture on connect.
-    ///
-    /// Measures where the picture actually starts, moves the device's sampling
-    /// offsets onto it and writes them to the device, where they stay. The
-    /// device's own --auto-adjust measures the same thing on its own terms;
-    /// this one is measured here, from the picture, and checked against the
-    /// range the device declares. Needs something on screen to measure
-    /// against.
+    /// Measure and store the capture offsets from the picture on connect.
+    /// Needs something on screen.
     #[arg(long)]
     align: bool,
 
-    /// With --align, leave the vertical offset alone.
-    ///
-    /// A target sitting at a bare console has nothing in its top rows, so there
-    /// is nothing to measure vertically until it has scrolled.
+    /// With --align, skip the vertical offset (e.g. for a bare console).
     #[arg(long)]
     align_horizontal: bool,
 
-    /// With --align, prove each answer by stepping one below it and checking
-    /// that exactly one blank lane appears. Roughly doubles the run.
+    /// With --align, verify each answer. Roughly doubles the run.
     #[arg(long)]
     align_verify: bool,
 }
@@ -116,8 +100,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // The management login is what mints the session token; hold the client for
-    // the whole session, because logging out would invalidate it.
+    // Keep the client alive; logging out invalidates the session token.
     let client = Arc::new(
         netcmdr_mgmt::Client::connect(&args.host, &args.user, &args.password)
             .with_context(|| format!("logging in to {}", args.host))?,
@@ -177,28 +160,20 @@ fn main() -> Result<()> {
     }
 }
 
-/// Measure the capture offsets from the picture and correct them.
-///
-/// Drives the same state machine the window uses ([`netcmdr_session::align`]) from
-/// a plain loop: it never blocks, so pumping it is just a matter of handing it
-/// a frame and carrying out the one step it asks for.
+/// Run [`netcmdr_session::align`] in a plain loop.
 fn align_capture(session: &Session, opts: align::Options) -> Result<()> {
-    /// Long enough for both axes with verification, which measured 18.6 s on
-    /// the hardware, plus a restore through the device's own adjustment.
+    /// Both axes with verification took 18.6 s on hardware.
     const TIMEOUT: Duration = Duration::from_secs(90);
-    /// How long to wait for the device to announce the mode it is digitising.
+    /// Wait for the device to announce its video mode.
     const SETTINGS_TIMEOUT: Duration = Duration::from_secs(15);
 
     let mut video: Option<VideoSettings> = None;
     let mut aligner: Option<Aligner> = None;
-    // The mode the run was armed on. The device announces the mode it is
-    // already on at the start of every session, so it is a *change* of mode
-    // that invalidates a run, not an announcement of one.
+    // Only a mode *change* invalidates the run.
     let mut armed_on: Option<(u16, u16)> = None;
     let started = Instant::now();
 
     loop {
-        // Drain whatever has arrived.
         loop {
             match session.events.recv_timeout(Duration::from_millis(20)) {
                 Ok(Event::ConfigXml(xml)) => {
@@ -241,8 +216,7 @@ fn align_capture(session: &Session, opts: align::Options) -> Result<()> {
 
         let step = {
             let frame = session.frame().lock().expect("framebuffer lock");
-            // Nothing is armed until there is a picture: until then the mode
-            // the run belongs to is not settled either.
+            // Wait for a picture before arming.
             if frame.width == 0 || frame.height == 0 {
                 anyhow::ensure!(
                     started.elapsed() < SETTINGS_TIMEOUT,
@@ -283,10 +257,7 @@ fn align_capture(session: &Session, opts: align::Options) -> Result<()> {
     }
 }
 
-/// Collect frames without a window and write the framebuffer as a PPM.
-///
-/// This is the quickest way to check the video pipeline against real hardware:
-/// no windowing system needed, and the output is trivially comparable.
+/// Collect frames headlessly and write a PPM.
 fn snapshot(session: &Session, frames: u32, path: &PathBuf) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen = 0;

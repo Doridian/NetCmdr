@@ -1,18 +1,11 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Changing the device's settings.
+//! Changing settings: fetch, edit, save ([`Edit`]; see
+//! [`netcmdr_mgmt::config`]). Only given options are applied; with none,
+//! nothing is saved.
 //!
-//! The device has no partial write: `CMA_CONFIG` replaces the whole
-//! configuration. So every command here is fetch, edit, save — see
-//! [`netcmdr_mgmt::config`] for why, and [`Edit`] for the shape it takes.
-//!
-//! Each command applies only the options it was actually given, and reports
-//! what it changed. Giving no options changes nothing and saves nothing, which
-//! makes `netcmdr <area> set` safe to run to see what it would ask for.
-//!
-//! Validation mirrors the checks the vendor's own dialogs make (`SecurityPanel`,
-//! `PvUserDlg`, `SerialPortPanel`), because the device itself accepts values it
-//! then cannot boot with.
+//! Validation mirrors the vendor dialogs (`SecurityPanel`, `PvUserDlg`,
+//! `SerialPortPanel`), since the device accepts values it can't boot with.
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -25,8 +18,7 @@ use netcmdr_mgmt::{
 
 use crate::args::{local_now, parse_datetime, parse_duration, parse_port_list, yes_no, OnOff};
 
-/// How a new value reads in the report: `= value`, or "cleared" when it is the
-/// empty string, which is how the device stores "nothing set".
+/// `= value`, or "cleared" for empty.
 fn to(value: &str) -> String {
     if value.is_empty() {
         "cleared".to_string()
@@ -35,11 +27,7 @@ fn to(value: &str) -> String {
     }
 }
 
-/// One read-modify-write of the configuration.
-///
-/// Holds the editable document, the typed view of the same fetch for
-/// validation, and the list of changes to report. Nothing is sent until
-/// [`Edit::commit`], and nothing is sent at all if no change was recorded.
+/// One read-modify-write. Saved by [`Edit::commit`] only if something changed.
 pub struct Edit {
     pub doc: ConfigDoc,
     pub current: DeviceConfig,
@@ -47,7 +35,7 @@ pub struct Edit {
 }
 
 impl Edit {
-    /// Fetch the configuration, once, in both views.
+    /// Fetch once, parsing both views.
     pub fn open(client: &Client) -> Result<Edit> {
         let xml = client.config_raw().context("fetching the configuration")?;
         Ok(Edit {
@@ -57,23 +45,19 @@ impl Edit {
         })
     }
 
-    /// Record a change, for the report after the save.
     pub fn note(&mut self, what: impl Into<String>) {
         self.changes.push(what.into());
     }
 
-    /// How many KVM ports this device has, for validating port lists.
     pub fn port_count(&self) -> u32 {
         self.current.switch_ports.unwrap_or(0)
     }
 
-    /// How many serial ports it has. Two on this hardware — and not the same
-    /// number as the KVM ports, so `--serial all` must not use `port_count`.
+    /// Serial port count (two), distinct from `port_count`.
     pub fn serial_count(&self) -> u32 {
         self.current.serial_devices.len() as u32
     }
 
-    /// Save, unless nothing changed.
     pub fn commit(self, client: &Client) -> Result<()> {
         if self.changes.is_empty() {
             println!("nothing to change");
@@ -189,8 +173,7 @@ pub fn network(client: &Client, a: &NetworkArgs) -> Result<()> {
 
     if let Some(mode) = a.ipv4 {
         let static_ip = mode == Addressing::Static;
-        // Going static with nothing configured and nothing given would strand
-        // the device on 0.0.0.0, so insist on the three that matter.
+        // Don't strand the device on 0.0.0.0.
         if static_ip {
             let have = |given: &Option<String>, current: &Option<String>| {
                 given.is_some() || current.as_deref().is_some_and(|v| !v.is_empty())
@@ -298,9 +281,8 @@ pub struct SshArgs {
 pub fn ssh(client: &Client, a: &SshArgs) -> Result<()> {
     let mut e = Edit::open(client)?;
 
-    // The two ports and the session port all have to differ, and the device
-    // rejects anything privileged. Check against what the save will produce,
-    // not against what is there now.
+    // Both SSH ports and the session port must differ and be unprivileged.
+    // Check the post-save values.
     let port1 = a.port1.or(e.current.ssh.port1);
     let port2 = a.port2.or(e.current.ssh.port2);
     if a.port1.is_some() || a.port2.is_some() {
@@ -372,7 +354,7 @@ pub fn security(client: &Client, a: &SecurityArgs) -> Result<()> {
     let mut e = Edit::open(client)?;
 
     if let Some(n) = a.max_attempts {
-        // The vendor's dialog enforces this range; the device does not.
+        // Enforced by the vendor dialog, not the device.
         if !(1..=99).contains(&n) {
             bail!("--max-attempts must be between 1 and 99");
         }
@@ -430,10 +412,8 @@ pub fn security(client: &Client, a: &SecurityArgs) -> Result<()> {
 
 #[derive(Args)]
 pub struct AuthArgs {
-    /// Sources to try, in order, e.g. `local` or `local,radius`.
-    ///
-    /// `local` is always tried first; the device's own interface does not
-    /// allow otherwise, and locking out the local admin would leave no way in.
+    /// Sources to try, in order, e.g. `local` or `local,radius`. `local` is
+    /// always first.
     #[arg(long, value_name = "LIST")]
     pub order: Option<String>,
 }
@@ -487,8 +467,7 @@ pub fn auth(client: &Client, a: &AuthArgs) -> Result<()> {
 
 #[derive(Args)]
 pub struct LdapArgs {
-    /// Where a user's permissions come from once the directory has
-    /// authenticated them.
+    /// Where a user's permissions come from.
     #[arg(long, value_name = "MODE", value_parser = clap::builder::PossibleValuesParser::new(LdapMode::VARIANTS))]
     pub mode: Option<String>,
 
@@ -534,7 +513,6 @@ pub fn ldap(client: &Client, a: &LdapArgs) -> Result<()> {
     }
     if let Some(v) = a.search_password.as_deref() {
         e.doc.ldap().set("search_passw", v);
-        // Never echo it back.
         e.note("LDAP search password");
     }
 
@@ -547,9 +525,7 @@ pub struct LdapServerArgs {
     #[arg(id = "ldap_server_host", value_name = "HOST")]
     pub host: String,
 
-    /// TCP port the directory listens on. Defaults to 636 for `ldaps`, 389
-    /// otherwise. Spelled `--server-port` because the global `--port` is the
-    /// KVM's own HTTPS port.
+    /// Directory port. Defaults to 636 for `ldaps`, else 389.
     #[arg(id = "ldap_server_port", long = "server-port")]
     pub port: Option<u16>,
 
@@ -648,8 +624,7 @@ pub struct RadiusServerArgs {
     #[arg(id = "radius_server_host", value_name = "HOST")]
     pub host: String,
 
-    /// Authentication port. Spelled `--server-port` because the global
-    /// `--port` is the KVM's own HTTPS port.
+    /// Authentication port.
     #[arg(
         id = "radius_server_port",
         long = "server-port",
@@ -727,7 +702,7 @@ pub fn snmp(client: &Client, a: &SnmpArgs) -> Result<()> {
     let mut e = Edit::open(client)?;
 
     if let Some(v) = a.destination.as_deref() {
-        // The device's own dialog treats these two as "nowhere".
+        // Both mean "nowhere" to the vendor dialog.
         let v = match v.trim() {
             "255.255.255.255" | "0.0.0.0" => "",
             other => other,
@@ -848,11 +823,8 @@ pub struct SerialArgs {
     #[arg(long, value_name = "PARITY", value_parser = clap::builder::PossibleValuesParser::new(Parity::VARIANTS))]
     pub parity: Option<String>,
 
-    /// Offer this port to users.
-    ///
-    /// Hiding a port also strips it from every account's serial access, and
-    /// showing it again does not put those grants back — see the note the
-    /// command prints.
+    /// Offer this port to users. Hiding it revokes every account's access,
+    /// which showing it again doesn't restore.
     #[arg(long, value_name = "on|off")]
     pub visible: Option<OnOff>,
 
@@ -897,9 +869,8 @@ pub fn serial(client: &Client, a: &SerialArgs) -> Result<()> {
         e.note(format!("serial {port} assigned to {}", assign.name()));
     }
 
-    // Hiding a port revokes it from every account, and showing it again does
-    // not restore them — measured on firmware 2.2.1258.1.0. Name the accounts
-    // now, while they still have the grant, so it can be put back.
+    // Hiding revokes access for good (measured on 2.2.1258.1.0), so list the
+    // affected accounts now.
     let losing: Vec<String> = match a.visible {
         Some(OnOff::Off) => e
             .current
@@ -923,8 +894,7 @@ pub fn serial(client: &Client, a: &SerialArgs) -> Result<()> {
     Ok(())
 }
 
-/// Whether a stored port list grants `port`. The firmware leaves trailing
-/// commas in these lists, so split rather than substring-match.
+/// Whether a stored port list (possibly with a trailing comma) has `port`.
 fn grants_port(list: Option<&str>, port: u32) -> bool {
     list.is_some_and(|l| {
         l.split(',')
@@ -993,21 +963,17 @@ pub struct UserAddArgs {
 
 #[derive(Args)]
 pub struct PasswordArgs {
-    /// The account's password. Spelled `--new-password` because the global
-    /// `--password` is the one this tool logs in to the device with.
-    ///
-    /// Visible to anyone who can read this machine's process list; prefer
+    /// The account's password. Visible in the process list; prefer
     /// `--new-password-stdin`.
     #[arg(long, value_name = "PASSWORD", conflicts_with = "new_password_stdin")]
     pub new_password: Option<String>,
 
-    /// Read the account's password from standard input, up to the first newline.
+    /// Read the account's password from the first line of stdin.
     #[arg(long)]
     pub new_password_stdin: bool,
 }
 
 impl PasswordArgs {
-    /// The password, or `None` if neither option was given.
     pub fn read(&self) -> Result<Option<String>> {
         if let Some(p) = self.new_password.as_deref() {
             return Ok(Some(p.to_string()));
@@ -1022,7 +988,7 @@ impl PasswordArgs {
     }
 }
 
-/// The rules the vendor's own dialog applies before it will save a password.
+/// The vendor dialog's password rules.
 fn check_password(password: &str, user: &str, strict: bool) -> Result<()> {
     if password.is_empty() {
         bail!("the password cannot be empty");
@@ -1111,7 +1077,6 @@ pub fn user_add(client: &Client, a: &UserAddArgs) -> Result<()> {
 pub fn user_remove(client: &Client, name: &str) -> Result<()> {
     let mut e = Edit::open(client)?;
 
-    // Removing the last administrator would lock everyone out for good.
     let admins = e.current.users.iter().filter(|u| u.admin).count();
     let target = e
         .current
@@ -1142,9 +1107,7 @@ pub struct UserSetArgs {
     /// Login name of an existing account.
     pub name: String,
 
-    /// Rename the account. The password and permissions come with it: the
-    /// vendor's own dialog renames without resending a password, so the device
-    /// carries it across.
+    /// Rename the account, keeping its password and permissions.
     #[arg(long, value_name = "NAME")]
     pub rename: Option<String>,
 
@@ -1199,7 +1162,7 @@ pub fn user_set(client: &Client, a: &UserSetArgs) -> Result<()> {
         e.note(format!("{} renamed to {new_name}", existing.name));
     }
 
-    // Later edits have to find the account under whatever it is called now.
+    // Later edits must use the new name.
     let name: &str = a.rename.as_deref().unwrap_or(&a.name);
 
     if let Some(v) = a.admin {
@@ -1218,7 +1181,7 @@ pub fn user_set(client: &Client, a: &UserSetArgs) -> Result<()> {
                 USER_LEVEL_USER
             },
         );
-        // The device sends `admin` alongside `userlevel`; keep them agreeing.
+        // Keep `admin` consistent with `userlevel`.
         e.doc.user(name)?.set_bool("admin", admin);
         e.note(format!(
             "{name} is {}",
@@ -1298,8 +1261,7 @@ pub fn user_password(client: &Client, a: &UserPasswordArgs) -> Result<()> {
         e.current.security.password_restrictions,
     )?;
 
-    // A password only exists on the wire when it is being changed: the device
-    // never sends one back, and an absent attribute leaves it alone.
+    // Absent means unchanged; the device never sends passwords back.
     e.doc.user(name)?.set("password", password);
     e.note(format!("{existing}'s password"));
     e.commit(client)
@@ -1492,7 +1454,6 @@ mod tests {
         assert!(grants_port(Some("1,2"), 2));
         assert!(!grants_port(Some("1"), 2));
         assert!(!grants_port(None, 2));
-        // A trailing comma, as the firmware writes it, is not a port.
         assert!(grants_port(Some("1,2,"), 2));
         // "1" must not match inside "11".
         assert!(!grants_port(Some("11"), 1));
@@ -1505,7 +1466,6 @@ mod tests {
         assert!(check_password("", "alice", false).is_err());
         assert!(check_password(" leading", "alice", false).is_err());
         assert!(check_password("has<angle>", "alice", false).is_err());
-        // The user name must not appear anywhere in the password.
         assert!(check_password("xxalicexx", "alice", false).is_err());
         assert!(check_password("xxALICExx", "alice", false).is_err());
     }

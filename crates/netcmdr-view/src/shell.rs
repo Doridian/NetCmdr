@@ -1,13 +1,7 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The native shell: a window, an OpenGL context, and raw input.
-//!
-//! Everything a person sees is `netcmdr_ui`'s and is shared with the web client.
-//! What is left here is the part that genuinely cannot be: creating a window,
-//! and turning `winit` events into the viewer's own.
-//!
-//! The routing rule is unchanged — egui sees every event first, and whatever it
-//! does not want goes to the target. `consumed` is what says the UI wanted it.
+//! The native shell: window creation and `winit` event translation. egui sees
+//! each event first; unconsumed ones go to the target.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -26,18 +20,15 @@ use winit::window::{CursorIcon, Window, WindowId};
 use crate::link::{NativeMgmt, NativeSession};
 use crate::render::Renderer;
 
-/// How often the session's events are drained and the window repainted. The
-/// device sends tile updates far faster than a screen refreshes.
+/// Event drain and repaint interval.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
-/// What the viewer needs besides the session itself.
 pub struct Config {
     pub host: String,
     pub user: String,
     pub target: u32,
     pub exclusive: bool,
-    /// Kept for power control and the target list, both of which live on the
-    /// management API rather than the session.
+    /// For power control and the target list.
     pub client: Arc<netcmdr_mgmt::Client>,
 }
 
@@ -69,11 +60,9 @@ pub fn run(session: Session, cfg: Config) -> Result<()> {
     std::mem::replace(&mut app.result, Ok(()))
 }
 
-/// The window, as the shared viewer sees it.
 struct WindowHost {
     window: Arc<Window>,
-    /// Whether the last frame asked for a resize, so the GL surface can be
-    /// brought back into step even when winit emits no `Resized` event.
+    /// A resize was requested; winit may not emit `Resized`.
     resized: Cell<bool>,
 }
 
@@ -174,7 +163,7 @@ impl ApplicationHandler for App {
             return;
         };
         let window = renderer.window.clone();
-        // egui sees everything first; `consumed` is what says the UI wanted it.
+        // egui first.
         let response = state.on_window_event(&window, &event);
         if response.repaint {
             self.viewer.mark_dirty();
@@ -252,9 +241,7 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
-        // A size we asked for may be applied synchronously, in which case winit
-        // deliberately emits no `Resized` event and the GL surface is left
-        // stale; checking here is what keeps the picture from being stretched.
+        // A requested size may apply without a `Resized` event.
         if host.resized.replace(false) {
             if let Some(r) = &self.renderer {
                 r.resize();
@@ -274,8 +261,7 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Our pointer style wins over egui's, but only while the pointer is over the
-/// video: everywhere else egui owns it, so its resize and text cursors survive.
+/// Our pointer style over the video; egui's elsewhere.
 fn apply_cursor(window: &Window, over_video: bool, mode: CursorMode) {
     if !over_video {
         window.set_cursor_visible(true);

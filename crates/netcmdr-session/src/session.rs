@@ -1,16 +1,8 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The native session: one thread driving a [`SessionCore`].
-//!
-//! All the protocol lives in [`crate::core`]; this is the part that only makes
-//! sense with an operating system under it — real sockets, a thread to pump
-//! them, and channels so other threads can reach the session.
-//!
-//! It used to be three threads, one per channel, each parked in a blocking
-//! read. That shape could not follow the client into a browser, so the loop
-//! moved into `SessionCore::pump` and what remains here is a single thread
-//! calling it. The sockets are therefore **non-blocking** and the thread backs
-//! off when idle rather than parking; see [`backoff`] for what that costs.
+//! The native session: one thread pumping a [`SessionCore`] over non-blocking
+//! sockets, backing off when idle (see [`backoff`]). Protocol logic lives in
+//! [`crate::core`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -29,25 +21,19 @@ use crate::time::{Duration, Instant};
 use crate::video::{Framebuffer, SharedFrame, SharedPalette};
 use crate::{Error, Event, SessionConfig};
 
-/// How long the command channel parks in a read while waiting for the login.
-///
-/// This is the one place a socket still blocks: there is nothing else to do
-/// until the device answers, and a deadline still has to be checked.
+/// Read timeout while waiting for login, the only blocking read.
 const LOGIN_POLL: Duration = Duration::from_millis(100);
 
-/// Something for the session thread to send.
 enum Outgoing {
     Cmd(Message),
     Input(Input),
 }
 
-/// A live KVM session.
 pub struct Session {
-    /// Events from the session's thread. The sender is dropped when it stops.
+    /// Closed when the session thread stops.
     pub events: Receiver<Event>,
     frame: SharedFrame,
-    /// Held in an `Option` so [`Session::disconnect`] can drop the sender
-    /// before joining.
+    /// `Option` so [`Session::disconnect`] can drop it before joining.
     outbox: Option<Sender<Outgoing>>,
     stop: Arc<AtomicBool>,
     shutdowns: Vec<ShutdownHandle>,
@@ -55,8 +41,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// Open a session: log in on the command channel, then bring up video and
-    /// input.
+    /// Log in on the command channel, then open video and input.
     pub fn connect(cfg: SessionConfig) -> Result<Session, Error> {
         let cmd = TcpChannel::connect(
             &cfg.host,
@@ -94,8 +79,7 @@ impl Session {
             cfg.connect_timeout,
         )?;
 
-        // From here the pump owns all three and must never park in one of
-        // them, or a quiet video channel would stall the command channel.
+        // Non-blocking from here, so a quiet channel can't stall the others.
         cmd.set_nonblocking(true)?;
         video.set_nonblocking(true)?;
         km.set_nonblocking(true)?;
@@ -125,69 +109,50 @@ impl Session {
         })
     }
 
-    /// The shared framebuffer. Lock it briefly to draw, then let go — the
-    /// session thread takes the same lock to blit each frame.
+    /// Lock briefly; the session thread blits under the same lock.
     pub fn frame(&self) -> &SharedFrame {
         &self.frame
     }
 
-    /// Queue an input event for the keyboard/mouse channel.
     pub fn send_input(&self, ev: Input) -> Result<(), Error> {
         self.queue(Outgoing::Input(ev))
     }
 
-    /// Ask the device for a full repaint (`<command name='video_refresh'/>`).
+    /// Full repaint (`<command name='video_refresh'/>`).
     pub fn refresh_screen(&self) -> Result<(), Error> {
         self.queue(Outgoing::Cmd(outbound::refresh_screen()))
     }
 
-    /// Run the device's automatic video adjustment
-    /// (`<command name='auto_video_adjust' state='start'/>`).
-    ///
-    /// The device digitises analog VGA, so its sampling phase and horizontal
-    /// position drift per target and per mode; this is what re-centres and
-    /// re-sharpens the captured image. Progress arrives as [`Event::Gui`].
+    /// Automatic video adjustment
+    /// (`<command name='auto_video_adjust' state='start'/>`). Re-centres and
+    /// re-sharpens the picture; progress arrives as [`Event::Gui`].
     pub fn auto_adjust_video(&self) -> Result<(), Error> {
         self.queue(Outgoing::Cmd(outbound::auto_adjust_video()))
     }
 
-    /// Stop an adjustment in progress.
     pub fn stop_auto_adjust(&self) -> Result<(), Error> {
         self.queue(Outgoing::Cmd(outbound::stop_auto_adjust()))
     }
 
-    /// Set one analog video knob by hand, for this session
-    /// (`<video_settings hoffset='364'/>` and friends).
+    /// Set a video setting for this session only (e.g.
+    /// `<video_settings hoffset='364'/>`).
     ///
-    /// The change applies immediately and lasts until logout; the device does
-    /// not announce it and goes on reporting its stored figure, so the caller
-    /// keeps its own copy of the value. Because the comparison is against that
-    /// stored figure, a set *equal* to it is silently dropped.
-    ///
-    /// [`Session::store_video_settings`] is the one that lasts — and the one to
-    /// use when the value being set may be the stored one.
+    /// Not reported back, and a value equal to the stored one is silently
+    /// dropped. Use [`Session::store_video_settings`] to persist.
     pub fn set_video_setting(&self, setting: VideoSetting, value: &str) -> Result<(), Error> {
         self.queue(Outgoing::Cmd(outbound::set_video_setting(setting, value)))
     }
 
-    /// Set a numeric video knob. See [`Session::set_video_setting`].
+    /// See [`Session::set_video_setting`].
     pub fn set_video_number(&self, setting: VideoSetting, value: i32) -> Result<(), Error> {
         self.set_video_setting(setting, &value.to_string())
     }
 
-    /// Write video knobs into the device's stored configuration.
+    /// Persist video settings across logout, target switch and reconnect.
     ///
-    /// Unlike [`Session::set_video_setting`] this survives logout, a target
-    /// switch and a reconnect, because the device stores it rather than
-    /// overlaying it — which it does for any `<video_settings>` element
-    /// carrying both gains. `current` is the device's own last report
-    /// ([`Event::ConfigXml`] → [`crate::parse_video_settings`]); the gains are
-    /// taken from it, so a caller moving a capture offset need not think about
-    /// the rule.
-    ///
-    /// The device answers with a fresh [`Event::ConfigXml`] carrying the new
-    /// values, which is the only acknowledgement there is. Nothing comes back
-    /// when it declines.
+    /// The device only stores elements carrying both gains; they're taken from
+    /// `current` ([`Event::ConfigXml`] → [`crate::parse_video_settings`]).
+    /// Acknowledged by a fresh [`Event::ConfigXml`]; silence on refusal.
     pub fn store_video_settings(
         &self,
         current: &VideoSettings,
@@ -198,11 +163,7 @@ impl Session {
         )))
     }
 
-    /// Choose the capture's noise filter.
-    ///
-    /// [`VideoFilter::Auto`] is not a value the device accepts: the vendor's
-    /// client answers that choice by running the automatic adjustment, which
-    /// picks a filter itself, and so does this.
+    /// [`VideoFilter::Auto`] runs auto-adjust, as the vendor client does.
     pub fn set_video_filter(&self, filter: VideoFilter) -> Result<(), Error> {
         match filter {
             VideoFilter::Auto => self.auto_adjust_video(),
@@ -210,24 +171,16 @@ impl Session {
         }
     }
 
-    /// Switch the session to another target without tearing it down.
-    ///
-    /// This is what the stock client's target menu does: the device re-points
-    /// the same three channels at another switch port and sends a fresh
-    /// `CONFIG_XML` plus a key frame. The session id, the sockets and the
-    /// heartbeat all survive, so there is no second login.
-    ///
-    /// The device wants the target's *name* as well as its port; it echoes the
-    /// name back in the config document.
+    /// Switch target on the same channels, without logging in again. The
+    /// device sends a fresh `CONFIG_XML` and key frame. It needs the target's
+    /// name as well as its port.
     pub fn change_target(&self, name: &str, port: u32) -> Result<(), Error> {
         self.queue(Outgoing::Cmd(outbound::change_target(name, port)))
     }
 
-    /// Run the device's mouse calibration
-    /// (`<command name='calibrate' state='start' mode='calibrate'/>`).
-    ///
-    /// The device moves the remote pointer around a known path to learn the
-    /// target's acceleration curve. Progress arrives as [`Event::Gui`].
+    /// Mouse calibration
+    /// (`<command name='calibrate' state='start' mode='calibrate'/>`). Learns
+    /// the target's acceleration curve; progress arrives as [`Event::Gui`].
     pub fn calibrate_mouse(&self) -> Result<(), Error> {
         self.queue(Outgoing::Cmd(outbound::calibrate_mouse()))
     }
@@ -238,12 +191,11 @@ impl Session {
         self.queue(Outgoing::Cmd(outbound::align_mouse()))
     }
 
-    /// Claim or release exclusive use of the target mid-session.
     pub fn set_exclusive(&self, exclusive: bool) -> Result<(), Error> {
         self.queue(Outgoing::Cmd(outbound::set_exclusive(exclusive)))
     }
 
-    /// Send an app-level `<commands>` document on the command channel.
+    /// Send an app-level `<commands>` document.
     pub fn send_xml(&self, xml: &str) -> Result<(), Error> {
         self.queue(Outgoing::Cmd(outbound::xml(xml)))
     }
@@ -261,11 +213,8 @@ impl Session {
             .map_err(|_| Error::Closed)
     }
 
-    /// Stop the session and wait for its thread.
-    ///
-    /// Order matters: the sender goes first so the pump sees its outbox close,
-    /// then the sockets are dropped to break any read in progress, and only
-    /// then can the join complete.
+    /// Stop the session and join its thread. Drop the sender, then the
+    /// sockets, then join.
     pub fn disconnect(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         self.outbox.take();
@@ -284,7 +233,6 @@ impl Drop for Session {
     }
 }
 
-/// Run the session until it ends or is stopped.
 fn spawn_pump(
     mut core: SessionCore<Stream>,
     outbox: Receiver<Outgoing>,
@@ -343,13 +291,8 @@ fn spawn_pump(
     })
 }
 
-/// How long to sleep after `idle` pumps with nothing to do.
-///
-/// Replacing three blocking readers with one poller trades a little idle CPU
-/// for a shape that also runs in a browser. The trade is bounded: while video
-/// is arriving the loop never reaches the later bands, so the latency that
-/// matters — a keystroke while the screen is busy — is never paid. A session
-/// watching a blank screensaver settles at 125 wakeups a second.
+/// Sleep after `idle` empty pumps. Busy sessions never reach the longer
+/// sleeps; an idle one settles at 125 wakeups/s.
 fn backoff(idle: u32) -> Duration {
     match idle {
         0..=64 => Duration::from_micros(250),

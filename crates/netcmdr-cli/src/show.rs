@@ -1,21 +1,17 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Printing the device's settings.
+//! Printing settings. One function per area, shared by `netcmdr <area> show`
+//! and `netcmdr config`.
 //!
-//! One function per area, so that `netcmdr <area> show` and the corresponding
-//! block of `netcmdr config` are the same code and cannot drift apart.
-//!
-//! Secrets — the LDAP bind password, RADIUS shared secrets, the SNMP community
-//! — are stored on the device in the clear and come back in every fetch. They
-//! are masked unless `--show-secrets` is given, so that a pasted `netcmdr config`
-//! does not hand them out.
+//! Secrets (LDAP bind password, RADIUS secrets, SNMP community) are masked
+//! unless `--show-secrets` is given.
 
 use netcmdr_mgmt::model::{DeviceConfig, Pdu, SerialDevice, User};
 use netcmdr_mgmt::{AuthMethod, Parity};
 
 use crate::args::{or_dash, show_port_list, yes_no};
 
-/// Width of the label column, chosen so the longest label still has a gap.
+/// Label column width.
 const LABEL: usize = 22;
 
 pub fn kv(key: &str, value: impl AsRef<str>) {
@@ -27,7 +23,6 @@ fn heading(title: &str) {
     println!("{}", "-".repeat(title.len()));
 }
 
-/// Mask a secret unless the caller asked to see it.
 fn secret(value: Option<&str>, reveal: bool) -> String {
     match value {
         None => "-".to_string(),
@@ -37,7 +32,7 @@ fn secret(value: Option<&str>, reveal: bool) -> String {
     }
 }
 
-/// Everything, in the order the device's own configuration dialog has it.
+/// Everything, in the vendor dialog's order.
 pub fn all(c: &DeviceConfig, secrets: bool) {
     device(c);
     heading("Network");
@@ -118,8 +113,7 @@ pub fn network(c: &DeviceConfig) {
     if n.ipv6_enabled {
         kv(
             "  address",
-            // The device reports `::/0` for "IPv6 is on but I have not got an
-            // address yet", which reads like a default route. Say so instead.
+            // `::/0` means no address yet.
             match (n.ipv6.as_deref(), n.ipv6_prefix) {
                 (Some("::") | None, _) => "-".to_string(),
                 (Some(a), Some(p)) if !a.is_empty() => format!("{a}/{p}"),
@@ -185,7 +179,7 @@ pub fn security(c: &DeviceConfig) {
     );
 }
 
-/// Seconds as the device's own dialog shows them: hours and minutes.
+/// Seconds as hours and minutes.
 fn duration(secs: u32) -> String {
     match (secs / 3600, (secs % 3600) / 60, secs % 60) {
         (0, 0, s) => format!("{s}s"),
@@ -406,7 +400,6 @@ fn pdu_line(p: &Pdu) -> String {
     )
 }
 
-/// The PDU models this firmware can drive.
 pub fn pdu_models(c: &DeviceConfig) {
     for t in &c.power.types {
         println!(
@@ -440,7 +433,6 @@ mod tests {
             "(set; --show-secrets to reveal)"
         );
         assert_eq!(secret(Some("hunter2"), true), "hunter2");
-        // Nothing stored is nothing to hide.
         assert_eq!(secret(Some(""), false), "-");
         assert_eq!(secret(None, false), "-");
     }

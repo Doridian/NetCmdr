@@ -1,51 +1,36 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Aligning the capture window with the picture the target is actually drawing.
+//! Aligns the capture window with the target's picture.
 //!
-//! The device digitises analog VGA. Where sampling starts is `hoffset` (pixel
-//! clocks from the horizontal sync edge) and `voffset` (lines from the vertical
-//! one), and both come from a video-mode table inside the firmware. Where the
-//! target's timing differs from that table — 1360×768 is one such mode — the
-//! capture window sits off the active area and an edge of the picture is cut
-//! off. The device's own automatic adjustment measures the same thing this
-//! does and is usually right, but it is the device's measurement, taken on the
-//! device's terms; this one is taken here, from the picture, and can be checked
-//! against the range the device itself declares.
+//! The device samples analog VGA starting at `hoffset` (pixel clocks after
+//! hsync) and `voffset` (lines after vsync), taken from a firmware mode table.
+//! When the target's timing differs from the table (e.g. 1360×768), an edge of
+//! the picture is cut off. This measures the offsets from the picture itself.
 //!
 //! # The measurement
 //!
-//! Lowering an offset moves the captured picture right (or down) and brings the
-//! blanking interval into view as dark lanes at the leading edge. One unit is
-//! one pixel or one line, so the error counts itself:
+//! Lowering an offset shifts the picture right/down and exposes blanking as
+//! dark lanes at the leading edge, one lane per unit:
 //!
 //! ```text
 //! correct = probe + blank_lanes(picture at probe)
 //! ```
 //!
-//! That is one probe and one addition — not a search. Measured against the
-//! hardware, every probe point agrees: on a 1360×768 target whose correct
-//! `hoffset` is 364, probing 360 showed 4 blank columns, 352 showed 12 and 348
-//! showed 16.
+//! One probe, no search. On hardware (1360×768, correct `hoffset` 364):
+//! probing 360 showed 4 blank columns, 352 showed 12, 348 showed 16.
 //!
-//! The device's `hoffset_min`/`hoffset_max` are exactly the mode's blanking
-//! interval, so a correct answer is always inside the range it reports. An
-//! answer outside it is a bad measurement, and refusing it is what keeps a dark
-//! picture from producing nonsense — see [`Aligner`].
+//! `hoffset_min`/`hoffset_max` are exactly the mode's blanking interval, so an
+//! answer outside that range is a bad measurement and is refused.
 //!
-//! # What makes this awkward
+//! # Caveats
 //!
-//! * **Blanking and black content are indistinguishable.** Same level, same
-//!   temporal noise. There is no metric that separates them; the range check
-//!   above is the guard, and [`has_content`] is what keeps an empty screen from
-//!   being measured at all.
-//! * **A session set equal to the device's stored value is silently dropped.**
-//!   The device compares each one against its stored config, so a probe cannot
-//!   be put back by setting the figure it started from. The way back is a
-//!   *stored* write ([`Step::Store`]), which updates that stored config rather
-//!   than being measured against it — and which is also how an answer is made
-//!   to outlive the session.
-//! * **A set reaches the picture 0.5–1.6 s later**, variably. Nothing here
-//!   sleeps a fixed amount; it watches the picture instead.
+//! * **Blanking and black content look identical.** The range check and
+//!   [`has_content`] are the only guards.
+//! * **A session set equal to the stored value is silently dropped**, so a
+//!   probe can't be undone by a session set. Use a stored write
+//!   ([`Step::Store`]), which also persists the answer.
+//! * **A set takes 0.5–1.6 s to show up.** We watch the picture rather than
+//!   sleeping.
 
 use netcmdr_proto::command::VideoSetting;
 
@@ -53,43 +38,30 @@ use crate::core::{Knob, VideoSettings};
 use crate::time::{Duration, Instant};
 use crate::video::Framebuffer;
 
-/// How far into the picture a leading blank run is followed.
-///
-/// A correct answer is bounded by the mode's blanking interval, which is tens
-/// of pixels; a run longer than this is dark *content*, not blanking, and the
-/// measurement is refused rather than guessed at.
+/// Longest leading blank run counted. Blanking is tens of pixels; anything
+/// longer is dark content and the measurement is refused.
 pub const MAX_BLANK_LANES: usize = 96;
 
-/// How far above the frame's own black level a lane has to reach to count as
-/// carrying picture.
-///
-/// Derived from the frame rather than hardcoded: the blanking floor measured
-/// between 11 and 16 depending on the frame, and the gain the device is running
-/// moves it.
+/// Margin above the frame's black level for a lane to count as picture. The
+/// floor varies (11–16 measured) with frame and gain, so it's relative.
 const CONTENT_MARGIN: u32 = 16;
 
-/// Lit pixels a frame needs before it is worth measuring — roughly two
-/// characters of console text.
+/// Lit pixels needed to be worth measuring (~two console characters).
 const MIN_CONTENT_PIXELS: usize = 256;
 
 /// How long the lane profile must hold still before a set counts as landed.
 const SETTLE_QUIET: Duration = Duration::from_millis(250);
-/// How long to wait for it, before measuring whatever is on screen.
+/// Give up waiting and measure what's there.
 const SETTLE_TIMEOUT: Duration = Duration::from_millis(4000);
-/// How long to wait for a picture worth measuring.
-///
-/// A frame arrives as tiles, so the framebuffer is sized well before it is
-/// filled: for the first moments of a session it is a blank screen that is
-/// merely on its way to being a picture. Waiting this out is the difference
-/// between measuring the target and refusing to.
+/// How long to wait for content. The framebuffer is sized before its tiles
+/// arrive, so early in a session it's blank.
 const CONTENT_TIMEOUT: Duration = Duration::from_millis(8000);
 
-/// Which of the two capture-position knobs an operation is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
-    /// Horizontal: `hoffset`, in pixel clocks. Columns.
+    /// `hoffset`, in pixel clocks (columns).
     H,
-    /// Vertical: `voffset`, in lines. Rows.
+    /// `voffset`, in lines (rows).
     V,
 }
 
@@ -101,7 +73,7 @@ impl Axis {
         }
     }
 
-    /// The device's own name for the knob, which is also what the report says.
+    /// The device's name for the knob.
     pub fn name(self) -> &'static str {
         match self {
             Axis::H => "hoffset",
@@ -116,11 +88,8 @@ impl Axis {
         }
     }
 
-    /// How far below the default to place the first probe.
-    ///
-    /// Large enough that the blanking is unmistakable, small enough not to
-    /// throw the picture off the far edge. The vertical blanking interval is
-    /// the smaller of the two, so its step is too.
+    /// How far below the default to probe. Vertical blanking is shorter, so
+    /// its step is smaller.
     fn step(self) -> i32 {
         match self {
             Axis::H => 16,
@@ -146,18 +115,14 @@ impl Axis {
 
 // --------------------------------------------------------------------- metrics
 
-/// Rec. 601 luma, which is all the picture is judged on: the blanking lanes are
-/// dark in every channel, so hue carries no information here.
+/// Rec. 601 luma.
 fn luma(px: u32) -> u32 {
     let (r, g, b) = ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
     (r * 77 + g * 151 + b * 28) >> 8
 }
 
-/// Per-lane maximum luma, for the first `n` lanes from the leading edge.
-///
-/// The *maximum* and not the mean: one bright pixel anywhere in a column is
-/// enough to prove that column is inside the active area, whereas a mean is
-/// dragged under the threshold by the black around it.
+/// Per-lane maximum luma for the first `n` lanes. Max, not mean: one bright
+/// pixel proves a lane is active.
 pub fn lane_maxima(fb: &Framebuffer, axis: Axis, n: usize) -> Vec<u32> {
     let (w, h) = (fb.width as usize, fb.height as usize);
     if w == 0 || h == 0 || fb.pixels.len() < w * h {
@@ -184,11 +149,7 @@ pub fn lane_maxima(fb: &Framebuffer, axis: Axis, n: usize) -> Vec<u32> {
     }
 }
 
-/// The frame's own blanking level: the darkest any whole lane gets.
-///
-/// A picture with any blanking on screen has at least one lane that is nothing
-/// but blanking, and that lane's maximum is the floor everything else is
-/// measured against.
+/// The frame's blanking level: the lowest lane maximum.
 pub fn black_level(fb: &Framebuffer, axis: Axis) -> u32 {
     lane_maxima(fb, axis, usize::MAX)
         .into_iter()
@@ -196,11 +157,8 @@ pub fn black_level(fb: &Framebuffer, axis: Axis) -> u32 {
         .unwrap_or(0)
 }
 
-/// How many leading lanes carry nothing but the blanking level, and the level
-/// they were judged against.
-///
-/// Counting stops at [`MAX_BLANK_LANES`]; a run that long is dark content, and
-/// the caller refuses rather than believes it.
+/// Count of leading blank lanes (capped at [`MAX_BLANK_LANES`]) and the black
+/// level used.
 pub fn blank_lanes(fb: &Framebuffer, axis: Axis) -> (usize, u32) {
     let black = black_level(fb, axis);
     let span = match axis {
@@ -214,18 +172,14 @@ pub fn blank_lanes(fb: &Framebuffer, axis: Axis) -> (usize, u32) {
     (n, black)
 }
 
-/// Whether there is anything in the picture to align to.
-///
-/// An all-black screen reads as blanking everywhere, and the arithmetic would
-/// hand back whatever the lane cap is. Saying "nothing to align to" is the
-/// honest answer; a target sitting at a bare console needs scrolling first.
+/// Whether the picture has anything to align to. An all-black screen would
+/// otherwise measure as the lane cap.
 pub fn has_content(fb: &Framebuffer) -> bool {
     let thresh = black_level(fb, Axis::H) + CONTENT_MARGIN;
     fb.pixels.iter().filter(|p| luma(**p) > thresh).count() >= MIN_CONTENT_PIXELS
 }
 
-/// Mean luma per lane, over the first `n` lanes — the cheap signal that says
-/// whether the picture is still moving.
+/// Mean luma per lane for the first `n` lanes; used to detect motion.
 fn lane_profile(fb: &Framebuffer, axis: Axis, n: usize) -> Vec<f32> {
     let (w, h) = (fb.width as usize, fb.height as usize);
     if w == 0 || h == 0 || fb.pixels.len() < w * h {
@@ -250,8 +204,7 @@ fn lane_profile(fb: &Framebuffer, axis: Axis, n: usize) -> Vec<f32> {
     }
 }
 
-/// Mean absolute difference between two profiles. Analog noise keeps this well
-/// under one level; a picture that has moved puts it far above.
+/// Mean absolute difference between two profiles. Noise stays well under 1.
 fn profile_dist(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return f32::INFINITY;
@@ -259,17 +212,16 @@ fn profile_dist(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f32>() / a.len() as f32
 }
 
-/// How far two profiles must differ to count as the picture having moved.
 const MOVED: f32 = 0.5;
 
-/// Watches the picture until it stops changing after a set.
+/// Waits for the picture to stop changing after a set.
 struct Settle {
     axis: Axis,
     started: Instant,
-    /// What the picture looked like when the set went out.
+    /// Profile when the set was sent.
     before: Vec<f32>,
     last: Vec<f32>,
-    /// Whether it has changed from `before` at all yet.
+    /// Changed from `before` yet.
     moved: bool,
     quiet_since: Instant,
 }
@@ -287,9 +239,8 @@ impl Settle {
         }
     }
 
-    /// True once the picture has landed — or once waiting for it has run out,
-    /// which is not an error: a set the device drops changes nothing, and
-    /// measuring the picture that is there is still the right thing to do.
+    /// True once the picture has settled or the wait timed out. A timeout
+    /// isn't an error: a dropped set changes nothing.
     fn poll(&mut self, now: Instant, fb: &Framebuffer) -> bool {
         let profile = lane_profile(fb, self.axis, self.axis.profile_lanes());
         if profile_dist(&profile, &self.last) > MOVED {
@@ -316,31 +267,25 @@ impl Settle {
 
 // ---------------------------------------------------------------------- report
 
-/// What became of one axis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The knob was moved to `to`, leaving `blank` lanes at the leading edge —
-    /// zero is what a correct answer gives.
+    /// Moved to `to`, leaving `blank` leading lanes (0 if correct).
     Corrected { to: i32, blank: usize },
-    /// The value the device was already holding was the right one; the probe
-    /// that proved it has been put back.
+    /// The stored value was already right; the probe was undone.
     AlreadyCorrect,
-    /// Nothing was changed, and why not.
+    /// Nothing changed, with the reason.
     Refused(String),
 }
 
-/// What one axis was measured to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxisReport {
     pub axis: Axis,
-    /// The value the device's mode table gave, which is what it is being
-    /// compared against.
+    /// The device's value before the run.
     pub default: i32,
     pub outcome: Outcome,
 }
 
 impl AxisReport {
-    /// One phrase for the status line.
     pub fn line(&self) -> String {
         let name = self.axis.name();
         match &self.outcome {
@@ -354,21 +299,19 @@ impl AxisReport {
     }
 }
 
-/// What a whole run found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub axes: Vec<AxisReport>,
 }
 
 impl Report {
-    /// Whether anything actually moved.
     pub fn changed(&self) -> bool {
         self.axes
             .iter()
             .any(|a| matches!(a.outcome, Outcome::Corrected { .. }))
     }
 
-    /// The whole run in one line, for the status bar.
+    /// One line for the status bar.
     pub fn summary(&self) -> String {
         if self.axes.is_empty() {
             return "nothing to align".into();
@@ -386,39 +329,26 @@ impl Report {
 /// What the caller should do next.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
-    /// Set this knob for the session — a probe. `Session::set_video_number`.
+    /// Session-only set (a probe): `Session::set_video_number`.
     Set(VideoSetting, i32),
-    /// Write these knobs into the device's stored config:
-    /// `Session::store_video_settings(settings, &changes)`, which adds the two
-    /// gains the device requires before it will store anything.
+    /// Stored write: `Session::store_video_settings(settings, &changes)`.
     ///
-    /// Every run ends with one of these. It is what puts a probed axis back
-    /// where it belongs — a session set of the value the device is already
-    /// holding would be dropped — and what makes a correction outlive the
-    /// session it was measured in.
+    /// Every run ends with one. It restores probed axes (a session set of the
+    /// stored value would be dropped) and persists corrections.
     Store(Vec<(VideoSetting, i32)>),
-    /// Nothing to do yet; poll again with the next frame.
+    /// Poll again with the next frame.
     Wait,
-    /// Finished. The knobs are where they are going to stay.
     Done(Report),
-    /// Gave up without finishing, and why.
     Failed(String),
 }
 
-/// How much of a run to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
-    /// Measure `voffset` as well as `hoffset`.
-    ///
-    /// Worth turning off for a target showing a bare console: the top rows are
-    /// empty, so there is nothing to measure vertically until it has scrolled.
+    /// Measure `voffset` too. Turn off for a bare console, whose top rows are
+    /// empty.
     pub vertical: bool,
-    /// After setting the answer, step one below it and confirm that exactly one
-    /// blank lane appears.
-    ///
-    /// This proves the answer rather than assuming it, and it is what the
-    /// measurement was established with. It roughly doubles the run — 18.6 s
-    /// against 11 s on the hardware — so it is off unless asked for.
+    /// After applying, step one below and check exactly one lane goes blank.
+    /// Roughly doubles the run (18.6 s vs 11 s on hardware).
     pub verify: bool,
 }
 
@@ -433,27 +363,25 @@ impl Default for Options {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
-    /// Waiting for a frame worth measuring.
+    /// Waiting for content.
     Start,
-    /// Put this axis' first probe on screen.
     Begin(Axis),
-    /// A probe is on screen; measure it once it settles.
+    /// Measure the probe once it settles.
     Probe {
         axis: Axis,
         probe: i32,
     },
-    /// Both axes measured; work out what to write.
+    /// Work out what to store.
     Decide,
-    /// The stored write has landed; check the leading edges came out clean.
+    /// Check the stored write left clean edges.
     Confirm,
-    /// Start on the next axis waiting to be verified, if any.
     NextVerify,
-    /// One below an answer is on screen; check exactly one lane went blank.
+    /// Check one below the answer shows exactly one blank lane.
     Verify {
         axis: Axis,
         answer: i32,
     },
-    /// Abandoned, and why. Whatever was moved is put back first.
+    /// Restore anything moved, then fail.
     Abort {
         why: String,
     },
@@ -461,12 +389,10 @@ enum Phase {
     Failed(String),
 }
 
-/// Measures the capture offsets from the picture and corrects them.
+/// Measures and corrects the capture offsets.
 ///
-/// This is a **polled** state machine and never blocks: the browser client
-/// pumps its session from the frame callback and has nowhere to block. Each
-/// call hands back one [`Step`]; the caller carries it out and calls again with
-/// the next frame.
+/// A non-blocking polled state machine (the browser can't block). Each poll
+/// returns one [`Step`] for the caller to carry out.
 ///
 /// ```no_run
 /// # use netcmdr_session::align::{Aligner, Options, Step};
@@ -486,25 +412,20 @@ enum Phase {
 /// # }
 /// ```
 ///
-/// The knob values in the [`VideoSettings`] passed in are what the device has
-/// *stored*: it never folds a session set back into the config it publishes, so
-/// they hold still under probing, which is what makes the comparison at the end
-/// meaningful. A [`Step::Store`] does change them — the device publishes a
-/// fresh config after one — so what each axis is reported against is captured
-/// when it is measured, not read back at the end.
+/// [`VideoSettings`] holds the *stored* values, which session sets don't
+/// change. A [`Step::Store`] does, so each axis's default is recorded when it
+/// is measured.
 pub struct Aligner {
     opts: Options,
     phase: Phase,
-    /// Set once a frame has been seen, so the wait for one can time out.
+    /// Content wait deadline, set on first poll.
     deadline: Option<Instant>,
     settle: Option<Settle>,
-    /// What each axis was measured to be, in the order they were done.
     measured: Vec<AxisReport>,
-    /// Every axis a probe has moved, with the figure the device was holding
-    /// before it was touched. A run that ends — finished or abandoned — owes
-    /// each of these either its answer or that figure back.
+    /// Probed axes and their original values; each gets its answer or its
+    /// original back when the run ends.
     touched: Vec<(Axis, i32)>,
-    /// Answers still to be stepped one below and checked, in [`Options::verify`].
+    /// Answers pending [`Options::verify`].
     to_verify: Vec<(Axis, i32)>,
 }
 
@@ -521,16 +442,12 @@ impl Aligner {
         }
     }
 
-    /// Whether the run is still going, and so still wants frames.
     pub fn is_running(&self) -> bool {
         !matches!(self.phase, Phase::Done(_) | Phase::Failed(_))
     }
 
-    /// Abandon the run.
-    ///
-    /// Anything already moved is written back first, so a run cut short does
-    /// not leave the capture sitting on a probe value. Keep polling until a
-    /// terminal [`Step`] comes back.
+    /// Abandon the run, restoring anything moved. Keep polling until a
+    /// terminal [`Step`].
     pub fn abort(&mut self, why: impl Into<String>) {
         if self.is_running() {
             self.settle = None;
@@ -538,7 +455,6 @@ impl Aligner {
         }
     }
 
-    /// Advance the run by whatever this frame allows.
     pub fn poll(&mut self, now: Instant, fb: &Framebuffer, v: &VideoSettings) -> Step {
         if let Some(settle) = &mut self.settle {
             if !settle.poll(now, fb) {
@@ -549,13 +465,9 @@ impl Aligner {
         self.advance(now, fb, v)
     }
 
-    /// Emit a session set — a probe — and start watching for the picture to
-    /// follow it.
-    ///
-    /// Nothing here ever asks for the value the device is holding: it compares
-    /// a session set against its stored config and silently drops one that
-    /// matches, so such a set would never land and the wait for it would only
-    /// time out. Putting a knob back is [`Aligner::store`]'s job.
+    /// Emit a probe and wait for it to land. Never called with the stored
+    /// value, which the device would drop; restoring is [`Aligner::store`]'s
+    /// job.
     fn set(
         &mut self,
         now: Instant,
@@ -571,11 +483,7 @@ impl Aligner {
         Step::Set(axis.setting(), value)
     }
 
-    /// Emit a stored write, and watch for the picture to follow it.
-    ///
-    /// One write carries every axis at once: the device takes a whole
-    /// `<video_settings>` element, and a run that corrected one axis while
-    /// putting the other back has exactly one thing to say.
+    /// Emit one stored write for all axes and wait for it to land.
     fn store(&mut self, now: Instant, fb: &Framebuffer, targets: &[(Axis, i32)]) -> Step {
         if let Some((axis, _)) = targets.first() {
             self.settle = Some(Settle::new(now, *axis, fb));
@@ -583,9 +491,7 @@ impl Aligner {
         Aligner::store_step(targets)
     }
 
-    /// The same write with nothing waiting on it — for the abandoned run, which
-    /// has nothing left to measure and should say so at once rather than
-    /// holding the caller for a settle it will not read.
+    /// The stored write without a settle wait, for aborts.
     fn store_step(targets: &[(Axis, i32)]) -> Step {
         Step::Store(
             targets
@@ -595,8 +501,7 @@ impl Aligner {
         )
     }
 
-    /// Where every axis the run touched belongs: its answer if it has one, and
-    /// the figure the device was holding before the probe if it does not.
+    /// Final value for each touched axis: its answer, else its original.
     fn targets(&self) -> Vec<(Axis, i32)> {
         self.touched
             .iter()
@@ -614,7 +519,6 @@ impl Aligner {
             .collect()
     }
 
-    /// The run is over; hand back what it found.
     fn done(&mut self) -> Phase {
         let report = Report {
             axes: std::mem::take(&mut self.measured),
@@ -632,8 +536,7 @@ impl Aligner {
         });
     }
 
-    /// Start on an axis, or fall through to the next one when this one offers
-    /// no room. Returns the step to hand back, if it produced one.
+    /// Start probing an axis, or skip it if there's no room below its default.
     fn begin_axis(
         &mut self,
         now: Instant,
@@ -706,8 +609,7 @@ impl Aligner {
                     tracing::debug!(axis = axis.name(), probe, blank, black, "probe measured");
 
                     if blank == 0 {
-                        // Not deep enough yet: the capture window still starts
-                        // inside the active area. Go further and look again.
+                        // Still inside the active area; probe deeper.
                         if probe > knob.min {
                             let deeper = (probe - axis.step()).max(knob.min);
                             self.phase = Phase::Probe {
@@ -744,10 +646,8 @@ impl Aligner {
                         continue;
                     }
 
-                    // `probe + blank` is the sampling start that puts the first
-                    // active lane at the edge. The device's own range is the
-                    // mode's blanking interval, so a real answer is inside it
-                    // and anything outside is a misread picture.
+                    // The device's range is the blanking interval, so an
+                    // answer outside it is a misread.
                     let answer = probe + blank as i32;
                     if answer > knob.max {
                         self.finish_axis(
@@ -779,13 +679,8 @@ impl Aligner {
                 }
 
                 Phase::Decide => {
-                    // Probing left every axis it touched sitting on a probe
-                    // value. One stored write puts them all where they belong —
-                    // the answer where there is one, the figure the device was
-                    // holding where there is not — and because the device
-                    // stores it rather than measuring it against what it has
-                    // stored, the value it started from is reachable again and
-                    // an answer outlives the session.
+                    // One stored write moves every probed axis to its answer
+                    // or back to its original, and persists the answers.
                     let targets = self.targets();
                     if targets.is_empty() {
                         self.phase = self.done();
@@ -797,9 +692,8 @@ impl Aligner {
                 }
 
                 Phase::Confirm => {
-                    // Every corrected axis should now show a clean leading
-                    // edge. One that does not is still the best answer the
-                    // measurement had, so it is reported rather than undone.
+                    // A corrected axis that still shows blanking is reported,
+                    // not undone; it's still the best answer we have.
                     let corrected: Vec<(Axis, i32)> = self
                         .measured
                         .iter()
@@ -833,11 +727,8 @@ impl Aligner {
                     Some((axis, answer)) => {
                         self.to_verify.remove(0);
                         let knob = axis.knob(v);
-                        // One below the answer must show exactly one blank
-                        // lane. Unless that value is the one the device is
-                        // holding, which it drops — the picture would not move
-                        // and the check would read as a failure rather than as
-                        // the set never happening.
+                        // Skip if one below is the stored value; the device
+                        // would drop the set.
                         let below = answer - 1;
                         if below < knob.min || below == knob.value {
                             continue;
@@ -863,8 +754,8 @@ impl Aligner {
                             "one below the answer should have shown exactly one blank lane"
                         );
                     }
-                    // Back to the answer, which the device is now holding — so
-                    // this has to be a stored write or it would be dropped.
+                    // The answer is now stored, so only a stored write can
+                    // return to it.
                     self.phase = Phase::NextVerify;
                     return self.store(now, fb, &[(axis, answer)]);
                 }
@@ -894,19 +785,13 @@ mod tests {
 
     const W: usize = 320;
     const H: usize = 240;
-    /// The blanking level the fake device digitises. Deliberately not zero:
-    /// the real one sits around 11–16 and everything here is relative to it.
+    /// Nonzero, like the real 11–16.
     const FLOOR: u32 = 12;
     const LIT: u32 = 0x00_30_C0_30;
 
-    /// One frame as the device would digitise it with `blank_cols` columns and
-    /// `blank_rows` rows of blanking showing at the leading edges.
-    ///
-    /// The active area is drawn as character cells — bright in the first half
-    /// of each cell, dark in the second — so that the first active lane is
-    /// bright (that is what makes the count meaningful) while plenty of later
-    /// lanes are fully dark (that is what gives [`black_level`] the floor
-    /// rather than the content).
+    /// A frame with `blank_cols`/`blank_rows` of leading blanking. The active
+    /// area is half-lit character cells, so the first active lane is bright
+    /// and later dark lanes give [`black_level`] its floor.
     fn render(blank_cols: usize, blank_rows: usize) -> Framebuffer {
         let mut fb = Framebuffer::new();
         fb.resize(W as u16, H as u16);
@@ -939,21 +824,16 @@ mod tests {
         parse_video_settings(&xml).expect("settings")
     }
 
-    /// The device, as far as the aligner can tell: a capture window that can be
-    /// moved, a stored config a session set is measured against and silently
-    /// dropped for matching, and stored writes that move both.
+    /// Fake device: session sets matching the stored value are dropped;
+    /// stored writes move both capture and config.
     struct Fake {
         settings: VideoSettings,
         at_h: i32,
         at_v: i32,
         correct_h: i32,
         correct_v: i32,
-        /// Every session set the aligner asked for, to prove none was a
-        /// dropped one.
         sets: Vec<(VideoSetting, i32)>,
-        /// Every stored write, as the list of knobs it carried.
         stores: Vec<Vec<(VideoSetting, i32)>>,
-        /// Overrides the picture entirely, for the nothing-to-measure case.
         blank_screen: bool,
     }
 
@@ -989,16 +869,13 @@ mod tests {
 
         fn set(&mut self, setting: VideoSetting, value: i32) {
             self.sets.push((setting, value));
-            // The device compares a session set against its stored config, and
-            // one that matches goes nowhere.
+            // Dropped, like the real device.
             if value == self.stored(setting) {
                 return;
             }
             self.point_capture(setting, value);
         }
 
-        /// A stored write: the capture moves *and* the config the device
-        /// publishes moves with it, which is what makes it outlive the session.
         fn store(&mut self, changes: &[(VideoSetting, i32)]) {
             self.stores.push(changes.to_vec());
             for (setting, value) in changes {
@@ -1024,13 +901,11 @@ mod tests {
         }
     }
 
-    /// Drive a whole run against the fake and hand back how it ended.
     fn run(fake: &mut Fake, opts: Options) -> Step {
         let mut aligner = Aligner::new(opts);
         let base = Instant::now();
-        // One tick is longer than `SETTLE_QUIET`, so a set that moves the
-        // picture lands in two polls and one that does not runs out the
-        // settle timeout — both as they do against the device.
+        // Ticks exceed `SETTLE_QUIET`: a moving set lands in two polls, a
+        // dropped one hits the settle timeout.
         for tick in 1..4000u32 {
             let now = base + Duration::from_millis(300 * tick as u64);
             let fb = fake.frame();
@@ -1077,8 +952,7 @@ mod tests {
 
     #[test]
     fn the_black_level_is_the_frames_own_floor_not_a_constant() {
-        // Lift the whole picture: the floor has to come up with it, or every
-        // lane reads as content.
+        // Lifting the picture must lift the floor too.
         let mut fb = render(8, 0);
         for px in &mut fb.pixels {
             *px += 0x00_20_20_20;
@@ -1129,8 +1003,7 @@ mod tests {
 
     #[test]
     fn it_probes_deeper_until_blanking_appears() {
-        // 16 below the default is still inside the active area; the answer is
-        // only reachable from the second probe down.
+        // The first probe is still inside the active area.
         let mut fake = Fake::new(340, 24);
         let report = done(run(&mut fake, horizontal()));
 
@@ -1158,8 +1031,6 @@ mod tests {
         );
     }
 
-    /// The value the device is holding is the one a session set cannot reach,
-    /// so an axis that was right all along is put back by a stored write.
     #[test]
     fn an_already_correct_axis_is_put_back_by_a_stored_write() {
         let mut fake = Fake::new(368, 24);
@@ -1173,8 +1044,6 @@ mod tests {
 
     #[test]
     fn a_correct_axis_does_not_cost_the_other_one_its_correction() {
-        // One write carries both: the axis that was already right goes back
-        // to where it was, the other to its answer.
         let mut fake = Fake::new(368, 25);
         let report = done(run(&mut fake, Options::default()));
 
@@ -1216,8 +1085,7 @@ mod tests {
 
     #[test]
     fn an_answer_past_the_devices_own_range_is_refused() {
-        // 440 is inside the picture but outside `hoffset_max` — the range is
-        // the mode's blanking interval, so this is a misread, not an answer.
+        // Past `hoffset_max`.
         let mut fake = Fake::new(440, 24);
         let report = done(run(&mut fake, horizontal()));
 
@@ -1258,8 +1126,7 @@ mod tests {
 
         assert_eq!(report.summary(), "hoffset 368 → 364");
         assert_eq!(fake.at_h, 364, "left on the answer, not on the check");
-        // The probe and the check are session sets; the answer is stored, both
-        // when it is first applied and when the check is stepped back from.
+        // Probe and check are session sets; the answer is stored twice.
         let probes: Vec<i32> = fake.sets.iter().map(|(_, v)| *v).collect();
         assert_eq!(probes, vec![352, 363]);
         assert_eq!(
@@ -1285,7 +1152,6 @@ mod tests {
             match aligner.poll(now, &fb, &v) {
                 Step::Set(setting, value) => {
                     fake.set(setting, value);
-                    // A mode change mid-probe invalidates everything measured.
                     if !aborted {
                         aborted = true;
                         aligner.abort("the video mode changed");

@@ -2,26 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Physical keys, and the PC set-1 scancodes the device replays.
 //!
-//! The device drives a real PS/2 keyboard controller on the target, so what it
-//! wants is the *physical* key — the position on the keyboard — not the
-//! character that key produces. The target applies its own layout.
+//! Keys are physical positions; the target applies its own layout.
 //!
-//! [`PhysicalKey`] is named after the W3C UI Events `code` values, because that
-//! is what a browser hands us directly as `KeyboardEvent.code`, and because
-//! those names describe US-layout *positions*, which is exactly the set-1 code
-//! space. `winit` names its `KeyCode` from the same specification, so the two
-//! agree everywhere except the Windows/Command key, which winit calls `Super`
-//! and the W3C calls `Meta`.
+//! [`PhysicalKey`] uses W3C `KeyboardEvent.code` names, which `winit` shares
+//! except `Super` vs `Meta`. W3C name, winit key and scancode live in one
+//! table so they can't drift.
 //!
-//! # Why one table
-//!
-//! There are three mappings here — the W3C name, the `winit` key, and the
-//! scancode — and keeping them in three tables is how a key quietly stops
-//! working on one platform only. They are one table with three columns, and
-//! everything else is generated from it.
-//!
-//! Checked against the vendor client's own table (`JVKEYTOSCAN` in
-//! `com.minicom.plugin.km_impl`).
+//! Checked against the vendor's `JVKEYTOSCAN` (`com.minicom.plugin.km_impl`).
 
 /// Build the key enum and every mapping over it from one table.
 macro_rules! physical_keys {
@@ -47,7 +34,7 @@ macro_rules! physical_keys {
                 }
             }
 
-            /// Parse a `KeyboardEvent.code`, as a browser reports it.
+            /// Parse a `KeyboardEvent.code`.
             pub fn from_code(code: &str) -> Option<PhysicalKey> {
                 match code {
                     $(stringify!($web) => Some(PhysicalKey::$web),)*
@@ -59,10 +46,7 @@ macro_rules! physical_keys {
             pub const ALL: &'static [PhysicalKey] = &[$(PhysicalKey::$web,)*];
         }
 
-        /// Translate a `winit` physical key.
-        ///
-        /// `None` for a key the device has no code for; there is nothing
-        /// sensible to send for those.
+        /// `None` if the device has no code for it.
         #[cfg(feature = "winit")]
         pub fn from_winit(key: winit::keyboard::KeyCode) -> Option<PhysicalKey> {
             match key {
@@ -73,10 +57,9 @@ macro_rules! physical_keys {
     };
 }
 
-// The two oddities in the vendor's own table, kept because the device expects
-// them: Pause sends 0x45 unextended while Num Lock sends 0x45 extended, and
-// Print Screen sends 0x37 extended. The numeric keypad otherwise shares codes
-// with the navigation block and is told apart only by *not* being extended.
+// Vendor quirks the device expects: Pause is 0x45 unextended, Num Lock 0x45
+// extended, Print Screen 0x37 extended. The keypad shares codes with the
+// navigation block, distinguished by not being extended.
 //
 //   W3C code      winit KeyCode   scancode  extended
 physical_keys! {
@@ -201,13 +184,11 @@ mod tests {
 
     #[test]
     fn the_device_has_a_code_for_every_key_we_name() {
-        // A scancode of zero would be a hole in the table rather than a key.
         for &key in PhysicalKey::ALL {
             assert_ne!(key.scancode().0, 0, "{key:?}");
         }
     }
 
-    /// The two entries the vendor's own table gets counter-intuitively right.
     #[test]
     fn pause_and_num_lock_share_a_code_and_differ_only_in_the_extended_flag() {
         assert_eq!(PhysicalKey::Pause.scancode(), (0x45, false));
@@ -215,8 +196,6 @@ mod tests {
         assert_eq!(PhysicalKey::PrintScreen.scancode(), (0x37, true));
     }
 
-    /// The keypad shares codes with the navigation block; not being extended
-    /// is the only thing that tells them apart.
     #[test]
     fn the_keypad_is_the_unextended_half_of_the_navigation_codes() {
         assert_eq!(PhysicalKey::Numpad7.scancode(), (0x47, false));
@@ -225,8 +204,6 @@ mod tests {
         assert_eq!(PhysicalKey::Insert.scancode(), (0x52, true));
     }
 
-    /// A browser says Meta where winit says Super. The table carries both, so
-    /// this is the one place the difference is visible.
     #[test]
     fn the_windows_key_is_meta_on_the_web() {
         assert_eq!(

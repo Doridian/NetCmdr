@@ -2,22 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The app-level `<commands>` control vocabulary.
 //!
-//! These are the documents the GUI hands to its plugin facade
-//! (`com.minicom.app.video.controller.cmds.*`, still present in the current
-//! firmware's client). The plugin re-encodes them as [`crate::kvmmsg`] messages
-//! on the wire — so these are the *facade* language, not the wire format. See
+//! Documents the GUI hands its plugin (`com.minicom.app.video.controller.cmds.*`),
+//! which re-encodes them as [`crate::kvmmsg`] messages. See
 //! `research/notes/FINDINGS.md` §5.1.
 //!
-//! Attribute spellings are the vendor's, typos included (`session_exlusive`),
-//! because the device parses them literally.
+//! Spellings are the vendor's, typos included (`session_exlusive`).
 
 use std::fmt::Write as _;
 
-/// Escape a value for use inside a single-quoted XML attribute.
-///
-/// The stock client does no escaping at all — it builds these with
-/// `Formatter.format`, so a password containing `'` would corrupt the document.
-/// We escape properly; the device's parser accepts entities.
+/// Escape for a single-quoted XML attribute. (The stock client doesn't.)
 fn attr(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     for c in v.chars() {
@@ -71,24 +64,19 @@ impl MousePointer {
     }
 }
 
-/// One knob of the device's analog video capture.
-///
-/// These are the seven settings behind the stock client's Advanced Video
-/// dialog (`AdvancedVideoCmd`, whose integer constants these mirror). Each is
-/// set on its own, as a single attribute of a `<video_settings>` element —
-/// see [`set_video_setting`] for a set that lasts the session, and
-/// [`store_video_settings`] for one the device keeps.
+/// An analog capture setting, from the Advanced Video dialog
+/// (`AdvancedVideoCmd`). See [`set_video_setting`] (session) and
+/// [`store_video_settings`] (persistent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoSetting {
     Brightness,
     Contrast,
-    /// Where the digitiser starts sampling each scan line, in pixels.
+    /// Sampling start per line, in pixels.
     HOffset,
     /// Sampling phase within the pixel clock, 0–31.
     Phase,
     VOffset,
-    /// Reported by the device but given no control in the vendor's own dialog,
-    /// and answered with a `-10000000` sentinel on every mode seen so far.
+    /// Unused; always reported as `-10000000`.
     Scale,
     Filter,
 }
@@ -107,13 +95,9 @@ impl VideoSetting {
     }
 }
 
-/// The noise filter applied to the digitised signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoFilter {
-    /// Not a filter setting at all: the vendor's dialog answers this choice by
-    /// running [`auto_video_adjust`] instead of sending anything, because the
-    /// device picks the filter itself as part of that. Callers must do the
-    /// same; sending `filter='auto'` is not what the stock client does.
+    /// Not sendable: run [`auto_video_adjust`] instead, as the vendor does.
     Auto,
     None,
     Low,
@@ -132,7 +116,7 @@ impl VideoFilter {
         }
     }
 
-    /// Parse the value the device reports in `<video_settings filter='…'/>`.
+    /// Parse `<video_settings filter='…'/>`.
     pub fn parse(s: &str) -> Option<VideoFilter> {
         Some(match s.trim() {
             "auto" => VideoFilter::Auto,
@@ -154,9 +138,7 @@ pub enum PowerCommand {
 }
 
 impl PowerCommand {
-    /// The client's `PowerCmd` substitutes these straight into
-    /// `power_command='%s'`; names match the toolbar menu items in
-    /// `environ.xml` (`power_cycle`, `power_up`, `power_down`).
+    /// Value for `power_command='%s'` (`PowerCmd`).
     fn as_str(self) -> &'static str {
         match self {
             PowerCommand::Cycle => "power_cycle",
@@ -172,9 +154,9 @@ pub struct Connect<'a> {
     pub ip: &'a str,
     pub username: &'a str,
     pub password: &'a str,
-    /// KVM switch port number (1-based), as a string in the wire format.
+    /// 1-based switch port.
     pub switch_port: &'a str,
-    /// Session TCP port; the client defaults to `900`.
+    /// Session port, usually `900`.
     pub tcp_port: &'a str,
     pub exclusivity: Exclusivity,
 }
@@ -193,11 +175,7 @@ pub fn connect(c: &Connect<'_>) -> String {
     ))
 }
 
-/// `<command name='disconnect'/>`
-///
-/// The Java client compares against this exact string when deciding whether to
-/// allow a command through after the proxy is torn down, so the formatting is
-/// load-bearing.
+/// `<command name='disconnect'/>`. The Java client compares this exact string.
 pub fn disconnect() -> String {
     wrap("<command name='disconnect'/>")
 }
@@ -320,46 +298,28 @@ pub fn config(inner: &str) -> String {
     wrap(&s)
 }
 
-/// Set one analog video knob for the rest of the session, as a `config`
-/// command.
-///
-/// One attribute per command is the vendor's own granularity: its Advanced
-/// Video dialog sends a fresh document for every slider release and every
-/// spinner click, rather than the whole `<video_settings>` element.
-///
-/// A write this small is an **overlay**: it reaches the picture, the device
-/// keeps reporting its stored figure, and the next login has forgotten it.
-/// [`store_video_settings`] is the one that lasts.
+/// Set one video setting for the session (an overlay, as the vendor's sliders
+/// do). Not reported back or persisted; see [`store_video_settings`].
 pub fn set_video_setting(setting: VideoSetting, value: &str) -> String {
     video_settings(&[(setting, value)])
 }
 
-/// Write analog video knobs into the device's stored configuration.
+/// Persist video settings.
 ///
-/// The device commits a `<video_settings>` element to its own config — where it
-/// survives the session, a target switch and the next login — **exactly when
-/// the element carries both `brightness` and `contrast`**. Anything else is an
-/// overlay ([`set_video_setting`]). Not the whole document, not the video mode
-/// named, not the number of attributes: those two gains. Hardware-measured, one
-/// attribute set at a time; `research/notes/FINDINGS.md` §5.4 has the table.
+/// The device stores a `<video_settings>` element **only if it has both
+/// `brightness` and `contrast`**; otherwise it's an overlay
+/// ([`set_video_setting`]). Measured on hardware; see
+/// `research/notes/FINDINGS.md` §5.4. The vendor's Advanced Video OK button
+/// does this by resending the whole fetched config.
 ///
-/// This is what the stock client's Advanced Video **OK** button does, by
-/// accident of implementation: `FetchDataWorker.sendXConfigToDevice()` returns
-/// the entire config document it fetched when the dialog opened, gains and all,
-/// while the sliders behind it send one attribute each.
-///
-/// The device answers a committed write with a fresh `CONFIG_XML` push, and an
-/// overlay with nothing at all, so the push is the acknowledgement.
-///
-/// Callers are expected to include [`VideoSetting::Brightness`] and
-/// [`VideoSetting::Contrast`]; without them the device silently treats this as
-/// an overlay. `netcmdr_session::Session::store_video_settings` adds them from the
-/// device's own report so that a caller cannot forget.
+/// A stored write is acknowledged by a fresh `CONFIG_XML`; an overlay by
+/// nothing. `netcmdr_session::Session::store_video_settings` adds the gains
+/// automatically.
 pub fn store_video_settings(values: &[(VideoSetting, &str)]) -> String {
     video_settings(values)
 }
 
-/// `<config><video_settings …/></config>` with whatever attributes are given.
+/// `<config><video_settings …/></config>`.
 fn video_settings(values: &[(VideoSetting, &str)]) -> String {
     let mut inner = String::from("<video_settings");
     for (setting, value) in values {
@@ -369,7 +329,6 @@ fn video_settings(values: &[(VideoSetting, &str)]) -> String {
     config(&inner)
 }
 
-/// Session exclusivity change, expressed as a `config` command.
 pub fn set_exclusivity(e: Exclusivity) -> String {
     config(&format!("<session_exlusive  value='{}'/>", e.as_str()))
 }
@@ -428,7 +387,7 @@ mod tests {
         assert!(!set_exclusivity(Exclusivity::Exclusive).contains("session_exclusive"));
     }
 
-    /// The exact document `AdvancedVideoCmd` builds, one attribute at a time.
+    /// Matches `AdvancedVideoCmd`.
     #[test]
     fn a_video_setting_matches_the_client_literal() {
         assert_eq!(
@@ -438,8 +397,7 @@ mod tests {
         );
     }
 
-    /// The two gains are what makes the device store the element rather than
-    /// overlay it, so a stored write is not a stored write without them.
+    /// Without both gains the device only overlays.
     #[test]
     fn a_stored_write_carries_both_gains() {
         let xml = store_video_settings(&[
@@ -469,7 +427,6 @@ mod tests {
         assert_eq!(VideoFilter::parse("sharpen"), None);
     }
 
-    /// The names are the device's, and it parses them literally.
     #[test]
     fn video_setting_names_are_the_vendors() {
         assert_eq!(VideoSetting::HOffset.as_str(), "hoffset");

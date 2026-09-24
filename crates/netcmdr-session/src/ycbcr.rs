@@ -2,24 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! YCbCr → RGB conversion for the video stream.
 //!
-//! Transcribed from `com.minicom.plugin.ycbcr.YCbCrToRGB` in the current
-//! firmware's client.
+//! Transcribed from `com.minicom.plugin.ycbcr.YCbCrToRGB`.
 //!
-//! The frame grabber packs each 32-bit word as two luma samples plus a shared
-//! chroma pair. The low bit of each luma byte (word bits 0 and 16) is stolen to
-//! form a two-bit *selector* saying how the chroma is laid out — 0 for a
-//! self-contained pair, 1 or 2 when one chroma half must be borrowed from a
-//! later word in the same tile row ([`find_next_order`]), 3 for "skip". That
-//! theft is why every sample is masked to 7 bits and doubled on the way in.
+//! Each 32-bit word holds two luma samples and a chroma pair. The low bit of
+//! each luma byte (bits 0 and 16) forms a selector: 0 = self-contained, 1/2 =
+//! borrow a chroma half from a later word ([`find_next_order`]), 3 = skip.
+//! Hence samples are masked to 7 bits and doubled.
 //!
-//! The R and B outputs are deliberately crossed over relative to the maths (the
-//! `R` buffer receives the blue-difference result and vice versa); the caller
-//! crosses them back when writing pixels, which is how the vendor's framebuffer
-//! ends up in `0x00RRGGBB` order. Both halves of that swap are reproduced here
-//! so the pipeline stays byte-identical to the client's.
+//! R and B outputs are crossed over, and the caller crosses them back, as in
+//! the vendor client.
 
-/// Input modes (`YCbCrToRGB.YCBCRMODE*`). Mode 0 (RGB 5:5:5) exists in the Java
-/// but `VideoModel` never selects it, so it is not ported.
+/// Input modes (`YCbCrToRGB.YCBCRMODE*`). Mode 0 (RGB555) is never used and
+/// isn't ported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
     /// `ALX_YCBCRMODE4_2_2`: two pixels per 32-bit word.
@@ -29,8 +23,7 @@ pub enum InputMode {
     Ycbcr400,
 }
 
-/// The converter, holding its output planes across frames so they are not
-/// reallocated per message.
+/// Output planes are reused across frames.
 #[derive(Debug, Default)]
 pub struct YCbCrToRgb {
     mode: InputMode,
@@ -55,26 +48,25 @@ impl YCbCrToRgb {
         self.tile_cx = cx;
     }
 
-    /// Number of valid pixels in the output planes.
+    /// Valid pixels in the output planes.
     pub fn color_buf_size(&self) -> usize {
         self.color_buf_size
     }
 
-    /// Blue-difference result — see the note on channel crossover above.
+    /// Blue-difference result (crossed over; see module docs).
     pub fn r_plane(&self) -> &[u8] {
         &self.r
     }
     pub fn g_plane(&self) -> &[u8] {
         &self.g
     }
-    /// Red-difference result — see the note on channel crossover above.
+    /// Red-difference result (crossed over; see module docs).
     pub fn b_plane(&self) -> &[u8] {
         &self.b
     }
 
-    /// `Convert`. `len` bytes of `data` are consumed; `byte_swap` reverses each
-    /// 32-bit group in place first (`Inplace_eShuttle2BSbuf`), which frames that
-    /// came through the LZW expander have already had applied.
+    /// `Convert`. Consumes `len` bytes; `byte_swap` first reverses each 32-bit
+    /// group (`Inplace_eShuttle2BSbuf`), unneeded for LZW frames.
     pub fn convert(&mut self, data: &mut [u8], len: usize, byte_swap: bool) {
         let len = len.min(data.len());
         if byte_swap {
@@ -124,8 +116,8 @@ impl YCbCrToRgb {
                     o += 1;
                 }
                 1 => {
-                    // This word carries only the first chroma half; the second
-                    // comes from the next word whose low bit is clear.
+                    // Second chroma half comes from the next word with a clear
+                    // low bit.
                     let saved = v;
                     let borrowed =
                         (v & 0xFE) | (find_next_order(self.tile_cx, i, data) & 0xFE00_FE00);
@@ -158,7 +150,7 @@ impl YCbCrToRgb {
                     self.put(o, &out);
                     o += 1;
                 }
-                // Selector 3 emits nothing at all, not even a placeholder pixel.
+                // Selector 3 emits nothing.
                 _ => {}
             }
         }
@@ -201,8 +193,7 @@ pub fn inplace_word_swap(data: &mut [u8]) {
     }
 }
 
-/// `YCbCr2RGBcalc`. `ycc` is (Y, Cb, Cr); `out` receives (R, G, B) — which the
-/// caller then stores crossed over.
+/// `YCbCr2RGBcalc`: (Y, Cb, Cr) to (R, G, B).
 fn ycbcr_to_rgb(ycc: &[i32; 3], out: &mut [i32; 3]) {
     let (y, cb, cr) = (ycc[0], ycc[1], ycc[2]);
     out[0] = ((298 * y + 408 * cr) >> 8) - 223;
@@ -213,10 +204,8 @@ fn ycbcr_to_rgb(ycc: &[i32; 3], out: &mut [i32; 3]) {
     }
 }
 
-/// `FindNextOrder`: scan forward for the word holding the borrowed chroma half.
-///
-/// The search walks at most half a tile row and stops at the first word whose
-/// low bit is clear; running off the end of the buffer yields zero.
+/// `FindNextOrder`: find the word with the borrowed chroma half, scanning up
+/// to half a tile row for a clear low bit. Past the end yields zero.
 fn find_next_order(tile_cx: usize, idx: usize, data: &[u8]) -> u32 {
     let half = tile_cx / 2;
     if half == 0 {
@@ -313,8 +302,7 @@ mod tests {
 
     #[test]
     fn find_next_order_gives_up_after_half_a_tile_row() {
-        // Every word's low bit is set, so the scan exhausts its step budget and
-        // returns whatever it stopped on, exactly as the client does.
+        // No clear low bit: returns wherever the scan stopped, as the client does.
         let data = vec![1u8; 64];
         assert_eq!(find_next_order(8, 0, &data), 0x0101_0101);
     }

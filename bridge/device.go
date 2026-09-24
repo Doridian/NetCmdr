@@ -14,13 +14,9 @@ import (
 	"time"
 )
 
-// SocketType is which of the four session connections a socket is.
-//
-// The client makes all four to the same port. Cmd and KeyboardMouse upgrade to
-// TLS; Video and VirtualMedia run in the clear. That is the device's design,
-// not a shortcut taken here. Transcribed from
-// com.minicom.plugin.data.SocketType, and kept in step with
-// crates/netcmdr-proto/src/kvmmsg.rs, which is authoritative.
+// SocketType is one of the four session connections. Cmd and KeyboardMouse
+// use TLS; Video and VirtualMedia don't. Mirrors
+// crates/netcmdr-proto/src/kvmmsg.rs.
 type SocketType int32
 
 const (
@@ -35,11 +31,8 @@ func (s SocketType) usesTLS() bool {
 	return s == SocketCmd || s == SocketKeyboardMouse
 }
 
-// socketTypeByName maps the "type" query parameter onto a socket, naming the
-// channels as the protocol write-up names them rather than by their wire codes.
-//
-// The relay must not be steerable by name: an unknown one is a refusal, never a
-// fallback.
+// socketTypeByName maps the "type" query parameter to a socket. Unknown names
+// are refused.
 func socketTypeByName(name string) (SocketType, bool) {
 	switch name {
 	case "cmd":
@@ -54,26 +47,14 @@ func socketTypeByName(name string) (SocketType, bool) {
 	return 0, false
 }
 
-// deviceTLS is the only TLS configuration that reaches this device.
+// deviceTLS is the TLS config for this device.
 //
-// The device (Embedthis Appweb 2.4.x on Windows CE) offers no ECDHE suite at
-// all and no TLS 1.3 — only DHE and static RSA. Go's crypto/tls has never
-// implemented finite-field DHE and offers no way to add it, so the static RSA
-// suites are the whole of the overlap, and they have to be named explicitly:
-// Go 1.22 dropped RSA key exchange from the default list, and a nil
-// CipherSuites here fails the handshake outright.
+// The device offers only DHE and static RSA, and Go has no DHE, so static RSA
+// suites must be listed explicitly (Go 1.22 removed them from the defaults).
+// This loses forward secrecy on /message.pv, matching the session sockets.
+// See README.md#tls.
 //
-// What this costs is forward secrecy on the management channel, where the Rust
-// client keeps it by asking OpenSSL for security level 1 and negotiating DHE
-// over the device's 1024-bit group. The session sockets on port 900 already
-// negotiate AES256-GCM-SHA384 — static RSA — with either client, so this only
-// moves /message.pv onto the footing the command and keyboard channels were
-// always on. See README.md#tls.
-//
-// Verification is off: the certificate is self-signed with no trust anchor, and
-// the vendor's own Java client verifies nothing either (SocketUtils installs a
-// trust-all X509TrustManager). So this is no weaker than stock — but it does
-// mean the session is only as private as the network it crosses.
+// The certificate is self-signed and not verified, as in the vendor client.
 func deviceTLS() *tls.Config {
 	return &tls.Config{
 		InsecureSkipVerify: true,
@@ -87,9 +68,7 @@ func deviceTLS() *tls.Config {
 	}
 }
 
-// Device is the one device this bridge is pointed at. The address and both
-// ports are fixed at startup and cannot be steered by a request, which is what
-// keeps the bridge from being an open relay.
+// Device is the bridge's fixed target.
 type Device struct {
 	Host        string
 	HTTPSPort   uint16
@@ -104,8 +83,7 @@ func (d *Device) dialTLS(addr string) (*tls.Conn, error) {
 		return nil, err
 	}
 	if tcp, ok := raw.(*net.TCPConn); ok {
-		// Nagle off is an optimisation, not a requirement: a device that
-		// refuses it still speaks the protocol correctly.
+		// Best effort.
 		_ = tcp.SetNoDelay(true)
 	}
 	if err := raw.SetDeadline(time.Now().Add(d.Timeout)); err != nil {
@@ -120,17 +98,9 @@ func (d *Device) dialTLS(addr string) (*tls.Conn, error) {
 	return conn, nil
 }
 
-// PostMessagePV posts body to /message.pv and returns the response body.
-//
-// A fresh TLS connection is made per call. The device's session state lives in
-// the SESSIONID carried inside the XML, not in the transport, so there is
-// nothing to keep open between requests.
-//
-// The HTTP is hand-rolled rather than handed to net/http, for the same reason
-// the Rust client hand-rolls it: the request is one POST with a small XML body,
-// the server honours Connection: close, and a close_notify from a CE device can
-// surface as an unclean shutdown that a stricter client would report as an
-// error after it already had every byte of the answer.
+// PostMessagePV posts body to /message.pv over a fresh connection and returns
+// the response body. HTTP is hand-rolled because the device's unclean TLS
+// shutdown would make net/http report an error.
 func (d *Device) PostMessagePV(body string) (string, error) {
 	addr := net.JoinHostPort(d.Host, strconv.Itoa(int(d.HTTPSPort)))
 	conn, err := d.dialTLS(addr)
@@ -150,9 +120,7 @@ func (d *Device) PostMessagePV(body string) (string, error) {
 		return "", err
 	}
 
-	// Read to EOF: the server closes because we asked it to. An error with
-	// bytes already in hand is the unclean shutdown described above, and the
-	// response is complete by then.
+	// An error after data is the unclean shutdown; the response is complete.
 	raw, err := io.ReadAll(conn)
 	if err != nil && len(raw) == 0 {
 		return "", err
@@ -189,12 +157,8 @@ func parseHTTPResponse(raw []byte) (string, error) {
 //  3. read 4 bytes back and check the device echoed the same code,
 //  4. for the command and keyboard/mouse sockets only, start TLS.
 //
-// Transcribed from com.minicom.plugin.socket.{KVMSocket,SocketUtils}. This is
-// the whole device-specific part of opening a channel, and the only place that
-// decides whether TLS is started.
-//
-// sessionID is the SESSIONID from the HTTPS login — the same token the
-// management API returns.
+// Transcribed from com.minicom.plugin.socket.{KVMSocket,SocketUtils}.
+// sessionID is the SESSIONID from the HTTPS login.
 func (d *Device) DialSession(sessionID string, socket SocketType) (net.Conn, error) {
 	addr := net.JoinHostPort(d.Host, strconv.Itoa(int(d.SessionPort)))
 	raw, err := net.DialTimeout("tcp", addr, d.Timeout)
@@ -230,7 +194,6 @@ func (d *Device) DialSession(sessionID string, socket SocketType) (net.Conn, err
 	}
 
 	if !socket.usesTLS() {
-		// The relay sets its own deadlines from here on.
 		if err := raw.SetDeadline(time.Time{}); err != nil {
 			_ = raw.Close()
 			return nil, err

@@ -2,25 +2,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The remote screen as an egui texture.
 //!
-//! The session decodes into a plain `u32` framebuffer; everything on screen is
-//! drawn by egui, so the framebuffer is uploaded as a texture and the video is
-//! just an image the menu is drawn over.
-//!
-//! The upload is incremental. A 1280×1024 screen is five megabytes as RGBA, and
-//! the device sends a message per changed tile, so re-uploading the whole thing
-//! for every message would cost far more than decoding it. `Event::Frame`
-//! carries the rectangle that changed, [`Screen::mark`] accumulates those into
-//! one bounding box, and [`Screen::upload`] sends only that box.
+//! Uploads are incremental: [`Screen::mark`] accumulates changed rects into a
+//! bounding box and [`Screen::upload`] sends only that.
 
 use netcmdr_session::Rect;
 
-/// The remote screen, held as an egui texture.
 pub struct Screen {
     texture: Option<egui::TextureHandle>,
     size: (u16, u16),
-    /// Union of the rectangles changed since the last upload.
+    /// Changed since the last upload.
     dirty: Option<Rect>,
-    /// Scratch buffer for the converted pixels, so an upload allocates nothing.
+    /// Reused conversion buffer.
     scratch: Vec<egui::Color32>,
 }
 
@@ -48,9 +40,7 @@ impl Screen {
         self.size
     }
 
-    /// Note that `rect` changed; uploads are deferred to the next [`upload`].
-    ///
-    /// [`upload`]: Screen::upload
+    /// Mark `rect` for the next [`Screen::upload`].
     pub fn mark(&mut self, rect: Rect) {
         if rect.is_empty() {
             return;
@@ -66,18 +56,14 @@ impl Screen {
         });
     }
 
-    /// Throw the picture away.
-    ///
-    /// Used when the session is about to show a *different* machine: the
-    /// device keeps sending the old target's tiles for several seconds after a
-    /// port change, so the safe thing is to have nothing to draw at all until
-    /// it re-syncs. The next [`Screen::upload`] rebuilds the texture whole.
+    /// Drop the picture, e.g. on target switch (the device sends stale tiles
+    /// for a few seconds). The next [`Screen::upload`] rebuilds it.
     pub fn blank(&mut self) {
         self.texture = None;
         self.dirty = None;
     }
 
-    /// Mark the whole screen, for a resolution change or a repaint.
+    /// Mark the whole screen.
     pub fn mark_all(&mut self) {
         self.dirty = Some(Rect {
             left: 0,
@@ -87,14 +73,13 @@ impl Screen {
         });
     }
 
-    /// Push whatever changed into the texture. Returns true if anything moved.
+    /// Returns true if anything was uploaded.
     pub fn upload(&mut self, ctx: &egui::Context, frame: &netcmdr_session::Framebuffer) -> bool {
         if frame.width == 0 || frame.height == 0 {
             return false;
         }
 
-        // A resolution change invalidates the texture outright: egui textures
-        // cannot be resized in place.
+        // egui textures can't be resized in place.
         if self.size != (frame.width, frame.height) {
             self.size = (frame.width, frame.height);
             self.texture = None;
@@ -102,10 +87,8 @@ impl Screen {
         }
 
         let options = egui::TextureOptions {
-            // Sharp when magnified — the source is a captured screen and
-            // blurring it makes small text unreadable — but smoothed when the
-            // window is smaller than the target's screen, where nearest
-            // neighbour would drop whole rows of pixels.
+            // Nearest when magnifying (keeps text sharp), linear when
+            // minifying (avoids dropped rows).
             magnification: egui::TextureFilter::Nearest,
             minification: egui::TextureFilter::Linear,
             ..Default::default()
@@ -155,7 +138,7 @@ impl Screen {
     }
 }
 
-/// `0x00RRGGBB` as the decoder writes it, to an opaque egui colour.
+/// `0x00RRGGBB` to an opaque egui colour.
 fn rgb(px: u32) -> egui::Color32 {
     egui::Color32::from_rgb((px >> 16) as u8, (px >> 8) as u8, px as u8)
 }

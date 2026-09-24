@@ -1,12 +1,7 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Talking to `netcmdr-bridge` from a browser.
-//!
-//! Every URL here is relative, because the bridge serves this page as well as
-//! relaying for it. That is not a convenience: it means the WebSockets and the
-//! management calls are same-origin, so there is no CORS to arrange and no
-//! second address to configure. It also means a `wss:` page gets `wss:`
-//! sockets, which a browser insists on.
+//! Talking to `netcmdr-bridge`. URLs are relative (same origin), so no CORS,
+//! and `wss:` pages get `wss:` sockets.
 
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -18,7 +13,7 @@ fn window() -> web_sys::Window {
     web_sys::window().expect("a browser window")
 }
 
-/// POST one `CMA_Message` to the bridge and return the device's answer.
+/// POST a `CMA_Message` and return the reply.
 pub async fn post_message_pv(body: &str) -> Result<String, String> {
     let init = RequestInit::new();
     init.set_method("POST");
@@ -44,17 +39,13 @@ pub async fn post_message_pv(body: &str) -> Result<String, String> {
     .unwrap_or_default();
 
     if !response.ok() {
-        // The bridge puts the device's own complaint in the body.
         return Err(format!("{} — {}", response.status(), text.trim()));
     }
     Ok(text)
 }
 
-/// Open one session channel and give the bridge the session id.
-///
-/// The id is the first message rather than part of the URL: it is base64 and
-/// routinely carries `+`, `/` and `=`, and it is a credential, which has no
-/// business in anything that gets logged.
+/// Open a channel and send the session id as the first message (not in the
+/// URL, where it would need escaping and could be logged).
 pub async fn open_channel(kind: &str, session_id: &str) -> Result<WebSocket, String> {
     let location = window().location();
     let scheme = if location.protocol().unwrap_or_default() == "https:" {
@@ -85,8 +76,7 @@ async fn await_open(socket: &WebSocket, kind: &str) -> Result<(), String> {
         let on_open = wasm_bindgen::closure::Closure::once_into_js(move || {
             let _ = resolve.call0(&JsValue::NULL);
         });
-        // A bridge that refuses the upgrade closes instead of opening, and the
-        // close carries the reason it could not give as an HTTP status.
+        // A refused upgrade closes with the reason.
         let why = kind.clone();
         let on_close =
             wasm_bindgen::closure::Closure::once_into_js(move |event: web_sys::CloseEvent| {
@@ -108,10 +98,7 @@ async fn await_open(socket: &WebSocket, kind: &str) -> Result<(), String> {
         .map(|_| ())
 }
 
-/// Yield to the browser for `ms` milliseconds.
-///
-/// Used while waiting on the device: the page must go back to the event loop
-/// or the socket callbacks that carry the answer never run.
+/// Yield for `ms` milliseconds so socket callbacks can run.
 pub async fn sleep(ms: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _| {
         let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);

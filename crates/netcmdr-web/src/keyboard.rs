@@ -1,22 +1,13 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Raw key capture, which eframe cannot do for us.
+//! Raw key capture. `egui::Key` lacks 25 of the device's 106 keys (keypad,
+//! locks, Print Screen, Pause, Menu, Meta), so we read `KeyboardEvent.code`
+//! directly.
 //!
-//! eframe reports keys as `egui::Key`, and `egui::Key` cannot name 25 of the
-//! 106 keys this device has: the whole numeric keypad, Caps/Num/Scroll Lock,
-//! Print Screen, Pause, Context Menu and Meta. A KVM replays *physical*
-//! scancodes, and the keyboard channel's modifier word carries the three lock
-//! states explicitly, so the losses are not cosmetic.
+//! Listeners run in the capture phase before eframe's and, while the target
+//! has the keyboard, call `preventDefault` and `stopPropagation`.
 //!
-//! `KeyboardEvent.code` is exactly the vocabulary [`PhysicalKey`] speaks, so
-//! these listeners read it directly. They run in the **capture** phase, ahead
-//! of eframe's own, and while the target owns the keyboard they call
-//! `preventDefault` and `stopPropagation` — which both stops the browser acting
-//! on the key and stops eframe seeing it.
-//!
-//! What cannot be taken: a browser keeps Ctrl+W, Ctrl+T, Ctrl+N and F11 for
-//! itself whatever a page asks. Those are what the Keyboard menu's macros are
-//! for, exactly as they are on a desktop whose window manager claims them.
+//! Browsers always keep Ctrl+W, Ctrl+T, Ctrl+N and F11; use the Keyboard menu.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -27,10 +18,8 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::KeyboardEvent;
 
-/// A listener, held alive for as long as it is attached to the page.
 type KeyListener = Closure<dyn FnMut(KeyboardEvent)>;
 
-/// One key event, as the viewer wants it.
 pub struct KeyEvent {
     pub key: PhysicalKey,
     pub down: bool,
@@ -39,20 +28,15 @@ pub struct KeyEvent {
     pub alt: bool,
 }
 
-/// Keys captured since the last frame drained them.
 #[derive(Clone)]
 pub struct Keyboard {
     events: Rc<RefCell<VecDeque<KeyEvent>>>,
-    /// Whether the target, rather than the menu, should be getting keys.
-    /// The listeners read this at event time, so the app refreshes it each
-    /// frame from the viewer.
+    /// Whether the target gets keys; refreshed each frame.
     to_target: Rc<Cell<bool>>,
-    /// Held so the listeners stay attached.
     _listeners: Rc<Vec<KeyListener>>,
 }
 
 impl Keyboard {
-    /// Attach the listeners to the page.
     pub fn attach() -> Keyboard {
         let events: Rc<RefCell<VecDeque<KeyEvent>>> = Rc::new(RefCell::new(VecDeque::new()));
         let to_target = Rc::new(Cell::new(false));
@@ -69,8 +53,6 @@ impl Keyboard {
                 let Some(key) = PhysicalKey::from_code(&event.code()) else {
                     return; // a key the device has no code for
                 };
-                // Do this before queueing: the browser acts on the default the
-                // moment we return, and eframe's listener is next in line.
                 event.prevent_default();
                 event.stop_propagation();
                 queue.borrow_mut().push_back(KeyEvent {
@@ -98,7 +80,6 @@ impl Keyboard {
         }
     }
 
-    /// Tell the listeners who owns the keyboard right now.
     pub fn set_target_has_focus(&self, yes: bool) {
         self.to_target.set(yes);
     }

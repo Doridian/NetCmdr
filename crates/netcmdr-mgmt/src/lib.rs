@@ -2,15 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Management client for Tripp Lite NetCommander / Minicom Smart IP KVM switches.
 //!
-//! Current-firmware protocol, verified against a live B070-008-19-IP
-//! (firmware 2.2.1258.1.0) on 2026-09-19. All management goes through a
-//! single endpoint over TLS:
+//! Verified against a B070-008-19-IP (firmware 2.2.1258.1.0). Everything goes
+//! through one endpoint:
 //!
 //! ```text
 //! POST https://<device>/message.pv
 //! ```
 //!
-//! The body is a `CMA_Message` XML document. There are five verbs:
+//! The body is a `CMA_Message` XML document:
 //!
 //! | `name`           | purpose                                              |
 //! |------------------|------------------------------------------------------|
@@ -21,14 +20,8 @@
 //! | `CMA_CONFIG`     | write the configuration back                          |
 //! | `CMA_POST`       | upload a file: firmware, SIU firmware, TLS certificate |
 //!
-//! Authentication returns a `SESSIONID` that every subsequent request carries
-//! as an attribute. The client is synchronous — each call is one short
-//! request/response — see [`transport`] for why it uses OpenSSL directly rather
-//! than a normal HTTP client.
-//!
-//! The request bodies here match the ones the device's own client sends
-//! (`com.minicom.app.config.controller.http.pv.*`), byte for byte, because the
-//! device's parser is literal about them.
+//! Login returns a `SESSIONID` carried by every later request. The client is
+//! synchronous; see [`transport`] for why it uses OpenSSL directly.
 
 pub mod config;
 pub mod model;
@@ -51,10 +44,7 @@ pub use transport::Endpoint;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
-/// XML-escape a value for a double-quoted attribute.
-///
-/// The stock client does no escaping — it concatenates strings — so a password
-/// containing `"` or `&` would break its request. We escape properly.
+/// XML-escape for a double-quoted attribute. (The stock client doesn't.)
 pub(crate) fn attr(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     for c in v.chars() {
@@ -70,9 +60,7 @@ pub(crate) fn attr(v: &str) -> String {
     out
 }
 
-/// Power actions for a target mapped to an IP-PDU outlet.
-///
-/// Strings match the device client's `PowerTargetHttpCmd` (`cycle`/`up`/`down`).
+/// IP-PDU outlet power action (`PowerTargetHttpCmd`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerCommand {
     Cycle,
@@ -90,13 +78,11 @@ impl PowerCommand {
     }
 }
 
-/// The exclusive right to write configuration, taken and released around a
-/// save (`CMA_PERMISSION`). Only one session may hold `Config` at a time.
+/// Exclusive config write access (`CMA_PERMISSION`), held around a save.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
-    /// Exclusive configuration access.
     Config,
-    /// The ordinary state: no exclusive access held.
+    /// No exclusive access.
     Normal,
 }
 
@@ -110,11 +96,10 @@ impl Permission {
     }
 }
 
-/// What the device did with a configuration save.
+/// Result of a config save.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaveOutcome {
-    /// The device is rebooting to apply the change, so the session is gone.
-    /// Network and TCP-port changes do this.
+    /// The device is rebooting (network and port changes); the session is gone.
     pub rebooting: bool,
 }
 
@@ -139,15 +124,14 @@ pub struct SiuUpgradeStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiuVersion {
     pub port: u32,
-    /// e.g. `20373 0.2 20372 2.0 ID00080207`. `None` when no unit answered.
+    /// e.g. `20373 0.2 20372 2.0 ID00080207`.
     pub hardware: Option<String>,
-    /// e.g. `RoC II USB En v4.0 C8 B225 12/03/2013`. `None` when none answered.
+    /// e.g. `RoC II USB En v4.0 C8 B225 12/03/2013`.
     pub firmware: Option<String>,
 }
 
 impl SiuVersion {
-    /// Whether a unit answered at all. A port with nothing plugged in reports
-    /// `"Not responding"`, which this crate reads as an absence.
+    /// False when the device reports `"Not responding"`.
     pub fn responding(&self) -> bool {
         self.hardware.is_some() || self.firmware.is_some()
     }
@@ -189,8 +173,7 @@ pub enum Error {
     #[error("device reported: {0}")]
     Device(String),
 
-    /// Something is wrong with the configuration or with a value for it, found
-    /// here rather than reported by the device.
+    /// A config problem found locally, not by the device.
     #[error("{0}")]
     Config(String),
 }
@@ -202,25 +185,18 @@ impl From<openssl::ssl::HandshakeError<std::net::TcpStream>> for Error {
     }
 }
 
-/// A management client bound to one device.
-///
-/// Construct with [`Client::connect`], which also authenticates.
-///
-/// This is the native client: it owns a blocking TLS transport. A browser
-/// cannot have one — see `netcmdr-bridge` — so the web client drives the same
-/// protocol through [`crate::request`] and [`crate::model`] instead, with
-/// `fetch` in between.
+/// Native management client with a blocking TLS transport. The web client uses
+/// [`crate::request`] and [`crate::model`] over `fetch` instead.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Client {
     endpoint: Endpoint,
     session_id: String,
-    /// Facts the device volunteered at login.
     auth: AuthReply,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Client {
-    /// Connect and authenticate in one step.
+    /// Connect and log in.
     pub fn connect(host: &str, username: &str, password: &str) -> Result<Self, Error> {
         Client::connect_with(
             host,
@@ -231,7 +207,6 @@ impl Client {
         )
     }
 
-    /// Connect and authenticate with an explicit port and timeout.
     pub fn connect_with(
         host: &str,
         port: u16,
@@ -265,35 +240,26 @@ impl Client {
         })
     }
 
-    /// Facts the device reported at login (hardware family, capabilities, …).
+    /// Device info from login.
     pub fn auth_info(&self) -> &AuthReply {
         &self.auth
     }
 
-    /// The active session token. This is also what the KVM session socket's
-    /// preamble needs.
+    /// Also used by the KVM session handshake.
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
-    /// Send one `CMA_Message` and return the reply, turning a `reply_error`
-    /// into an [`Error::Device`].
-    ///
-    /// `timeout` overrides the client's default for the calls the device is
-    /// slow at: the vendor's client allows a save 60 s and a fetch 45 s, and
-    /// an upload takes as long as the flash write does.
+    /// Send a `CMA_Message`; a `reply_error` becomes [`Error::Device`].
+    /// `timeout` overrides the default for slow calls (the vendor allows 60 s
+    /// for a save, 45 s for a fetch).
     fn message(&self, verb: &str, inner: &str, timeout: Option<Duration>) -> Result<String, Error> {
         let body = request::envelope(verb, &self.session_id, inner);
         let mut endpoint = self.endpoint.clone();
         if let Some(t) = timeout {
             endpoint.timeout = t.max(self.endpoint.timeout);
         }
-        // Whole bodies, at TRACE only, because recovering this protocol means
-        // reading them. They are not redacted and cannot usefully be: a save
-        // carries any password being set, and a config fetch comes back with
-        // the session token, the RADIUS secrets and the SNMP community in the
-        // clear. Treat a trace log as containing every credential the device
-        // holds.
+        // Unredacted: TRACE logs contain every credential the device holds.
         tracing::trace!(verb, body = %inner, "sending");
         let xml = transport::post_message_pv(&endpoint, &body)?;
         tracing::trace!(verb, reply = %xml, "received");
@@ -311,41 +277,31 @@ impl Client {
         self.message("CMA_ACTION", inner, None)
     }
 
-    /// Fetch the full device configuration as raw XML.
-    ///
-    /// Both views of the configuration come from this one request, so a caller
-    /// that needs the typed view *and* the editable document can take them from
-    /// a single round trip instead of two.
+    /// Raw config XML, from which both typed and editable views can be parsed.
     pub fn config_raw(&self) -> Result<String, Error> {
         self.request("<request_data value=\"config\" type=\"full\"/>")
     }
 
-    /// Fetch the full device configuration.
     pub fn config(&self) -> Result<DeviceConfig, Error> {
         parse_config(&self.config_raw()?)
     }
 
-    /// Fetch runtime status (firmware, LAN, per-port state).
+    /// Runtime status (firmware, LAN, per-port state).
     pub fn status(&self) -> Result<Status, Error> {
         let xml =
             self.request("<request_data value=\"status\" type=\"full\" changetime=\"0\"/>")?;
         parse_status(&xml)
     }
 
-    /// The configured KVM targets (ports and names).
     pub fn targets(&self) -> Result<Vec<Target>, Error> {
         Ok(self.config()?.targets)
     }
 
-    /// Fetch a document as raw XML, for debugging or fields not yet modelled.
-    ///
-    /// `value` is the `request_data value=` selector, e.g. `"config"`,
-    /// `"status"`, `"switch"`.
+    /// Raw XML by `request_data value=` selector, e.g. `"config"`, `"status"`.
     pub fn fetch_raw(&self, value: &str) -> Result<String, Error> {
         self.request(&format!("<request_data value=\"{}\"/>", attr(value)))
     }
 
-    /// Power-control a target's IP-PDU outlet.
     pub fn power(&self, port: u32, command: PowerCommand) -> Result<(), Error> {
         self.action(&format!(
             "<action type=\"power\" command=\"{}\" port=\"{}\"/>",
@@ -355,26 +311,19 @@ impl Client {
         Ok(())
     }
 
-    /// Reboot the device. Drops every active session.
+    /// Drops every active session.
     pub fn reboot(&self) -> Result<(), Error> {
         self.action("<action type=\"reboot\"/>")?;
         Ok(())
     }
 
-    /// Fetch the configuration as an editable document.
-    ///
-    /// This is the read half of every change: mutate the returned
-    /// [`ConfigDoc`] and hand it to [`Client::save_config`].
+    /// Editable config; modify and pass to [`Client::save_config`].
     pub fn config_doc(&self) -> Result<ConfigDoc, Error> {
         ConfigDoc::parse(&self.config_raw()?)
     }
 
-    /// Take or release exclusive configuration access (`CMA_PERMISSION`).
-    ///
-    /// The calls that need it take it themselves — [`Client::save_config`],
-    /// [`Client::backup`], [`Client::restore`], [`Client::factory_restore`] —
-    /// so call this directly only to release a permission a crashed run left
-    /// behind.
+    /// Take or release exclusive config access (`CMA_PERMISSION`). Methods that
+    /// need it take it themselves; call this only to clear a stale lock.
     pub fn permission(&self, level: Permission) -> Result<(), Error> {
         self.message(
             "CMA_PERMISSION",
@@ -384,18 +333,9 @@ impl Client {
         Ok(())
     }
 
-    /// Run one request with exclusive configuration access held.
-    ///
-    /// The device answers `backup` and the two restores with *access denied*
-    /// unless the caller holds it, the same as a configuration write. Without
-    /// the release afterwards it stays locked against the next writer until
-    /// its own timeout, so the release runs even when the request failed —
-    /// warned about rather than returned, because the request's own error is
-    /// the one worth having.
-    ///
-    /// `release` is false for the requests that reboot the device: the session
-    /// is gone by the time they answer, and there is nothing left to hand
-    /// back.
+    /// Run a request with exclusive config access, releasing it even on
+    /// failure (a release error is only logged). `release` is false for
+    /// requests that reboot the device.
     fn holding_config_permission<T>(
         &self,
         release: bool,
@@ -411,17 +351,11 @@ impl Client {
         out
     }
 
-    /// Write the configuration back.
+    /// Write the configuration back, holding exclusive access as the vendor
+    /// client does.
     ///
-    /// The device takes exclusive configuration access first and gives it back
-    /// afterwards, exactly as the vendor's client does — without the release,
-    /// the device stays locked against the next writer until its own timeout.
-    /// The release is skipped when the save triggers a reboot, because the
-    /// session is already gone by then.
-    ///
-    /// Every setting in the document is applied, not just the ones that
-    /// changed, so build the document with [`Client::config_doc`] immediately
-    /// before saving rather than reusing an old one.
+    /// Every setting is applied, so fetch with [`Client::config_doc`] just
+    /// before saving.
     pub fn save_config(&self, doc: &ConfigDoc) -> Result<SaveOutcome, Error> {
         self.permission(Permission::Config)?;
 
@@ -434,7 +368,6 @@ impl Client {
         let xml = match saved {
             Ok(xml) => xml,
             Err(e) => {
-                // Do not leave the device locked because the save failed.
                 if let Err(release) = self.permission(Permission::Normal) {
                     tracing::warn!(error = %release, "could not release config permission");
                 }
@@ -467,10 +400,7 @@ impl Client {
         Ok(())
     }
 
-    /// Download a configuration backup.
-    ///
-    /// The payload is opaque: the device's own client writes it to a file
-    /// verbatim and hands it back on a restore without looking inside.
+    /// Download an opaque configuration backup.
     pub fn backup(&self) -> Result<String, Error> {
         let xml = self.holding_config_permission(true, || {
             self.message(
@@ -482,11 +412,8 @@ impl Client {
         model::reply_data(&xml).ok_or_else(|| Error::Device("backup reply carried no data".into()))
     }
 
-    /// Restore a backup taken with [`Client::backup`].
-    ///
-    /// `preserve` keeps the device's network settings, so a backup from one
-    /// unit can be restored onto another without taking it off the network.
-    /// The device reboots when this succeeds.
+    /// Restore a [`Client::backup`]. `preserve` keeps network settings. The
+    /// device reboots.
     pub fn restore(&self, backup: &str, preserve: bool) -> Result<(), Error> {
         let body = format!(
             "<action type=\"restore_from_backup\" preserve=\"{}\"/><data><![CDATA[{}]]></data>",
@@ -509,15 +436,11 @@ impl Client {
         Ok(())
     }
 
-    /// Install a TLS certificate and its private key on the management server.
+    /// Install a PEM certificate and key. `key_password` is `""` if the key is
+    /// unencrypted.
     ///
-    /// `key_password` is the passphrase on the key, or `""` for an unencrypted
-    /// one. Both arguments are PEM text.
-    ///
-    /// Note the vendor's client puts the *certificate* inside `<private>` and
-    /// the *key* inside `<public>` (`InstallSslHttpCmd`); the element names are
-    /// simply the wrong way round, and this matches it so the device sees what
-    /// it expects.
+    /// The vendor puts the certificate in `<private>` and the key in `<public>`
+    /// (`InstallSslHttpCmd`); we match it.
     pub fn install_certificate(
         &self,
         certificate: &str,
@@ -537,10 +460,8 @@ impl Client {
         Ok(())
     }
 
-    /// Upload a firmware image and start the upgrade.
-    ///
-    /// Poll [`Client::upgrade_status`] for progress. **Untested against
-    /// hardware.**
+    /// Upload firmware and start the upgrade; poll [`Client::upgrade_status`].
+    /// **Untested on hardware.**
     pub fn upgrade_device(&self, image: &str) -> Result<(), Error> {
         self.message(
             "CMA_POST",
@@ -558,8 +479,7 @@ impl Client {
         model::parse_upgrade_status(&self.request("<request_data value=\"status\"/>")?)
     }
 
-    /// Upload SIU (Server Interface Unit) firmware and upgrade the units on
-    /// `ports`. **Untested against hardware.**
+    /// Upload SIU firmware and upgrade `ports`. **Untested on hardware.**
     pub fn upgrade_sius(&self, image: &str, ports: &[u32]) -> Result<(), Error> {
         self.message(
             "CMA_POST",
@@ -582,17 +502,11 @@ impl Client {
         )?)
     }
 
-    /// Read the firmware and hardware revision of the SIU on one port.
+    /// SIU firmware and hardware revision on one port. Takes a second or two;
+    /// an empty port gives an empty [`SiuVersion`].
     ///
-    /// The device has to talk to the unit over the Cat5 link, so this takes a
-    /// second or two. A port with no SIU answers `"Not responding"`, which
-    /// comes back as a [`SiuVersion`] with nothing in it.
-    ///
-    /// **One port per request.** The vendor's client appends a `<port>` element
-    /// per port and sends them in one message, but the device answers only for
-    /// the first and silently drops the rest — measured on firmware
-    /// 2.2.1258.1.0, where asking for ports 1 and 2 together returned only
-    /// port 1 even though both had a SIU attached.
+    /// **One port per request**: the device ignores all but the first `<port>`
+    /// (measured on 2.2.1258.1.0), though the vendor client sends several.
     pub fn siu_version(&self, port: u32) -> Result<SiuVersion, Error> {
         let xml = self.message(
             "CMA_ACTION",
@@ -605,28 +519,18 @@ impl Client {
             .ok_or_else(|| Error::Device(format!("device said nothing about port {port}")))
     }
 
-    /// [`Client::siu_version`] for several ports.
-    ///
-    /// This is one round trip **per port**, because the device answers for only
-    /// one at a time; a full sweep of a 16-port switch takes half a minute. A
-    /// caller that wants to show progress should loop over
-    /// [`Client::siu_version`] itself.
+    /// [`Client::siu_version`] per port (~30 s for 16 ports).
     pub fn siu_versions(&self, ports: &[u32]) -> Result<Vec<SiuVersion>, Error> {
         ports.iter().map(|&p| self.siu_version(p)).collect()
     }
 
-    /// Log out, ending the session on the device.
     pub fn logout(self) -> Result<(), Error> {
         transport::post_message_pv(&self.endpoint, &request::logout(&self.session_id))?;
         Ok(())
     }
 }
 
-/// Check that a payload can go inside a CDATA section.
-///
-/// `]]>` would end the section early and let the rest of the payload be parsed
-/// as markup. Nothing the device produces contains it, so refusing is better
-/// than silently splitting the section.
+/// Reject payloads containing `]]>`, which would end the CDATA section.
 #[cfg(not(target_arch = "wasm32"))]
 fn cdata_safe(payload: &str) -> Result<&str, Error> {
     if payload.contains("]]>") {
@@ -652,7 +556,6 @@ mod tests {
 
     #[test]
     fn escapes_credentials_in_auth_body() {
-        // Building the body must survive a password with XML metacharacters.
         let body = format!(
             "<CMA_Message name=\"CMA_AUTHORIZE\"><user name=\"{}\" password=\"{}\"/></CMA_Message>",
             attr("ad\"min"),

@@ -1,20 +1,12 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The `CMA_Message` bodies, as values.
-//!
-//! These are pure string builders with no transport attached, which is what
-//! lets the web client reuse them. Natively [`crate::Client`] posts them over
-//! its own TLS; in a browser the same strings go out through `fetch` to
-//! `netcmdr-bridge`, which forwards them verbatim. Either way there is one
-//! description of what the device is asked, and it is this one.
-//!
-//! The bodies match the device client's own
-//! (`com.minicom.app.config.controller.http.pv.*`) byte for byte, because the
-//! device's parser is literal about them.
+//! `CMA_Message` body builders, transport-free so the web client can reuse
+//! them. Byte-identical to `com.minicom.app.config.controller.http.pv.*`, since
+//! the device parses them literally.
 
 use crate::{attr, PowerCommand};
 
-/// Log in. The reply carries the `SESSIONID` everything else needs.
+/// Log in. The reply carries the `SESSIONID`.
 pub fn authorize(username: &str, password: &str) -> String {
     format!(
         "<CMA_Message name=\"CMA_AUTHORIZE\"><user name=\"{}\" password=\"{}\"/></CMA_Message>",
@@ -23,8 +15,7 @@ pub fn authorize(username: &str, password: &str) -> String {
     )
 }
 
-/// Log out. The same verb as the login, distinguished by carrying a session
-/// and no user.
+/// Log out: the login verb with a session and no user.
 pub fn logout(session_id: &str) -> String {
     format!(
         "<CMA_Message name=\"CMA_AUTHORIZE\" SESSIONID=\"{}\"></CMA_Message>",
@@ -32,7 +23,6 @@ pub fn logout(session_id: &str) -> String {
     )
 }
 
-/// Wrap `inner` in an authenticated envelope.
 pub fn envelope(verb: &str, session_id: &str, inner: &str) -> String {
     format!(
         "<CMA_Message name=\"{}\" SESSIONID=\"{}\">{}</CMA_Message>",
@@ -42,17 +32,16 @@ pub fn envelope(verb: &str, session_id: &str, inner: &str) -> String {
     )
 }
 
-/// Read something. `value` is the `request_data value=` selector.
+/// `value` is the `request_data value=` selector.
 pub fn request(session_id: &str, inner: &str) -> String {
     envelope("CMA_REQUEST", session_id, inner)
 }
 
-/// Do something.
 pub fn action(session_id: &str, inner: &str) -> String {
     envelope("CMA_ACTION", session_id, inner)
 }
 
-/// The full configuration document, which is also where the target list lives.
+/// The full config, including the target list.
 pub fn config(session_id: &str) -> String {
     request(session_id, "<request_data value=\"config\" type=\"full\"/>")
 }
@@ -65,7 +54,7 @@ pub fn status(session_id: &str) -> String {
     )
 }
 
-/// Any document by selector, e.g. `"config"`, `"status"`, `"switch"`.
+/// By selector, e.g. `"config"`, `"status"`, `"switch"`.
 pub fn fetch(session_id: &str, value: &str) -> String {
     request(
         session_id,
@@ -73,7 +62,6 @@ pub fn fetch(session_id: &str, value: &str) -> String {
     )
 }
 
-/// Power-control a target's IP-PDU outlet.
 pub fn power(session_id: &str, port: u32, command: PowerCommand) -> String {
     action(
         session_id,
@@ -85,7 +73,7 @@ pub fn power(session_id: &str, port: u32, command: PowerCommand) -> String {
     )
 }
 
-/// Reboot the device. Drops every active session.
+/// Drops every active session.
 pub fn reboot(session_id: &str) -> String {
     action(session_id, "<action type=\"reboot\"/>")
 }
@@ -102,8 +90,7 @@ mod tests {
         assert!(!body.contains("SESSIONID"));
     }
 
-    /// The stock client concatenates strings and would break on these; we do
-    /// not. A password is the likeliest place for one to turn up.
+    /// The stock client doesn't escape these.
     #[test]
     fn credentials_are_escaped() {
         let body = authorize("a&b", "p\"<>");
@@ -111,8 +98,7 @@ mod tests {
         assert!(body.contains("password=\"p&quot;&lt;&gt;\""));
     }
 
-    /// The session token is base64 and routinely contains characters that are
-    /// markup-significant if they reach the document unescaped.
+    /// Base64 session tokens can contain markup characters.
     #[test]
     fn the_session_token_is_escaped_too() {
         let body = config("a\"b&c");

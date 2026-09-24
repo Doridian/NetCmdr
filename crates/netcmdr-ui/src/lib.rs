@@ -2,14 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The KVM viewer's user interface, shared by the native and web clients.
 //!
-//! Everything a person sees lives here: the menu bar, the remote screen, the
-//! dialogs and the input routing between them. None of it knows whether it is
-//! in a window or a browser tab — what differs is behind [`platform`], which
-//! the two shells implement.
-//!
-//! The split is deliberate. There is one description of what the viewer does,
-//! and each shell supplies only what genuinely cannot be shared: a window and
-//! an OpenGL context, and raw key and pointer events.
+//! Menu bar, remote screen, dialogs and input routing. Host differences are
+//! behind [`platform`]; each shell supplies only a window, GL context and raw
+//! input.
 
 pub mod key;
 pub mod macros;

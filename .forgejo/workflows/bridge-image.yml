@@ -1,15 +1,7 @@
-# The bridge's container image comes out of the flake, not out of a Dockerfile:
-# `.#netcmdr-bridge-image-<arch>` is the static binary and nothing else, so
-# there is nothing here for buildx to do. That is why this does not use the
-# shared docker.yml template, and why it is not named docker.yml — a central
-# deploy of that template would land on top of it.
+# The bridge image comes from the flake, not a Dockerfile, so this doesn't use
+# (and mustn't be named like) the shared docker.yml template.
 #
-# Both architectures are built on this one runner, the arm64 one by
-# cross-compiling. That is nearly free: the bridge is Go with CGO off, so the
-# other architecture is a GOARCH away with no second toolchain and no libc to
-# match, and the wasm client it embeds is the same derivation whatever the
-# bridge is built for, so that half is compiled once instead of once per
-# architecture.
+# Both architectures build on one runner; arm64 is cross-compiled.
 name: Bridge image
 
 concurrency:
@@ -48,54 +40,29 @@ jobs:
             trusted-substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
             substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
       - run: nix registry add nixpkgs github:NixOS/nixpkgs/nixos-26.05
-      # This also builds both bridges and the wasm client they share, and runs
-      # the bridge's Go tests on the way through. The tests run once, under the
-      # amd64 build: nothing here can execute an aarch64 test binary, so the
-      # flake does not try.
+      # Also runs the Go tests (amd64 only).
       - name: Build the images
         run: |
           nix build '.#netcmdr-bridge-image-amd64' -o result-amd64
           nix build '.#netcmdr-bridge-image-arm64' -o result-arm64
-      # regctl is the whole registry side of this job: it reads the tarballs
-      # the flake produced and it writes the index. Out of the nixpkgs pinned
-      # above rather than out of an action, so it is the store path this
-      # workflow already trusts and not a binary fetched at run time.
+      # regctl from the pinned nixpkgs handles all registry work.
       - id: regctl
         name: Fetch regctl
         run: echo "bin=$(nix build --no-link --print-out-paths 'nixpkgs#regclient')/bin/regctl" >> "$GITHUB_OUTPUT"
-      # An OCI layout per architecture, which is what the index is built from
-      # below. This is where a pull request stops, and it is the step that
-      # would notice a tarball nothing can read.
+      # One OCI layout per architecture. Pull requests stop here.
       - name: Pack the images
         run: |
           regctl='${{ steps.regctl.outputs.bin }}'
           "$regctl" image import ocidir://oci-amd64:img result-amd64
           "$regctl" image import ocidir://oci-arm64:img result-arm64
-      # One moving tag and nothing else: the index takes it, and the two
-      # manifests under the index are never tagged at all. That is the part
-      # three earlier attempts got wrong. They pushed each architecture to the
-      # tag in turn and then tried to name both digests, which cannot work on
-      # this registry — taking the tag away from a manifest that nothing else
-      # refers to deletes it, so by the time the index was written the first
-      # architecture was a 404. An untagged manifest that an index refers to is
-      # the ordinary shape of a multi-architecture image and keeps fine; it is
-      # what every buildx push here produces.
+      # Only the index is tagged; per-arch manifests stay untagged. This
+      # registry deletes a manifest when its only tag moves, so tagging each
+      # architecture first loses them.
       #
-      # `index create --ref` uploads each layout and writes the index over
-      # them, so nothing is tagged in between and the tag moves once, at the
-      # end, from whatever it pointed at to the finished index.
+      # `index create --ref` uploads the layouts and moves the tag once.
       #
-      # regctl is also given the credential outright rather than left to find
-      # one. `docker manifest` and `docker buildx imagetools` both reached the
-      # registry unauthenticated — `denied` and `unauthorized` from the first,
-      # `insufficient_scope` from the second — although `docker push` in the
-      # same shell, with the same config, authenticated fine: a push is the
-      # daemon's work and the CLI hands it the credentials, whereas an index is
-      # the client's own, and neither client picked up what login-action left
-      # behind. (The odd wording of the second is this registry answering an
-      # unauthenticated caller with a token whose scope is empty instead of
-      # refusing it.) Nothing here needs a docker daemon any more, so the job
-      # no longer starts one.
+      # regctl gets the credential explicitly: `docker manifest` and `buildx
+      # imagetools` didn't pick up login-action's credentials.
       - name: Push the image
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && github.ref == 'refs/heads/main' }}
         env:

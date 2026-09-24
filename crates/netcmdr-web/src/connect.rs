@@ -1,11 +1,7 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Bringing a session up from a browser.
-//!
-//! The same five steps the native client takes (see `netcmdr_session::core`), with
-//! the waiting done by `await` instead of by a thread. The protocol itself —
-//! the `VERIFY_USER` payload, the user-level check — is `netcmdr_session`'s
-//! [`Login`]; only the waiting is here.
+//! Session setup in the browser: the steps in `netcmdr_session::core`, awaited
+//! instead of threaded. Protocol logic is in [`Login`].
 
 use netcmdr_proto::kvmmsg::SocketType;
 use netcmdr_session::channel::Channel;
@@ -16,21 +12,18 @@ use netcmdr_session::video::Framebuffer;
 use crate::net;
 use crate::ws::WsTransport;
 
-/// Everything the viewer needs once the device has let us in.
 pub struct Ready {
     pub core: SessionCore<WsTransport>,
     pub session_id: String,
 }
 
-/// Log in and open all three channels.
 pub async fn connect(
     username: &str,
     password: &str,
     target_port: u32,
     exclusive: bool,
 ) -> Result<Ready, String> {
-    // 1. Log in over the bridge's HTTP, which is the only thing that mints a
-    //    session id.
+    // 1. Log in over HTTP for a session id.
     let xml = net::post_message_pv(&netcmdr_mgmt::request::authorize(username, password)).await?;
     let reply =
         netcmdr_mgmt::parse_auth_reply(&xml).map_err(|e| format!("reading the login: {e}"))?;
@@ -46,7 +39,7 @@ pub async fn connect(
         .clone()
         .ok_or("the device returned no session id")?;
 
-    // 2. The command channel, and the login exchange on it.
+    // 2. Command channel and login.
     let cmd = Channel::new(
         WsTransport::attach(net::open_channel("cmd", &session_id).await?),
         SocketType::Cmd,
@@ -73,12 +66,12 @@ pub async fn connect(
         if Instant::now() >= deadline {
             return Err("the device did not answer the login".into());
         }
-        // Back to the event loop, or the socket's callbacks never deliver.
+        // Yield so socket callbacks run.
         net::sleep(16).await;
     };
     let cmd = login.finish();
 
-    // 3. Video and keyboard/mouse, in that order, as the device expects.
+    // 3. Video, then keyboard/mouse.
     let video = Channel::new(
         WsTransport::attach(net::open_channel("video", &session_id).await?),
         SocketType::Video,

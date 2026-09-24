@@ -2,18 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `KVMMsg` — the unified KVM session message.
 //!
-//! **Authoritative.** The layout, enums and encoding here are transcribed from
-//! the current firmware's own pure-Java client (firmware 2.2.1258.1.0, pulled live
-//! from a B070-008-19-IP on 2026-09-18), namely
+//! Transcribed from the firmware's Java client (2.2.1258.1.0):
 //! `com.minicom.plugin.serialization.KVMMsgHeaderEncoder` / `KVMMSgHeaderDecoder`
 //! and `com.minicom.plugin.data.{KVMMsgHeader,MagicNumber,CmdFlag,Cmd,SocketType}`.
+//! Supersedes the older `ITCMsg`/`CommIO` framing from `libkvmipjproxy.so`.
 //!
-//! This supersedes the earlier `ITCMsg`/`CommIO` framing that was reverse
-//! engineered from the 2013 native library `libkvmipjproxy.so`: the 2017
-//! firmware reimplemented the whole protocol in Java and unified every channel
-//! (command, keyboard/mouse, video, virtual media) onto this one message.
-//!
-//! ## Header (32 bytes, native byte order = little-endian on the x86 client)
+//! ## Header (32 bytes, little-endian)
 //!
 //! | Off | Size | Field | Notes |
 //! |----:|-----:|-------|-------|
@@ -28,19 +22,18 @@
 //! | 28 | u8  | key_frame | 1 = video keyframe |
 //! | 29 | 3×u8 | padding | zero |
 //!
-//! The heartbeat variant (magic `ALX_HEARTBEAT`) reuses the timestamp fields and
-//! zeroes size/cmd_flag/command; see [`Header::encode`].
+//! Heartbeats (`ALX_HEARTBEAT`) zero size/cmd_flag/command; see
+//! [`Header::encode`].
 
 use crate::Error;
 
 /// Fixed header length.
 pub const HEADER_LEN: usize = 32;
 
-/// Protocol version. `KVMMsgFactory` always sets 2, and the reader rejects
-/// anything else on non-heartbeat messages.
+/// Protocol version; required on non-heartbeat messages.
 pub const VERSION: u16 = 2;
 
-/// The value in the first header word. From `MagicNumber`.
+/// First header word (`MagicNumber`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MagicNumber {
     /// Ordinary message. 22222 == `0x56CE`.
@@ -49,7 +42,7 @@ pub enum MagicNumber {
     Heartbeat,
     /// Session teardown. 88888.
     Bye,
-    /// Anything unrecognised (decoder maps unknown codes here).
+    /// Unrecognised.
     Unknown(i32),
 }
 
@@ -73,10 +66,7 @@ impl MagicNumber {
     }
 }
 
-/// Payload classification (`CmdFlag`), header offset 18.
-///
-/// Unlike the earlier RE guess (which thought this field was limited to 1–4),
-/// it spans 0–21 and selects how the payload is interpreted.
+/// Payload type (`CmdFlag`), offset 18. Values 0–21.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmdFlag {
     KeyFrame,
@@ -94,10 +84,9 @@ pub enum CmdFlag {
     ResumeConnect,
     UserLog,
     AutoAdjustProgress,
-    /// Payload is an XML document.
+    /// XML payload.
     Xml,
     Disconnect,
-    /// Any other value seen on the wire.
     Other(u16),
 }
 
@@ -149,10 +138,8 @@ impl CmdFlag {
     }
 }
 
-/// The socket a session channel opens with, from `SocketType`.
-///
-/// The client makes four connections. `Cmd` and `KeyboardMouse` upgrade to TLS;
-/// `Video` and `VirtualMedia` run in the clear. Every socket shares this header.
+/// Session channel type (`SocketType`). `Cmd` and `KeyboardMouse` use TLS;
+/// `Video` and `VirtualMedia` don't.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketType {
     General,
@@ -173,17 +160,13 @@ impl SocketType {
         }
     }
 
-    /// Whether this channel upgrades to TLS after the plaintext handshake.
     pub fn uses_tls(self) -> bool {
         matches!(self, SocketType::Cmd | SocketType::KeyboardMouse)
     }
 }
 
-/// The `command` field (offset 20), from `Cmd`. Only the values the client
-/// actively uses are named; everything else round-trips as [`Cmd::Other`].
-///
-/// The full enumeration (90+ values) is catalogued in
-/// `research/notes/FINDINGS.md` §5.4.
+/// The `command` field (offset 20, `Cmd`). Unnamed values round-trip as
+/// [`Cmd::Other`]; the full list is in `research/notes/FINDINGS.md` §5.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmd {
     Undefined,
@@ -264,7 +247,7 @@ impl Cmd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     pub magic: MagicNumber,
-    /// Payload length. Zero on a heartbeat.
+    /// Payload length; 0 on heartbeats.
     pub size: u32,
     pub server_timestamp: u32,
     pub client_timestamp: u32,
@@ -272,12 +255,11 @@ pub struct Header {
     pub cmd_flag: CmdFlag,
     pub command: Cmd,
     pub id: u32,
-    /// 1 marks a video keyframe.
     pub key_frame: u8,
 }
 
 impl Header {
-    /// A normal (non-heartbeat) message header, as `KVMMsgFactory` builds it.
+    /// A non-heartbeat header, as `KVMMsgFactory` builds it.
     pub fn new(cmd_flag: CmdFlag, command: Cmd, size: u32) -> Self {
         Header {
             magic: MagicNumber::Tag,
@@ -292,8 +274,7 @@ impl Header {
         }
     }
 
-    /// Encode exactly as `KVMMsgHeaderEncoder.encode` does, including the
-    /// heartbeat special case.
+    /// As `KVMMsgHeaderEncoder.encode`.
     pub fn encode(&self) -> [u8; HEADER_LEN] {
         let mut b = [0u8; HEADER_LEN];
         b[0..4].copy_from_slice(&self.magic.code().to_le_bytes());
@@ -318,11 +299,8 @@ impl Header {
         b
     }
 
-    /// Decode a 32-byte header, mirroring `KVMMSgHeaderDecoder.decode`.
-    ///
-    /// Note the decoder does not resolve [`Cmd`] when `cmd_flag` is
-    /// [`CmdFlag::MouseAcc`] (that field carries mouse data, not a command); we
-    /// reproduce that by leaving `command` as [`Cmd::Undefined`] in that case.
+    /// As `KVMMSgHeaderDecoder.decode`. With [`CmdFlag::MouseAcc`] the command
+    /// field is mouse data, so `command` is [`Cmd::Undefined`].
     pub fn decode(buf: &[u8]) -> Result<Self, Error> {
         if buf.len() < HEADER_LEN {
             return Err(Error::Truncated {
@@ -377,7 +355,7 @@ pub struct Message {
 }
 
 impl Message {
-    /// Build a normal message (magic `ALX_TAG`), sizing the header to `payload`.
+    /// An `ALX_TAG` message.
     pub fn new(cmd_flag: CmdFlag, command: Cmd, payload: Vec<u8>) -> Self {
         Message {
             header: Header::new(cmd_flag, command, payload.len() as u32),
@@ -396,9 +374,7 @@ impl Message {
         out
     }
 
-    /// Parse one message from the front of `buf`, returning it and bytes used.
-    ///
-    /// Heartbeats carry no payload (`size` is 0 in the header).
+    /// Parse one message from `buf`, returning it and bytes used.
     pub fn parse(buf: &[u8]) -> Result<(Self, usize), Error> {
         let header = Header::decode(buf)?;
         let total = HEADER_LEN + header.size as usize;

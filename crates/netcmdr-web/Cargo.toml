@@ -10,10 +10,7 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# Everything here is browser-only. The crate compiles to nothing on a desktop
-# target — see the `cfg` at the top of src/lib.rs — so that `cargo test
-# --workspace`, clippy and rustfmt still cover the repository in one pass
-# without a desktop build having to resolve a web framework.
+# Browser-only; the crate is empty on desktop targets (see src/lib.rs).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 netcmdr-mgmt = { path = "../netcmdr-mgmt" }
 netcmdr-proto = { path = "../netcmdr-proto" }

@@ -1,13 +1,8 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The whole bridge, end to end: an HTTP request arrives, becomes a WebSocket,
-// the device's session handshake completes behind it, and bytes survive the
-// round trip in both directions.
-//
-// The video channel is used because it is the one the device leaves in the
-// clear, so these need no certificate; the TLS upgrade on the command channel
-// is the same DialSession call either way, and device_test.go covers it.
+// End-to-end relay tests over the (unencrypted) video channel. TLS is covered
+// in device_test.go.
 
 package main
 
@@ -67,8 +62,7 @@ func testBridge(t *testing.T, sessionPort uint16, files map[string][]byte) *http
 	return server
 }
 
-// dialKVM opens the relay and sends the session id, which is always the first
-// message and never the URL.
+// dialKVM opens the relay and sends the session id.
 func dialKVM(t *testing.T, server *httptest.Server, kind, session string) *websocket.Conn {
 	t.Helper()
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/kvm?type=" + kind
@@ -113,7 +107,7 @@ func TestCarriesBytesFromTheBrowserToTheDevice(t *testing.T) {
 func TestCarriesBytesFromTheDeviceToTheBrowser(t *testing.T) {
 	port := fakeDevice(t, SocketVideo, nil, func(conn net.Conn, _ *bufio.Reader) {
 		_, _ = conn.Write([]byte("hello browser"))
-		// Hold the connection open so this is a relay, not a close.
+		// Keep open.
 		time.Sleep(2 * time.Second)
 	})
 
@@ -158,9 +152,7 @@ func TestClosesTheBrowserSideWhenTheDeviceGoesAway(t *testing.T) {
 	}
 }
 
-// A device refusal must arrive as a close frame with a reason. An HTTP status
-// would reach the page as nothing more than "connection failed", which is why
-// the upgrade happens before the device is contacted.
+// A device refusal must arrive as a close frame with a reason.
 func TestADeviceRefusalReachesTheBrowserAsACloseReason(t *testing.T) {
 	// Nothing is listening on this port, so the dial fails.
 	free, err := net.Listen("tcp", "127.0.0.1:0")
@@ -226,7 +218,7 @@ func TestServesTheClientAndItsStatuses(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Stop the transport adding its own and transparently decompressing.
+		// Disable transparent decompression.
 		req.Header.Set("Accept-Encoding", acceptEncoding)
 		resp, err := client.Do(req)
 		if err != nil {

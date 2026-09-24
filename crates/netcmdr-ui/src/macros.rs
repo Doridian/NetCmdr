@@ -1,39 +1,27 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Key combinations the local machine eats before we ever see them.
+//! Key combinations the local OS would intercept (Alt+Tab, Super+L, …), sent
+//! to the target from the keyboard menu.
 //!
-//! A KVM viewer's keyboard menu exists because a window manager claims
-//! Ctrl+Alt+Del, Alt+Tab, Super+L and friends for itself: pressing them affects
-//! the machine you are sitting at, never the target. Picking one here
-//! synthesises the same scancode sequence and sends it down the session's
-//! keyboard channel instead.
+//! Keys are pressed in order and released in reverse, so modifiers are held.
 //!
-//! Each macro is a list of *physical* keys. They are pressed in order and
-//! released in reverse, which is what a real keyboard does and what the target's
-//! keyboard controller expects — modifiers must still be held when the final key
-//! arrives.
-//!
-//! Ctrl+Alt+Delete is deliberately *not* in this table: on a PS/2 target it has
-//! to be injected out of band, so it has its own message
-//! ([`netcmdr_session::Input::CtrlAltDel`]) and its own menu entry.
+//! Ctrl+Alt+Delete isn't here; it's out of band
+//! ([`netcmdr_session::Input::CtrlAltDel`]).
 
 use crate::key::PhysicalKey;
 
-/// One named key sequence.
 pub struct KeyMacro {
-    /// What the menu shows.
     pub label: &'static str,
     /// Physical keys, pressed in order and released in reverse.
     pub keys: &'static [PhysicalKey],
 }
 
-/// A titled run of macros; the menu draws a separator between groups.
+/// A titled group of macros, separated in the menu.
 pub struct Group {
     pub title: &'static str,
     pub macros: &'static [KeyMacro],
 }
 
-/// Everything the keyboard menu offers, grouped as it is drawn.
 pub const GROUPS: &[Group] = &[
     Group {
         title: "Task switching",
@@ -120,7 +108,7 @@ pub const GROUPS: &[Group] = &[
         ],
     },
     Group {
-        // The console switch a Linux target expects; X grabs it locally.
+        // Linux VT switch; X grabs it locally.
         title: "Linux consoles",
         macros: &[
             KeyMacro {
@@ -151,12 +139,11 @@ pub const GROUPS: &[Group] = &[
     },
 ];
 
-/// Flat index over [`GROUPS`], which is how the menu identifies a pick.
+/// Flat index over [`GROUPS`].
 pub fn get(index: usize) -> Option<&'static KeyMacro> {
     GROUPS.iter().flat_map(|g| g.macros.iter()).nth(index)
 }
 
-/// The flat index of the first macro in group `group`.
 pub fn group_offset(group: usize) -> usize {
     GROUPS[..group].iter().map(|g| g.macros.len()).sum()
 }
@@ -188,9 +175,6 @@ mod tests {
         }
     }
 
-    /// Every key has to carry a real scancode, or the macro sends nothing.
-    ///
-    /// The type guarantees there is *a* code; this catches a hole in the table.
     #[test]
     fn every_key_has_a_scancode() {
         for group in GROUPS {
@@ -204,7 +188,7 @@ mod tests {
 
     #[test]
     fn modifiers_come_before_the_key_they_modify() {
-        // Releasing in reverse only works if the modifier is listed first.
+        // Modifiers must come first.
         for group in GROUPS {
             for m in group.macros {
                 let modifier = |k: &PhysicalKey| {

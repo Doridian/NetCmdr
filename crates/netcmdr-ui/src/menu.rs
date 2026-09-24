@@ -2,45 +2,36 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The menu bar.
 //!
-//! The layout follows the stock Java client's toolbar so that anyone who has
-//! used the vendor's viewer finds the same things in the same places —
-//! Keyboard, Mouse, Video, Power, Session — minus virtual media, which this
-//! client does not implement.
+//! Mirrors the vendor toolbar: Keyboard, Mouse, Video, Power, Session (no
+//! virtual media).
 //!
 //! # Adding an item
 //!
-//! The menu is deliberately a thin translation layer and holds no logic: every
-//! entry does nothing but emit an [`Action`], and [`crate::viewer`] is the only
-//! place that knows how to carry one out. To add a feature:
+//! Entries only emit an [`Action`]; [`crate::viewer`] carries them out.
 //!
 //! 1. add a variant to [`Action`];
-//! 2. add the `ui.button(…)` line that emits it in [`Menu::show`];
+//! 2. emit it from [`Menu::show`];
 //! 3. handle it in `viewer::App::act`.
 //!
-//! Anything that needs state on screen (a checkbox, a radio group, a
-//! current-value marker) reads it from the public fields of [`Menu`], which the
-//! viewer keeps up to date. Anything that needs confirming goes through
-//! [`Menu::confirm`] instead of calling straight through.
+//! Displayed state comes from [`Menu`]'s public fields. Use [`Menu::confirm`]
+//! for anything that needs confirming.
 
 use netcmdr_mgmt::{PowerCommand, Target};
 use netcmdr_proto::command::{VideoFilter, VideoSetting};
-// Not `std::time`: `Instant::now()` panics in a browser, and a status line is
-// set from a click handler, so that panic would take the whole page with it.
-// See `netcmdr_session::time`.
+// Not `std::time`, which panics in the browser. See `netcmdr_session::time`.
 use netcmdr_session::time::{Duration, Instant};
 use netcmdr_session::{Knob, Noise, VideoSettings};
 
 use crate::macros;
 
-/// How the local pointer is drawn while it is over the remote screen.
+/// Local pointer style over the remote screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorMode {
-    /// The usual arrow, drawn on top of the target's own pointer.
+    /// Arrow over the target's pointer.
     Arrow,
-    /// A crosshair, which is easier to line up with the target's pointer.
+    /// Easier to line up with the target's pointer.
     Crosshair,
-    /// Hidden, leaving only the target's own pointer — the right choice once
-    /// the two are calibrated.
+    /// Only the target's pointer; best once calibrated.
     Hidden,
 }
 
@@ -56,12 +47,11 @@ impl CursorMode {
     }
 }
 
-/// How the remote screen is fitted into the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scaling {
-    /// Scale to fill the window, keeping the aspect ratio.
+    /// Scale to fit, keeping aspect ratio.
     Fit,
-    /// One remote pixel per window pixel, centred.
+    /// 1:1, centred.
     Actual,
 }
 
@@ -76,10 +66,7 @@ impl Scaling {
     }
 }
 
-/// One thing the menu can ask the viewer to do.
-///
-/// Every entry in the bar produces one of these and nothing else; see the
-/// module docs.
+/// A request from the menu to the viewer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     // Keyboard
@@ -98,13 +85,11 @@ pub enum Action {
     RefreshVideo,
     AutoAdjustVideo,
     StopAutoAdjust,
-    /// Measure the capture offsets from the picture, correct them and store
-    /// them on the device. See `netcmdr_session::align`.
+    /// See `netcmdr_session::align`.
     AlignCapture,
-    /// Set one analog capture knob to an absolute value, for this session.
+    /// Session-only video setting.
     SetVideoNumber(VideoSetting, i32),
-    /// Write capture knobs into the device's stored configuration, where they
-    /// outlive the session. See `netcmdr_session::Session::store_video_settings`.
+    /// See `netcmdr_session::Session::store_video_settings`.
     StoreVideoNumbers(Vec<(VideoSetting, i32)>),
     SetVideoFilter(VideoFilter),
     SetScaling(Scaling),
@@ -131,90 +116,62 @@ struct Confirm {
     action: Action,
 }
 
-/// How long a note stays in the bar before the bar goes back to resting on the
-/// resolution and the target.
-///
-/// A result has been read by the time this is up; anything longer is a line
-/// that outlives what it describes.
+/// How long a status note stays.
 pub const NOTE_LINGER: Duration = Duration::from_secs(4);
 
-/// How long a note about work still in flight stays, when nothing announces
-/// that the work has finished.
-///
-/// The device reports progress while it adjusts the video or calibrates the
-/// mouse, and every report renews the note, so this is only the backstop for a
-/// run that goes quiet — the vendor's own protocol has no "done" message.
+/// How long an in-progress note stays without updates. Device progress
+/// renews it; there's no "done" message.
 pub const WORKING_LINGER: Duration = Duration::from_secs(10);
 
-/// Work a note is waiting on, where the device's answer can be recognised.
-///
-/// The vendor's protocol has no "done" message, but some work is answered by
-/// something else arriving, and a line that has been answered should come down
-/// then rather than sit out the rest of its linger.
+/// Work whose completion can be recognised, clearing its note early.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Work {
-    /// A target change, ended by the device reporting the target it is on.
+    /// Ends when the device reports the new target.
     Switch,
-    /// An automatic adjustment, ended by the fresh capture settings it sends.
+    /// Ends with fresh capture settings.
     VideoAdjust,
-    /// A capture alignment, ended by the viewer's own state machine reporting.
+    /// Ends when the aligner reports.
     Align,
-    /// A full repaint, ended by the next picture that arrives.
+    /// Ends with the next frame.
     Repaint,
 }
 
-/// A line in the bar, and when it stops being shown.
+/// A status line and its expiry.
 struct Note {
     text: String,
     until: Instant,
-    /// What would take this line down before its time, if anything can.
     work: Option<Work>,
 }
 
-/// The menu bar and its state.
-///
-/// The public fields are what the bar draws; the viewer owns this struct and
-/// keeps them current.
+/// The menu bar. The viewer keeps the public fields current.
 pub struct Menu {
     pub targets: Vec<Target>,
     pub current_port: u32,
     pub current_name: String,
     pub exclusive: bool,
-    /// Whether the host can be resized at all. A browser tab cannot, so the
-    /// menu does not offer it there rather than offering something inert.
+    /// Whether to offer resizing (not in browsers).
     pub resizable: bool,
     pub cursor: CursorMode,
     pub scaling: Scaling,
-    /// Remote resolution, once the first frame has arrived.
     pub remote: Option<(u16, u16)>,
-    /// How much of the picture is changing, once the first report has arrived.
     pub noise: Option<Noise>,
-    /// The device's analog capture settings, once it has reported them.
-    ///
-    /// The adjustment window edits this in place: the device never announces a
-    /// change of its own accord, so this copy is what the controls read back
-    /// until a fresh config document replaces it.
+    /// Capture settings. The adjustment window edits this copy, since session
+    /// sets aren't reported back.
     pub video: Option<VideoSettings>,
-    /// The right-hand note in the bar: device messages, command results.
-    ///
-    /// Private because every note expires; see [`Menu::note`].
+    /// Right-hand note; see [`Menu::note`].
     note: Option<Note>,
-    /// A management request is in flight.
     pub busy: bool,
-    /// A target change is in flight, so what we know about the picture — its
-    /// resolution above all — describes the *previous* target and is not worth
-    /// showing.
+    /// A target change is in flight, so picture info is stale.
     pub switching: bool,
     pub host: String,
     pub user: String,
 
-    /// True while a menu is dropped down, so the viewer stops forwarding keys.
+    /// A menu is open; keys aren't forwarded.
     menu_open: bool,
     show_shortcuts: bool,
     show_about: bool,
     show_video_adjust: bool,
-    /// What the capture settings were when the adjustment window was opened,
-    /// so *Restore* has something to put back.
+    /// Settings when the adjustment window opened, for *Restore*.
     video_restore: Option<VideoSettings>,
     confirm: Option<Confirm>,
 }
@@ -246,10 +203,7 @@ impl Menu {
         }
     }
 
-    /// Draw the bar and any open dialogs; return what the user asked for.
-    ///
-    /// Usually empty or a single action — it is a `Vec` only because a click
-    /// that dismisses a confirmation can resolve in the same frame as another.
+    /// Draw the bar and dialogs; return the requested actions.
     pub fn show(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
         let ctx = ui.ctx().clone();
         let mut actions = Vec::new();
@@ -275,12 +229,8 @@ impl Menu {
         actions
     }
 
-    /// Put a line in the bar for `linger`, replacing whatever was there.
-    ///
-    /// Notes always expire. The bar's resting state is the resolution, the
-    /// noise meter and the target, and those are what it is watched for; a
-    /// note that stayed would hide a live reading behind something that has
-    /// already happened.
+    /// Show a note for `linger`, replacing any other. Notes always expire so
+    /// they don't hide live readings.
     pub fn note(&mut self, text: impl Into<String>, linger: Duration) {
         self.note = Some(Note {
             text: text.into(),
@@ -289,9 +239,7 @@ impl Menu {
         });
     }
 
-    /// Put a line in the bar for work whose end can be recognised.
-    ///
-    /// See [`Menu::work_done`], which is what takes it down early.
+    /// A note cleared early by [`Menu::work_done`].
     pub fn note_work(&mut self, text: impl Into<String>, linger: Duration, work: Work) {
         self.note = Some(Note {
             text: text.into(),
@@ -300,12 +248,8 @@ impl Menu {
         });
     }
 
-    /// Re-word the note and give it its time again, without changing what it
-    /// is waiting on.
-    ///
-    /// This is for progress the device sends about work already announced: the
-    /// words are its own, but the line is still the one that was put up when
-    /// the work started.
+    /// Update the note's text and renew it, keeping its [`Work`], for device
+    /// progress.
     pub fn renew_note(&mut self, text: impl Into<String>, linger: Duration) {
         let work = self.note.as_ref().and_then(|n| n.work);
         self.note = Some(Note {
@@ -315,11 +259,7 @@ impl Menu {
         });
     }
 
-    /// Take the note down if it was waiting on `work`; true if the bar changed.
-    ///
-    /// Whatever the user has done since has replaced the line, and untagged
-    /// lines are about something else entirely — neither is this work's to
-    /// take down.
+    /// Clear the note if it's waiting on `work`; true if the bar changed.
     pub fn work_done(&mut self, work: Work) -> bool {
         let done = self.note.as_ref().is_some_and(|n| n.work == Some(work));
         if done {
@@ -328,18 +268,16 @@ impl Menu {
         done
     }
 
-    /// What the bar is saying, if anything.
     pub fn note_text(&self) -> Option<&str> {
         self.note.as_ref().map(|n| n.text.as_str())
     }
 
-    /// Take the note down now, for a caller that knows it has stopped being
-    /// true before its time is up.
+    /// Clear the note now.
     pub fn clear_note(&mut self) {
         self.note = None;
     }
 
-    /// Drop the note once its time is up; true if the bar changed.
+    /// Expire the note; true if the bar changed.
     pub fn expire_note(&mut self) -> bool {
         let done = self
             .note
@@ -351,7 +289,7 @@ impl Menu {
         done
     }
 
-    /// Queue a confirmation before an action; see [`Action::Power`] callers.
+    /// Ask for confirmation before an action.
     pub fn confirm(
         &mut self,
         question: impl Into<String>,
@@ -367,16 +305,12 @@ impl Menu {
         });
     }
 
-    /// True while a dialog is up.
     pub fn dialog_open(&self) -> bool {
         self.confirm.is_some() || self.show_shortcuts || self.show_about
     }
 
-    /// True while the UI, not the target, should be seeing keystrokes.
-    ///
-    /// An open menu counts: egui navigates menus with the pointer and never
-    /// claims keyboard focus for them, so `Context::wants_keyboard_input` alone
-    /// would let Escape both close the menu and reach the target.
+    /// Whether keystrokes belong to the UI. Includes open menus, which egui
+    /// doesn't count as keyboard focus.
     pub fn captures_keyboard(&self) -> bool {
         self.menu_open || self.dialog_open()
     }
@@ -543,10 +477,7 @@ impl Menu {
         .is_some()
     }
 
-    /// Power control reaches the target's outlet, not the KVM, so it is the
-    /// one place in this menu that can take a machine down mid-write. Every
-    /// entry here goes through a confirmation rather than straight to an
-    /// [`Action`].
+    /// Every power entry is confirmed first.
     fn power_menu(&mut self, ui: &mut egui::Ui) -> bool {
         let target = format!("port {} ({})", self.current_port, self.current_name);
         let mut pending = None;
@@ -682,18 +613,8 @@ impl Menu {
         ui.label(format!("{} — {}", self.current_port, self.current_name));
     }
 
-    /// The manual video adjustment window.
-    ///
-    /// Deliberately not modal: the whole point is to watch the picture — and
-    /// the noise reading in the bar — change while a value is nudged, so this
-    /// neither covers the screen nor takes the keyboard away from the target.
-    /// Only a value being typed into a control does that, which egui reports
-    /// on its own.
-    ///
-    /// Every control writes straight into [`Menu::video`] and emits an
-    /// [`Action`] once it settles. The device answers each one by re-digitising
-    /// the picture and tells us nothing, so that copy is the only record of
-    /// what was asked for.
+    /// The video adjustment window. Non-modal so the picture stays visible.
+    /// Controls write into [`Menu::video`] and emit an [`Action`] once settled.
     fn video_adjust_window(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
         if !self.show_video_adjust {
             return;
@@ -947,7 +868,7 @@ impl Menu {
     }
 }
 
-/// The filters the device offers, in the order the vendor's dialog lists them.
+/// Filters in the vendor dialog's order.
 const VIDEO_FILTERS: [VideoFilter; 5] = [
     VideoFilter::Auto,
     VideoFilter::None,
@@ -966,12 +887,8 @@ fn filter_label(f: VideoFilter) -> &'static str {
     }
 }
 
-/// What the adjustment window's *Restore* button sends.
-///
-/// One stored write, carrying every knob the window opened with. It has to be
-/// a stored write rather than a set apiece: the device drops a session set
-/// whose value equals the one it has stored, and for a window opened on the
-/// device's own figures that is exactly what a restore is made of.
+/// *Restore*: one stored write of the opening values (a session set equal to
+/// the stored value would be dropped).
 fn restore_actions(original: &VideoSettings) -> Vec<Action> {
     let mut out = vec![Action::StoreVideoNumbers(vec![
         (VideoSetting::Brightness, original.brightness.value),
@@ -981,16 +898,14 @@ fn restore_actions(original: &VideoSettings) -> Vec<Action> {
         (VideoSetting::Phase, original.phase.value),
     ])];
 
-    // `Auto` is not a filter the device stores, it is a request to run the
-    // adjustment — which is the one thing a restore must not do.
+    // `Auto` would run auto-adjust.
     if original.filter != VideoFilter::Auto {
         out.push(Action::SetVideoFilter(original.filter));
     }
     out
 }
 
-/// What *Save to device* sends: everything the window is showing, as one
-/// stored write.
+/// *Save to device*: one stored write of the current values.
 fn save_actions(v: &VideoSettings) -> Vec<Action> {
     vec![Action::StoreVideoNumbers(vec![
         (VideoSetting::Brightness, v.brightness.value),
@@ -1046,14 +961,8 @@ How much of the picture is changing, per second. Watch it while you adjust: on \
 an idle target anything above zero is noise on the VGA link rather than real \
 work.";
 
-/// One numeric knob: a value to drag or step by one, and the range the device
-/// will accept for it.
-///
-/// Returns the value to send, once the control has settled on one. A drag
-/// reports a change for every frame it moves, and each change is a command the
-/// device answers by re-digitising the picture, so only the value a drag ends
-/// on is sent — the vendor's dialog guards its own sliders with
-/// `getValueIsAdjusting()` for the same reason.
+/// A numeric control. Returns a value only once settled, so a drag sends one
+/// command (like the vendor's `getValueIsAdjusting()`).
 fn knob_row(ui: &mut egui::Ui, label: &str, knob: &mut Knob, help: &str) -> Option<i32> {
     let mut send = None;
     ui.label(label).on_hover_text(help);
@@ -1092,8 +1001,7 @@ fn knob_row(ui: &mut egui::Ui, label: &str, knob: &mut Knob, help: &str) -> Opti
     send
 }
 
-/// A knob whose range is wide and whose exact value does not matter, so it
-/// reads better as a slider. Same settling rule as [`knob_row`].
+/// A slider variant of [`knob_row`].
 fn slider_row(ui: &mut egui::Ui, label: &str, knob: &mut Knob, help: &str) -> Option<i32> {
     let mut send = None;
     ui.label(label).on_hover_text(help);
@@ -1109,28 +1017,19 @@ fn slider_row(ui: &mut egui::Ui, label: &str, knob: &mut Knob, help: &str) -> Op
     send
 }
 
-/// True once a control has finished moving and its value is worth a command.
-///
-/// `changed()` alone fires on every frame of a drag; `drag_stopped()` alone
-/// misses a click on the stepper or a typed-in value.
+/// Whether a control has settled (drag ended, or a click/typed change).
 fn settled(resp: &egui::Response) -> bool {
     resp.drag_stopped() || (resp.changed() && !resp.dragged())
 }
 
-/// The "Noise" reading as a compact bar, for the right-hand end of the bar.
-///
-/// The stock client shows the same number as a labelled progress bar, but only
-/// inside its Advanced Video dialog; it belongs in the bar, because its whole
-/// use is to be watched while the video auto-adjust settles.
+/// The noise reading as a compact bar in the status line.
 fn noise_meter(ui: &mut egui::Ui, noise: Noise) {
-    // The status line lays out right-to-left, so the bar goes in before its
-    // label to end up to the right of it.
+    // Right-to-left layout: bar before label.
     noise_bar(ui, noise);
     ui.label(egui::RichText::new("Noise").weak());
 }
 
-/// The bar itself, without a label, so the adjustment window can put it in a
-/// grid cell of its own.
+/// The unlabelled bar.
 fn noise_bar(ui: &mut egui::Ui, noise: Noise) -> egui::Response {
     const WIDTH: f32 = 42.0;
     const HEIGHT: f32 = 7.0;
@@ -1142,8 +1041,7 @@ fn noise_bar(ui: &mut egui::Ui, noise: Noise) -> egui::Response {
 
     let fill = noise.level as f32 / 100.0;
     if fill > 0.0 {
-        // A one-percent reading still has to be visible, so the bar never
-        // draws narrower than it is tall.
+        // At least as wide as tall, so 1% is visible.
         let mut bar = rect;
         bar.set_width((rect.width() * fill).max(HEIGHT));
         painter.rect_filled(bar, rounding, level_color(noise.level));
@@ -1159,8 +1057,7 @@ fn noise_bar(ui: &mut egui::Ui, noise: Noise) -> egui::Response {
     ))
 }
 
-/// Green while the picture is quiet, amber once it is restless, red when the
-/// reading is high enough that the video is worth adjusting.
+/// Green quiet, amber restless, red worth adjusting.
 fn level_color(level: u8) -> egui::Color32 {
     match level {
         0..=19 => egui::Color32::from_rgb(0x4c, 0xaf, 0x50),
@@ -1187,14 +1084,13 @@ mod tests {
         .expect("a settings element")
     }
 
-    /// Run one headless frame of the menu and return what it asked for.
+    /// One headless frame.
     fn frame(m: &mut Menu, ctx: &egui::Context) -> Vec<Action> {
         let mut actions = Vec::new();
         let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| actions = m.show(ui));
         });
-        // Nothing here uploads textures, but the font atlas still arrives as a
-        // delta and epaint panics if one is dropped.
+        // epaint panics if the font atlas delta is dropped.
         out.textures_delta.clear();
         actions
     }
@@ -1208,15 +1104,11 @@ mod tests {
         assert!(m.note.is_none(), "and the bar is back to resting");
         assert!(!m.expire_note(), "nothing left to expire");
 
-        // A note still within its time stays: an adjustment run that keeps
-        // reporting keeps its line.
         m.note("adjusting video…", WORKING_LINGER);
         assert!(!m.expire_note());
         assert!(m.note.is_some());
     }
 
-    /// A line about work the device answers comes down on the answer, and only
-    /// on its own answer.
     #[test]
     fn the_answer_to_a_piece_of_work_takes_its_line_down() {
         let mut m = menu();
@@ -1227,15 +1119,12 @@ mod tests {
         assert!(m.note.is_none());
         assert!(!m.work_done(Work::VideoAdjust), "nothing left to take down");
 
-        // An untagged line is about something else, and nothing the device
-        // answers gets to clear it.
+        // Untagged notes aren't cleared by work.
         m.note("released held keys", NOTE_LINGER);
         assert!(!m.work_done(Work::VideoAdjust));
         assert!(m.note.is_some());
     }
 
-    /// Progress from the device re-words the line without costing the work its
-    /// ending; anything the user does next replaces the line outright.
     #[test]
     fn progress_keeps_what_the_line_is_waiting_on() {
         let mut m = menu();
@@ -1273,8 +1162,6 @@ mod tests {
         assert!(m.show_video_adjust, "the window stayed open");
     }
 
-    /// The device may not have said anything yet — the window still has to
-    /// come up rather than panic on a missing value.
     #[test]
     fn the_adjustment_window_copes_with_nothing_reported_yet() {
         let ctx = egui::Context::default();
@@ -1284,9 +1171,6 @@ mod tests {
         assert!(frame(&mut m, &ctx).is_empty());
     }
 
-    /// Restore puts every knob back — as one stored write, which is the only
-    /// kind the device accepts for a value it is already holding — and, above
-    /// all, does not turn the filter into an auto-adjust.
     #[test]
     fn restore_resends_the_values_the_window_opened_with() {
         let original = settings();
@@ -1306,8 +1190,6 @@ mod tests {
         }
     }
 
-    /// Restoring `auto` would run the device's adjustment, which is the one
-    /// thing a restore must not do.
     #[test]
     fn restore_never_asks_for_the_automatic_filter() {
         let mut original = settings();
@@ -1318,9 +1200,6 @@ mod tests {
             .any(|a| matches!(a, Action::SetVideoFilter(_))));
     }
 
-    /// The device drops a *session* set that matches the value it is holding,
-    /// which is exactly what a restore is made of — so a restore must never
-    /// send one.
     #[test]
     fn restore_never_sends_a_set_the_device_would_drop() {
         let out = restore_actions(&settings());
@@ -1330,9 +1209,7 @@ mod tests {
             .any(|a| matches!(a, Action::SetVideoNumber(_, _))));
     }
 
-    /// A save is one element carrying both gains — without them the device
-    /// treats it as a live set and forgets it at logout, which would make the
-    /// button a lie.
+    /// Without both gains the device wouldn't persist it.
     #[test]
     fn a_save_carries_the_gains_that_make_the_device_store_it() {
         let v = settings();
@@ -1360,8 +1237,6 @@ mod tests {
         assert_eq!(VIDEO_FILTERS.len(), 5);
     }
 
-    /// A knob the device pins in place must not offer a control that pretends
-    /// otherwise.
     #[test]
     fn a_fixed_knob_disables_its_control() {
         let ctx = egui::Context::default();
@@ -1400,8 +1275,7 @@ mod tests {
         }
     }
 
-    /// The meter is the only widget here that paints by hand, so run it
-    /// through a headless egui frame at the edges of its range.
+    /// The meter paints by hand; exercise its range edges.
     #[test]
     fn the_noise_meter_paints_across_its_whole_range() {
         let ctx = egui::Context::default();
@@ -1414,8 +1288,7 @@ mod tests {
                         });
                     });
                 });
-                // Nothing here uploads textures, but the font atlas still
-                // arrives as a delta and epaint panics if one is dropped.
+                // epaint panics if the font atlas delta is dropped.
                 out.textures_delta.clear();
                 assert!(!out.shapes.is_empty(), "the meter drew nothing");
             }
@@ -1424,7 +1297,6 @@ mod tests {
 
     #[test]
     fn the_meter_colour_changes_with_the_reading() {
-        // Three distinct bands, so the bar reads at a glance.
         assert_eq!(level_color(0), level_color(19));
         assert_ne!(level_color(19), level_color(20));
         assert_eq!(level_color(20), level_color(59));

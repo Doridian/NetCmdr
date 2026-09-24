@@ -3,9 +3,8 @@
 Reverse-engineering notes for the Tripp Lite B070-008-19-IP (NetCommander IP
 Cat5 KVM).
 
-**Start with [`notes/FINDINGS.md`](notes/FINDINGS.md)** — the protocol write-up
-the crates are built from. [`SOURCES.md`](SOURCES.md) records where every piece
-of vendor material came from, so the analysis can be redone from the originals.
+**Start with [`notes/FINDINGS.md`](notes/FINDINGS.md)**, the protocol write-up.
+[`SOURCES.md`](SOURCES.md) records where the vendor material came from.
 
 ```
 notes/FINDINGS.md               the write-up
@@ -15,17 +14,12 @@ firmware/work/unpack.py         parser for the firmware's file containers
 SOURCES.md                      provenance and download URLs
 ```
 
-## No vendor material is tracked here
+## No vendor material is tracked
 
-This repository carries none of the vendor's own files: no firmware images, no
-client JARs, no decompiled or disassembled output, no manuals or datasheets.
-All of it is copyrighted, and it was only ever input to the analysis that
-`notes/FINDINGS.md` records — the write-up is what the crates are built from,
-and it is enough to work from on its own.
-
-`.gitignore` keeps the working directories for that material (`software/`,
-`decompiled/`, `firmware/*.zip`, `manuals/`, …) out of git, so a local copy can
-sit here without ever being committed.
+Vendor files (firmware, JARs, decompiled output, manuals) are copyrighted and
+not committed; FINDINGS.md stands on its own. `.gitignore` excludes their
+working directories (`software/`, `decompiled/`, `firmware/*.zip`, `manuals/`,
+…).
 
 ## Reproducing the firmware extraction
 
@@ -40,16 +34,14 @@ base64 -d "../extracted/B070-016-19-IP (HW v1) Firmware_9-13-14/B070-016-19-IP I
 python3 unpack.py          # parses the two file containers
 ```
 
-`unpack.py` expects the gzip members already split out of `ip_fw.bin` as
-`m1.bin` and `m2.bin`; `notes/FINDINGS.md` §3 documents the container layout.
-It writes `out_config/` (the 2013 device web UI) and `out_client/` (the 2013
-Java Web Start client, plus the `kvmipjproxy` native library inside
-`plugin.jar`).
+`unpack.py` expects the gzip members of `ip_fw.bin` split out as `m1.bin` and
+`m2.bin` (layout in FINDINGS.md §3). It writes `out_config/` (2013 web UI) and
+`out_client/` (2013 Java client, including `kvmipjproxy` in `plugin.jar`).
 
 ## Recovering the current client
 
-The device serves its own client, which on current firmware is pure Java and is
-the authoritative reference for the session protocol:
+The device serves its own pure-Java client, the reference for the session
+protocol:
 
 ```sh
 curl -k --ciphers DEFAULT@SECLEVEL=1 https://<device>/targets.jnlp

@@ -1,7 +1,6 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The session as a state machine: no threads, no blocking, no clock of its
-//! own.
+//! The session as a non-blocking state machine with no threads or clock.
 //!
 //! Transcribed from `com.minicom.plugin.kvm_impl.KVMFacadeImpl`,
 //! `com.minicom.plugin.config_impl.{ConnectCommandHandler,
@@ -10,31 +9,21 @@
 //!
 //! # Connecting
 //!
-//! 1. Log in over HTTPS first (see `netcmdr-mgmt`) and keep the `SESSIONID`.
-//! 2. Open the **command** channel and send `VERIFY_USER`, whose payload is the
-//!    username and that same session id — the device treats the session token as
-//!    the password on this channel, which is why no real password is needed
-//!    here.
-//! 3. The device answers with a `CONFIG_XML` document carrying `userlevel`. Only
-//!    admin and user levels may open a session; every other level is a refusal
-//!    with a specific reason. [`Login`] does steps 2 and 3.
-//! 4. Open the **video** and **keyboard/mouse** channels, in that order, and
-//!    hand all three to [`SessionCore`].
-//! 5. Keep the session alive by calling [`SessionCore::send_heartbeat`] every
-//!    30 seconds, or the device drops it.
+//! 1. Log in over HTTPS (`netcmdr-mgmt`) and keep the `SESSIONID`.
+//! 2. Open the **command** channel and send `VERIFY_USER` with the username and
+//!    session id (the session id stands in for the password).
+//! 3. The device replies with `CONFIG_XML` carrying `userlevel`; only admin and
+//!    user may connect. [`Login`] does steps 2–3.
+//! 4. Open the **video** then **keyboard/mouse** channels and pass all three to
+//!    [`SessionCore`].
+//! 5. Call [`SessionCore::send_heartbeat`] every 30 s or the device drops the
+//!    session.
 //!
-//! # Why there are no threads here
+//! # No threads
 //!
-//! The original shape was a thread per channel, each parked in a blocking read.
-//! A browser has no threads to give and no socket to block on, so that shape
-//! could not cross over — and keeping a second implementation for the web would
-//! have meant maintaining the protocol twice.
-//!
-//! Instead every channel is polled by [`SessionCore::pump`], which returns
-//! promptly whether or not anything arrived. `Channel` was already built for
-//! this: it resumes a half-read message rather than losing its place. The
-//! caller owns the loop and the clock, which is a thread natively and the
-//! frame callback in a browser.
+//! Browsers can't block on sockets, so instead of a thread per channel,
+//! [`SessionCore::pump`] polls every channel and returns immediately. The
+//! caller owns the loop: a thread natively, the frame callback in a browser.
 
 use std::collections::VecDeque;
 
@@ -47,11 +36,8 @@ use crate::time::Duration;
 use crate::video::{parse_palette, Noise, Rect, SharedFrame, SharedPalette, VideoDecoder};
 use crate::Error;
 
-/// Video messages handled per [`SessionCore::pump`].
-///
-/// The device can push tiles faster than they are consumed, and an unbounded
-/// drain would let a busy screen starve the command channel — where the
-/// disconnect notice lives — for as long as the target keeps painting.
+/// Video messages per [`SessionCore::pump`], so a busy screen can't starve the
+/// command channel.
 const VIDEO_PER_PUMP: usize = 64;
 
 /// How long to wait for the device's `CONFIG_XML` answer to `VERIFY_USER`.
@@ -60,18 +46,16 @@ pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
 pub const HEARTBEAT_DELAY: Duration = Duration::from_secs(5);
 pub const HEARTBEAT_PERIOD: Duration = Duration::from_secs(30);
 
-/// What to connect to.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub host: String,
-    /// Session port; the login reply advertises it, normally 900.
+    /// Advertised in the login reply; normally 900.
     pub port: u16,
     /// `SESSIONID` from the HTTPS login.
     pub session_id: String,
     pub username: String,
-    /// Switch port (target) to view, 1-based.
+    /// 1-based switch port.
     pub target_port: u32,
-    /// Ask for an exclusive session, locking other users out.
     pub exclusive: bool,
     pub connect_timeout: Duration,
 }
@@ -96,24 +80,22 @@ impl SessionConfig {
     }
 }
 
-/// Something that happened on the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// The remote resolution changed; the framebuffer has been resized.
-    Resolution { width: u16, height: u16 },
-    /// A frame was decoded; the rectangle is what changed.
+    /// The framebuffer has been resized.
+    Resolution {
+        width: u16,
+        height: u16,
+    },
+    /// A frame was decoded; the rect is what changed.
     Frame(Rect),
-    /// The device reports no video signal from the target.
     NoSignal,
-    /// How much of the picture is changing, reported once a second while
-    /// frames are arriving. See [`Noise`].
+    /// Once a second while frames arrive. See [`Noise`].
     Noise(Noise),
-    /// An on-screen message from the device, as a message id such as
-    /// `detecting_signal` or `no_signal`.
+    /// On-screen message id, e.g. `detecting_signal`.
     Gui(String),
-    /// The device's client configuration document.
+    /// The client configuration document.
     ConfigXml(String),
-    /// The session ended. Carries the device's reason where it gave one.
     Disconnected(String),
 }
 
@@ -131,13 +113,9 @@ fn user_level_error(level: i32) -> Option<&'static str> {
     }
 }
 
-/// One target as the *session's* own config document describes it.
-///
-/// The client config the device pushes on the command channel carries a
-/// `<server servername='…' port='…' active='…'/>` per switch port
-/// (`com.minicom.app.video.data.xml.cfg.XServer`). This is the authoritative
-/// answer to "which target am I looking at", and it updates itself after a
-/// [`Session::change_target`] — no management request needed.
+/// A `<server servername port active/>` from the client config
+/// (`com.minicom.app.video.data.xml.cfg.XServer`). Authoritative for which
+/// target is active, and refreshed after [`Session::change_target`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Server {
     pub port: u32,
@@ -145,10 +123,7 @@ pub struct Server {
     pub active: bool,
 }
 
-/// Pull the `<server>` list out of a client config document.
-///
-/// Returns an empty vector when the document has none; not every config the
-/// device sends carries them, so callers keep whatever they had.
+/// The `<server>` list, empty if absent (callers should keep what they had).
 pub fn parse_servers(xml: &str) -> Vec<Server> {
     use quick_xml::events::Event as XmlEvent;
     let mut out = Vec::new();
@@ -179,11 +154,8 @@ pub fn parse_servers(xml: &str) -> Vec<Server> {
     }
 }
 
-/// One numeric video knob, with the range the device will accept for it.
-///
-/// `min` and `max` are inclusive. Where the device reports no range — it gives
-/// one only for the two offsets — these carry the range the vendor's own
-/// dialog hardcodes for that control.
+/// A numeric video setting with its inclusive range. The device only reports
+/// ranges for the offsets; the rest use the vendor dialog's limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Knob {
     pub value: i32,
@@ -196,7 +168,6 @@ impl Knob {
         Knob { value, min, max }
     }
 
-    /// True when the device left no room to move — there is nothing to offer.
     pub fn is_fixed(&self) -> bool {
         self.min >= self.max
     }
@@ -206,57 +177,46 @@ impl Knob {
     }
 }
 
-/// The analog capture settings for the mode the target is currently driving.
+/// Capture settings for the current video mode, from `<video_settings/>` in
+/// the client config. Sent at login and after auto-adjust, stored writes and
+/// mode changes.
 ///
-/// The device pushes these as `<video_settings …/>` inside the client config,
-/// at login and again whenever it has re-derived them — after an auto-adjust,
-/// after a stored write, or after the target changes video mode. They are what
-/// the device has *stored*: a value set through [`Session::set_video_setting`]
-/// applies to the picture at once but never appears here and is gone at the
-/// next login, where one written through [`VideoSettings::stored_write`] both
-/// appears here and survives.
+/// These are the *stored* values: [`Session::set_video_setting`] affects the
+/// picture but not these, and is lost at next login;
+/// [`VideoSettings::stored_write`] updates both.
 ///
 /// Mirrors `com.minicom.app.video.data.xml.cfg.XVideoSettings`, minus the
-/// `scale` and `blacklevel` fields, which that class carries but the vendor's
-/// dialog gives no control over and this device answers with a sentinel.
+/// unused `scale` and `blacklevel`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoSettings {
-    /// The mode the device says it is digitising, and its refresh rate in Hz.
     pub width: u16,
     pub height: u16,
+    /// Hz.
     pub refresh: u16,
     pub brightness: Knob,
     pub contrast: Knob,
-    /// Where sampling starts on each scan line, in pixels. Lowering it moves
-    /// the captured picture **right**, which is what recovers a left edge the
-    /// device is cutting off.
+    /// Sampling start per line, in pixels. Lowering it shifts the picture
+    /// right, recovering a cut-off left edge.
     pub hoffset: Knob,
     pub voffset: Knob,
-    /// Sampling phase within the pixel clock. The device reports no range for
-    /// this one; the vendor's dialog fixes it at 0–31.
+    /// Sampling phase within the pixel clock, 0–31.
     pub phase: Knob,
     pub filter: VideoFilter,
 }
 
 impl VideoSettings {
-    /// Build the `<video_settings>` element the device *stores*, from these
-    /// settings plus the caller's changes.
+    /// A stored `<video_settings>` write with `changes` applied.
     ///
-    /// The device commits the element only when it carries both gains (see
-    /// [`netcmdr_proto::command::store_video_settings`]), so this puts them in —
-    /// taken from the device's own last report, so a caller that only wants to
-    /// move a capture offset does not have to know about the rule, and cannot
-    /// change a gain by accident.
+    /// The device only stores it if both gains are present (see
+    /// [`netcmdr_proto::command::store_video_settings`]), so they're copied
+    /// from the current values.
     pub fn stored_write(&self, changes: &[(VideoSetting, i32)]) -> String {
         let mut values: Vec<(VideoSetting, String)> = vec![
             (VideoSetting::Brightness, self.brightness.value.to_string()),
             (VideoSetting::Contrast, self.contrast.value.to_string()),
         ];
-        // The filter rides along the way it does in the vendor's own document,
-        // so that a write meant to last does not quietly drop it back to what
-        // the device had. `Auto` is the exception, because it is not a value:
-        // it is a request to run the adjustment, and storing it is not a thing
-        // the device can do.
+        // Keep the filter, as the vendor client does. `Auto` isn't storable;
+        // it means "run the adjustment".
         if self.filter != VideoFilter::Auto {
             values.push((VideoSetting::Filter, self.filter.as_str().to_string()));
         }
@@ -272,10 +232,7 @@ impl VideoSettings {
     }
 }
 
-/// Pull `<video_settings>` out of a client config document.
-///
-/// `None` when the document has none — not every config the device sends
-/// carries them, and the caller should keep whatever it had.
+/// `<video_settings>`, or `None` if absent (callers should keep what they had).
 pub fn parse_video_settings(xml: &str) -> Option<VideoSettings> {
     use quick_xml::events::Event as XmlEvent;
 
@@ -303,8 +260,7 @@ pub fn parse_video_settings(xml: &str) -> Option<VideoSettings> {
                 .map(|(_, v)| v.as_str())
         };
         let num = |name: &str| get(name).and_then(|v| v.parse::<i32>().ok());
-        // A range the device declines to give is not a reason to lock the
-        // control: offer a window around wherever it currently sits instead.
+        // No range reported: use a window around the current value.
         let ranged = |name: &str, fallback: i32| {
             let value = num(name).unwrap_or(0);
             Knob::new(
@@ -318,8 +274,7 @@ pub fn parse_video_settings(xml: &str) -> Option<VideoSettings> {
             width: num("cx").unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
             height: num("cy").unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
             refresh: num("fq").unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
-            // The vendor's sliders are fixed 0–100 and it clamps the reported
-            // value into that range rather than widening the slider.
+            // Clamped to 0–100, as the vendor's sliders do.
             brightness: Knob::new(num("brightness").unwrap_or(50).clamp(0, 100), 0, 100),
             contrast: Knob::new(num("contrast").unwrap_or(50).clamp(0, 100), 0, 100),
             hoffset: ranged("hoffset", 64),
@@ -373,12 +328,7 @@ pub fn heartbeat() -> Message {
     }
 }
 
-/// The messages the session can send, as values.
-///
-/// These are pure builders so that both drivers — the threaded native
-/// [`crate::Session`], which hands messages to its worker, and [`SessionCore`],
-/// which writes them straight out — agree on the wire format without either
-/// owning it.
+/// Outgoing message builders, shared by [`crate::Session`] and [`SessionCore`].
 pub mod outbound {
     use super::*;
 
@@ -387,10 +337,7 @@ pub mod outbound {
         Message::new(CmdFlag::RawData, Cmd::ConfigXml, xml.as_bytes().to_vec())
     }
 
-    /// App-level `<commands>` documents.
-    ///
-    /// The stock client hands these to its plugin facade, which forwards
-    /// anything without a dedicated handler verbatim as [`Cmd::MsgCmdXml`]
+    /// App-level `<commands>` documents, sent as [`Cmd::MsgCmdXml`]
     /// (`DefaultCommandHandler`).
     pub fn xml(xml: &str) -> Message {
         Message::new(CmdFlag::RawData, Cmd::MsgCmdXml, xml.as_bytes().to_vec())
@@ -455,11 +402,8 @@ pub mod outbound {
     }
 }
 
-/// The login exchange on the command channel, driven one poll at a time.
-///
-/// The caller decides how to wait — a native client loops against a deadline, a
-/// browser resumes from its frame callback — while the protocol itself, the
-/// `VERIFY_USER` payload and the user-level check, stays here.
+/// The polled login exchange on the command channel. The caller decides how to
+/// wait.
 pub struct Login<T: Transport> {
     cmd: Channel<T>,
 }
@@ -471,9 +415,7 @@ impl<T: Transport> Login<T> {
         Ok(Login { cmd })
     }
 
-    /// Returns the client config document once the device has sent it.
-    ///
-    /// `Ok(None)` means it has not answered yet; call again.
+    /// The client config once received; `Ok(None)` means call again.
     pub fn poll(&mut self) -> Result<Option<String>, Error> {
         self.cmd.flush_outgoing()?;
         let Some(msg) = self.cmd.poll()? else {
@@ -501,18 +443,13 @@ impl<T: Transport> Login<T> {
         }
     }
 
-    /// Take the command channel back once the login has succeeded.
     pub fn finish(self) -> Channel<T> {
         self.cmd
     }
 }
 
-/// A live KVM session over three already-connected channels.
-///
-/// Nothing here starts a thread or blocks: [`pump`] does one non-blocking round
-/// over every channel and returns. See the module docs for why.
-///
-/// [`pump`]: SessionCore::pump
+/// A live KVM session over three connected channels. Drive it with
+/// [`SessionCore::pump`].
 pub struct SessionCore<T: Transport> {
     cmd: Channel<T>,
     video: Channel<T>,
@@ -524,10 +461,7 @@ pub struct SessionCore<T: Transport> {
 }
 
 impl<T: Transport> SessionCore<T> {
-    /// Assemble a session from its three channels.
-    ///
-    /// `config_xml` is the document [`Login`] obtained; it is surfaced as the
-    /// first event so every driver reports it the same way.
+    /// `config_xml` (from [`Login`]) is emitted as the first event.
     pub fn new(
         cmd: Channel<T>,
         video: Channel<T>,
@@ -549,33 +483,28 @@ impl<T: Transport> SessionCore<T> {
         }
     }
 
-    /// The shared framebuffer. Lock it briefly to draw, then let go.
+    /// Lock briefly.
     pub fn frame(&self) -> &SharedFrame {
         &self.frame
     }
 
-    /// Whether the session has stopped. The reason arrived as
-    /// [`Event::Disconnected`].
     pub fn is_ended(&self) -> bool {
         self.ended
     }
 
-    /// Take the next event, if any.
     pub fn next_event(&mut self) -> Option<Event> {
         self.events.pop_front()
     }
 
-    /// Do one non-blocking round over every channel.
-    ///
-    /// Returns whether anything moved, so a caller with nothing else to do
-    /// knows it can wait a moment before asking again.
+    /// One non-blocking round over every channel. Returns whether anything
+    /// happened.
     pub fn pump(&mut self) -> bool {
         if self.ended {
             return false;
         }
         let mut moved = false;
 
-        // Anything a short write left behind goes before anything new.
+        // Flush leftovers from short writes first.
         for result in [
             self.cmd.flush_outgoing(),
             self.km.flush_outgoing(),
@@ -621,11 +550,10 @@ impl<T: Transport> SessionCore<T> {
         moved
     }
 
-    /// Route one command-channel message. Returns a reason when it ends the
-    /// session.
+    /// Returns a reason if the message ends the session.
     fn handle_cmd(&mut self, msg: &Message) -> Option<String> {
         if msg.header.magic != MagicNumber::Tag {
-            // Heartbeat and goodbye carry nothing we act on.
+            // Heartbeat or goodbye.
             return None;
         }
         match msg.header.cmd_flag {
@@ -644,8 +572,7 @@ impl<T: Transport> SessionCore<T> {
                 self.events.push_back(Event::NoSignal);
             }
             CmdFlag::GuiMsg => {
-                // The command code selects a message id; the client maps a
-                // small set of them and ignores the rest.
+                // The vendor client only maps these ids.
                 let id = match msg.header.command.code() {
                     2048 => "calibrating",
                     2049 => "initializing",
@@ -697,8 +624,7 @@ impl<T: Transport> SessionCore<T> {
                         self.events.push_back(Event::Frame(rect));
                     }
                 }
-                // A bad frame is recoverable: the channel stays framed, and the
-                // next key frame repaints over it.
+                // Recoverable; the next key frame repaints.
                 Err(e) => tracing::warn!(error = %e, "video frame dropped"),
             },
             CmdFlag::Palette => match parse_palette(&msg.payload) {
@@ -724,7 +650,7 @@ impl<T: Transport> SessionCore<T> {
 
     // --- sending ---------------------------------------------------------
 
-    /// Send a message on the command channel.
+    /// Send on the command channel.
     pub fn send(&mut self, msg: &Message) -> Result<(), Error> {
         if self.ended {
             return Err(Error::Closed);
@@ -732,12 +658,10 @@ impl<T: Transport> SessionCore<T> {
         self.cmd.send(msg)
     }
 
-    /// Keep the session alive. The device drops it without this.
     pub fn send_heartbeat(&mut self) -> Result<(), Error> {
         self.send(&heartbeat())
     }
 
-    /// Queue a keyboard or mouse event.
     pub fn send_input(&mut self, ev: Input) -> Result<(), Error> {
         if self.ended {
             return Err(Error::Closed);
@@ -766,9 +690,7 @@ impl<T: Transport> SessionCore<T> {
     pub fn set_video_number(&mut self, setting: VideoSetting, value: i32) -> Result<(), Error> {
         self.set_video_setting(setting, &value.to_string())
     }
-    /// Write knobs into the device's stored configuration, where they survive
-    /// the session. `current` is the device's own last report, which supplies
-    /// the two gains the device requires before it will store anything.
+    /// Persist settings. `current` supplies the gains the device requires.
     pub fn store_video_settings(
         &mut self,
         current: &VideoSettings,
@@ -776,9 +698,7 @@ impl<T: Transport> SessionCore<T> {
     ) -> Result<(), Error> {
         self.send(&outbound::store_video_settings(current, changes))
     }
-    /// [`VideoFilter::Auto`] is not a value the device accepts: the vendor's
-    /// client answers that choice by running the automatic adjustment, which
-    /// picks a filter itself, and so does this.
+    /// [`VideoFilter::Auto`] runs auto-adjust, as the vendor client does.
     pub fn set_video_filter(&mut self, filter: VideoFilter) -> Result<(), Error> {
         match filter {
             VideoFilter::Auto => self.auto_adjust_video(),
@@ -798,7 +718,6 @@ impl<T: Transport> SessionCore<T> {
         self.send(&outbound::set_exclusive(exclusive))
     }
 
-    /// Close every channel.
     pub fn close(&mut self) {
         self.cmd.close();
         self.video.close();
@@ -811,8 +730,7 @@ impl<T: Transport> SessionCore<T> {
 mod tests {
     use super::*;
 
-    /// The `<video_settings>` element exactly as a B070-008-19-IP on firmware
-    /// 2.2.1258.1.0 sends it, for a target driving 1360x768.
+    /// Captured from a B070-008-19-IP (fw 2.2.1258.1.0), target at 1360x768.
     const REAL_VIDEO_SETTINGS: &str = r#"<client_config><video_settings \
 brightness='49' contrast='50' cx='1360' cy='768' fq='60' voffset='24' \
 voffset_min='7' voffset_max='26' hoffset='368' hoffset_min='113' \
@@ -844,9 +762,7 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
         assert_eq!(v.filter, VideoFilter::Low);
     }
 
-    /// A stored write is the device's own element with the caller's changes in
-    /// it: both gains, because without them the device only overlays it, and
-    /// the filter, because the vendor's document carries one too.
+    /// Both gains (else the device only overlays) and the filter.
     #[test]
     fn a_stored_write_is_the_devices_element_with_the_change_in_it() {
         let v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
@@ -861,8 +777,6 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
         );
     }
 
-    /// `auto` is a request to run the adjustment rather than a value, so it is
-    /// the one filter a stored write must not carry.
     #[test]
     fn a_stored_write_never_carries_the_automatic_filter() {
         let mut v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
@@ -873,8 +787,6 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
             .contains("filter"));
     }
 
-    /// A change to a gain replaces it rather than being sent twice, or the
-    /// device would read whichever came last and the element would be a lie.
     #[test]
     fn a_stored_write_carries_each_knob_once() {
         let v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
@@ -884,8 +796,6 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
         assert_eq!(xml.matches("brightness=").count(), 1, "{xml}");
     }
 
-    /// The device reports no range for the phase, and the two it does report
-    /// are the only ones it gives. The rest come from the vendor's dialog.
     #[test]
     fn ranges_the_device_leaves_out_come_from_the_vendors_own_limits() {
         let v = parse_video_settings(REAL_VIDEO_SETTINGS).expect("a settings element");
@@ -901,8 +811,6 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
         assert_eq!((v.contrast.min, v.contrast.max), (0, 100));
     }
 
-    /// An offset with no range is still worth a control: it gets a window
-    /// around wherever the device has it, rather than being locked.
     #[test]
     fn an_offset_without_a_range_still_gets_one() {
         let v =
@@ -927,8 +835,6 @@ scale_max='-10000000' phase='4' filter='low'/></client_config>"#;
         );
     }
 
-    /// Values outside the vendor's own slider range are clamped, not widened —
-    /// what its dialog does when the device reports a brightness above 100.
     #[test]
     fn out_of_range_values_are_clamped_into_the_control() {
         let v = parse_video_settings(

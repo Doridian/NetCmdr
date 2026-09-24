@@ -1,36 +1,19 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command netcmdr-bridge puts a Tripp Lite NetCommander / Minicom Smart IP KVM
-// behind something a browser can actually talk to.
+// Command netcmdr-bridge makes a Tripp Lite NetCommander / Minicom Smart IP KVM
+// reachable from a browser.
 //
-// # Why this exists
-//
-// The device's TLS is the problem, and it is not a fixable one. It offers no
-// ECDHE suite at all — only DHE and static RSA — no TLS 1.3, a 1024-bit DHE
-// group and a self-signed certificate. A browser has no switch for any of that
-// and never will. No amount of clicking through a certificate warning helps,
-// because the handshake fails before a certificate is ever considered.
-//
-// So the bridge terminates the device's TLS itself and offers the browser plain
-// HTTP and WebSockets. The web client then needs no TLS stack of its own, which
-// is most of what makes a WebAssembly build of it possible.
-//
-// There is nothing to deploy beside the executable: the client is built into
-// it, gzipped, and unpacked when the bridge starts.
+// Browsers can't handshake with the device (no ECDHE, no TLS 1.3, 1024-bit
+// DHE), so the bridge terminates its TLS and offers plain HTTP and WebSockets.
+// The web client is embedded in the binary.
 //
 // # Security
 //
-// The bridge does not authenticate anyone. It cannot: the only credential in
-// this protocol is the device's own SESSIONID, and minting one is exactly what
-// /message.pv is for. Anything that can reach the listening port can therefore
-// reach the device's management API and session ports, including to attempt
-// logins. That is why the default listen address is loopback, and why anything
-// else should be put behind a reverse proxy that does authenticate, and that
-// terminates a TLS the browser will accept.
-//
-// What it does *not* do is act as an open relay: the device address and both
-// ports are fixed at startup and cannot be steered by a request.
+// The bridge authenticates nobody, so anyone reaching it can reach the device.
+// It listens on loopback by default; otherwise put it behind an authenticating
+// TLS reverse proxy. The device address and ports are fixed at startup, so it
+// is not an open relay.
 package main
 
 import (
@@ -75,8 +58,7 @@ func run() error {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()}))
 
-	// Unpack the built-in client before anything can ask for it, so that the
-	// work is done while nothing is waiting on it.
+	// Unpack the client before serving.
 	assets, err := LoadAssets()
 	if err != nil {
 		return err
@@ -112,19 +94,13 @@ func run() error {
 
 	server := &http.Server{
 		Handler: bridge.Handler(),
-		// A read or write deadline would cut a KVM session off mid-stream, so
-		// only the head is on a clock. A relay lives as long as its channel.
+		// Only headers get a deadline; relays are long-lived.
 		ReadHeaderTimeout: bridge.Device.Timeout,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
 	}
 
-	// Stop when told to, rather than when killed. This matters most as PID 1 in
-	// a container: without a handler, `docker stop` would wait out its whole
-	// grace period and then SIGKILL the bridge.
-	//
-	// Nothing is lost by going out this way. A connection holds no state worth
-	// finishing — the device's own session outlives any one of them — so the
-	// listener is closed and the process leaves rather than draining.
+	// Exit promptly on SIGTERM (e.g. as PID 1 in a container). Connections
+	// hold no state worth draining.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -142,8 +118,7 @@ func run() error {
 	return nil
 }
 
-// logLevel reads NETCMDR_LOG, so that the bridge can be turned up without being
-// rebuilt.
+// logLevel reads NETCMDR_LOG.
 func logLevel() slog.Level {
 	level := slog.LevelInfo
 	if name := os.Getenv("NETCMDR_LOG"); name != "" {
@@ -156,8 +131,7 @@ func logLevel() slog.Level {
 
 func usage() {
 	out := flag.CommandLine.Output()
-	// Usage goes wherever flag was told to write; a failure there is the
-	// caller's broken pipe, and there is nowhere left to report it to.
+	// Nowhere to report a failed usage write.
 	_, _ = fmt.Fprint(out, `netcmdr-bridge — serve the web client for a NetCommander IP KVM and relay its protocol
 
 Terminates the device's legacy TLS — which no browser can negotiate — and offers

@@ -4,16 +4,12 @@
 //!
 //! Transcribed from `com.minicom.plugin.km_impl.*`.
 //!
-//! Every input event is a 16-byte payload of four little-endian 32-bit words —
-//! a message class followed by three parameters — carried on the keyboard/mouse
-//! channel as `CmdFlag::RawData`. Mouse *moves* additionally set the header's
-//! command to `MOUSE_MOVE`, which is how the device tells them apart from the
-//! rest without looking at the body.
+//! Each event is 16 bytes (class + three params, LE `u32`s) sent as
+//! `CmdFlag::RawData`. Mouse moves also set the header command to
+//! `MOUSE_MOVE`.
 //!
-//! Mouse coordinates are **absolute, in remote screen pixels**. The vendor's
-//! client sends the panel coordinate directly because its panel is 1:1 with the
-//! framebuffer, and it sends (0, 0) with button events, relying on the last move
-//! to have positioned the pointer.
+//! Mouse coordinates are **absolute remote pixels**. Button events send (0, 0)
+//! and rely on the last move.
 
 use netcmdr_proto::kvmmsg::{Cmd, CmdFlag, Message};
 
@@ -47,11 +43,8 @@ mod key_type {
     pub const CTRL_ALT_DEL: i32 = 773;
 }
 
-/// Modifier and lock state carried with every key event (`KMConsts`).
-///
-/// The device needs these because it replays scancodes into a real PS/2
-/// keyboard controller and has to keep the target's shift and lock state in
-/// step with the local one.
+/// Modifier and lock state sent with every key event (`KMConsts`), so the
+/// device can keep the target's PS/2 state in sync.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Modifiers {
     pub shift: bool,
@@ -94,25 +87,29 @@ pub enum MouseButton {
     Right,
 }
 
-/// One input event to send to the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Input {
-    /// Absolute pointer position, in remote screen pixels.
-    MouseMove { x: i32, y: i32 },
-    /// A button press or release. The device uses the last known position.
-    MouseButton { button: MouseButton, down: bool },
-    /// Wheel notches; positive scrolls up, as the vendor's client sends it.
+    /// Absolute, in remote pixels.
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    /// Uses the last known position.
+    MouseButton {
+        button: MouseButton,
+        down: bool,
+    },
+    /// Wheel notches; positive is up.
     MouseWheel(i32),
-    /// Ask the device to re-sync the remote pointer with ours.
+    /// Re-sync the remote pointer.
     MouseQuickSync,
-    /// A PC scancode (set 1) with its extended-key flag.
+    /// Set 1 scancode with extended-key flag.
     Key {
         scancode: u8,
         extended: bool,
         down: bool,
         modifiers: Modifiers,
     },
-    /// The one key combination a KVM has to inject out of band.
     CtrlAltDel,
 }
 
@@ -124,12 +121,11 @@ fn rat_packet(class: i32, a: i32, b: i32, c: i32) -> Vec<u8> {
     out
 }
 
-/// Encode an input event as the message to put on the keyboard/mouse channel.
 pub fn encode(input: Input) -> Message {
     match input {
         Input::MouseMove { x, y } => Message::new(
             CmdFlag::RawData,
-            // Only moves carry a command; everything else leaves it undefined.
+            // Only moves carry a command.
             Cmd::MouseMove,
             rat_packet(class::MOUSE, mouse_type::MOVE, x, y),
         ),
@@ -165,8 +161,7 @@ pub fn encode(input: Input) -> Message {
             down,
             modifiers,
         } => {
-            // The scancode sits in the third byte, with the extended-key flag
-            // one byte above it (`KBMINFO.nKbCodes`).
+            // Scancode in byte 2, extended flag in byte 3 (`KBMINFO.nKbCodes`).
             let mut codes = (scancode as i32) << 16;
             if extended {
                 codes |= 0x0100_0000;

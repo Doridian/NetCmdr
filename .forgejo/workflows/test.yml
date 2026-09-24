@@ -1,18 +1,5 @@
-# Lint, then test, both halves of the tree. The toolchain is the flake's dev
-# shell rather than a set of setup-* actions, so that the rustc, Go and
-# golangci-lint this runs with are the ones a checkout gets from `nix develop`
-# and the ones the builds in flake.nix use — one place to upgrade, and no CI
-# that is green against a compiler nobody else has.
-#
-# One job rather than one per language: both halves want the same shell, and
-# the ask is that nothing is tested until everything lints. Linting is the
-# cheaper half, so a formatting slip fails in a minute rather than after the
-# workspace has been built twice.
-#
-# The images this repository publishes are built by bridge-image.yml, which
-# runs the bridge's Go tests again on the way through. That is the flake's
-# doing rather than a duplicate of this, and it is what keeps a pushed image
-# from being one whose tests were never run.
+# Lint, then test, Rust and Go, using the flake's dev shell so CI matches
+# `nix develop`. One job, so nothing is tested until everything lints.
 name: Test
 
 concurrency:
@@ -41,23 +28,16 @@ jobs:
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M=
             trusted-substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
             substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
-      # Built once here so that the first lint step is not the one that waits
-      # for a compiler to be fetched.
       - name: Build the dev shell
         run: nix develop --command true
 
       - name: Check the Rust formatting
         run: nix develop --command cargo fmt --all --check
-      # -D warnings because README.md#development says this is clean and stays
-      # clean; without it clippy reports and exits 0. netcmdr-web is in the
-      # workspace but compiles to nothing off wasm32, so it costs nothing here
-      # and is covered by the wasm build in bridge-image.yml instead.
+      # netcmdr-web is empty off wasm32; bridge-image.yml builds it.
       - name: Clippy
         run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 
-      # golangci-lint's default set includes govet, so `go vet` is not run
-      # separately; gofmt is a formatter in v2 and has its own subcommand.
-      # See bridge/.golangci.yml.
+      # golangci-lint includes govet. See bridge/.golangci.yml.
       - name: Check the bridge's formatting
         run: nix develop --command sh -c 'cd bridge && golangci-lint fmt --diff'
       - name: Lint the bridge
@@ -65,9 +45,6 @@ jobs:
 
       - name: Test the workspace
         run: nix develop --command cargo test --workspace
-      # No client is packed in, which is the case the bridge's asset tests
-      # expect: `go:embed all:dist` matches the .gitkeep and the bridge serves
-      # the protocol and no client. Building the client here would test a
-      # different bridge than the one this step is about.
+      # Without a packed client, as the asset tests expect.
       - name: Test the bridge
         run: nix develop --command sh -c 'cd bridge && go test ./...'

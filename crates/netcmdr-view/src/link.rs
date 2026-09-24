@@ -1,7 +1,6 @@
 // Copyright (C) 2026 Doridian
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The native side of `netcmdr_ui`'s platform traits: a threaded session and a
-//! management worker, presented the way the shared viewer expects them.
+//! Native `netcmdr_ui` platform traits: threaded session and management worker.
 
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -11,7 +10,6 @@ use netcmdr_proto::command::{VideoFilter, VideoSetting};
 use netcmdr_session::{Error, Event, Input, Session, SharedFrame, VideoSettings};
 use netcmdr_ui::platform::{MgmtLink, MgmtReply, SessionLink};
 
-/// The threaded session, as a [`SessionLink`].
 pub struct NativeSession {
     session: Session,
     ended: bool,
@@ -40,7 +38,7 @@ impl SessionLink for NativeSession {
                 Some(event)
             }
             Err(TryRecvError::Empty) => None,
-            // The session thread is gone; there will be no reason forthcoming.
+            // The session thread is gone without a reason.
             Err(TryRecvError::Disconnected) => {
                 self.ended = true;
                 None
@@ -94,21 +92,16 @@ impl SessionLink for NativeSession {
     }
 }
 
-/// Something to ask the device over HTTPS.
 enum Request {
     Targets,
     Power { port: u32, command: PowerCommand },
 }
 
-/// A worker thread for the management API, as a [`MgmtLink`].
-///
-/// Every one of these calls opens a fresh TLS connection. Doing that from the
-/// menu's click handler would freeze the window for as long as the device takes
-/// to answer, so requests go to this thread and answers are collected later.
+/// Management API worker thread, so slow requests don't freeze the window.
 pub struct NativeMgmt {
     requests: Option<Sender<Request>>,
     replies: Receiver<MgmtReply>,
-    /// Requests sent but not yet answered, so the UI can show it is waiting.
+    /// Unanswered requests.
     pending: usize,
 }
 
@@ -120,8 +113,7 @@ impl NativeMgmt {
         std::thread::Builder::new()
             .name("netcmdr-mgmt".into())
             .spawn(move || {
-                // `recv` fails once the viewer drops its sender: that is the
-                // stop signal, and there is nothing to clean up.
+                // Sender dropped: stop.
                 while let Ok(request) = inbox.recv() {
                     if tx.send(run(&client, request)).is_err() {
                         break;

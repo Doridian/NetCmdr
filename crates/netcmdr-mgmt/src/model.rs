@@ -2,16 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Parsed representations of the device's `PV_*` management XML.
 //!
-//! The schema here is from **live captures** of a B070-008-19-IP on firmware
-//! 2.1.1184, saved under `research/notes/analysis/live-fixtures/`, and re-checked
-//! against firmware 2.2.1258.1.0, which parses identically. The earlier
-//! `/config/` `CMA_Message` schema this crate first targeted is gone from
-//! shipping firmware.
+//! Schema from live captures (firmware 2.1.1184 and 2.2.1258.1.0) in
+//! `research/notes/analysis/live-fixtures/`.
 //!
-//! Parsing is deliberately lenient: unknown elements and attributes are ignored
-//! so that other hardware variants and firmware revisions still parse. Note the
-//! firmware embeds stray newlines inside some attribute values
-//! (`name="D1214403\n"`), so every extracted string is trimmed.
+//! Parsing is lenient (unknown content is ignored), and strings are trimmed
+//! because the firmware adds stray newlines (`name="D1214403\n"`).
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -47,8 +42,7 @@ fn get<'a>(attrs: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// `"true"`/`"1"` → true; anything else → false. The firmware uses `"true"`
-/// and `"false"` in the PV schema (unlike the older mixed `0`/`FALSE` forms).
+/// `"true"`/`"1"` → true; else false.
 fn as_bool(v: &str) -> bool {
     v.eq_ignore_ascii_case("true") || v == "1"
 }
@@ -100,19 +94,18 @@ where
     Ok(())
 }
 
-/// The reply to a `CMA_AUTHORIZE`. `PV_REPLY` / `PV_reply`.
+/// `CMA_AUTHORIZE` reply (`PV_REPLY` / `PV_reply`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AuthReply {
     /// `"ok"` or `"error"`.
     pub status: String,
-    /// Present only on success. This is the token the KVM session's socket
-    /// preamble also needs.
+    /// Only on success; also used by the KVM session handshake.
     pub session_id: Option<String>,
     /// AAA scheme in force (`SESSION_AAA_TYPE`); `3` is local auth.
     pub aaa_type: Option<String>,
     /// Hardware family code, e.g. `108`.
     pub hardware: Option<String>,
-    /// Session port the device wants for the KVM channel.
+    /// KVM session port.
     pub port: Option<u16>,
     pub has_fast_vm: bool,
     pub has_ps_redundancy: bool,
@@ -127,7 +120,6 @@ impl AuthReply {
     }
 }
 
-/// Parse a `PV_REPLY` (authentication response).
 pub fn parse_auth_reply(xml: &str) -> Result<AuthReply, Error> {
     let mut r = AuthReply::default();
     on_first(xml, "PV_reply", |a| {
@@ -144,7 +136,7 @@ pub fn parse_auth_reply(xml: &str) -> Result<AuthReply, Error> {
     on_first(xml, "reply_error", |a| {
         let desc = get(a, "description").unwrap_or_default();
         let id = get(a, "id").unwrap_or_default();
-        // id 1000 is "no error"; don't record it as a failure.
+        // 1000 means "no error".
         if id != "1000" && !desc.is_empty() {
             r.error = Some((desc.to_owned(), id.to_owned()));
         }
@@ -158,8 +150,7 @@ pub fn parse_auth_reply(xml: &str) -> Result<AuthReply, Error> {
 pub struct Target {
     pub port: u32,
     pub name: String,
-    /// Power outlets ("points of control") on a cascaded switch. `0` or absent
-    /// on a device with no cascade.
+    /// Points of control on a cascaded switch; `0`/absent if none.
     pub num_pocs: Option<u32>,
 }
 
@@ -174,11 +165,11 @@ pub struct NetworkAdapter {
     pub dns: Option<String>,
     /// `use_static_ip="false"` means DHCP.
     pub use_static_ip: bool,
-    /// Whether `dns` is used rather than whatever DHCP hands out.
+    /// Use `dns` instead of DHCP's.
     pub static_dns: bool,
     pub ipv6_enabled: bool,
     pub ipv6: Option<String>,
-    /// Prefix length, as a number of bits.
+    /// Prefix length in bits.
     pub ipv6_prefix: Option<u32>,
     pub ipv6_gateway: Option<String>,
     /// `dhcp`, `stateless`, `static` or `none`.
@@ -191,9 +182,9 @@ pub struct NetworkAdapter {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Ssh {
     pub enabled: bool,
-    /// TCP port that reaches serial device 1.
+    /// Port for serial device 1.
     pub port1: Option<u16>,
-    /// TCP port that reaches serial device 2.
+    /// Port for serial device 2.
     pub port2: Option<u16>,
 }
 
@@ -202,17 +193,17 @@ pub struct Ssh {
 pub struct SecurityPolicy {
     /// "High security" password rules.
     pub password_restrictions: bool,
-    /// Block a locked-out account until an administrator clears it.
+    /// Lock out until an admin clears it.
     pub lock_forever: bool,
-    /// How long a lockout lasts, in seconds. Meaningless when `lock_forever`.
+    /// Lockout duration in seconds (ignored with `lock_forever`).
     pub lock_time_secs: Option<u32>,
     /// Require the OSD password on the local console.
     pub osd_password: bool,
     /// Failed logins that trigger a lockout.
     pub max_try: Option<u32>,
-    /// Window the failures have to fall inside, in seconds.
+    /// Failure window in seconds.
     pub try_time_secs: Option<u32>,
-    /// Authentication sources, in the order they are tried.
+    /// Authentication sources in order.
     pub auth_order: Vec<AuthMethod>,
 }
 
@@ -228,17 +219,16 @@ pub struct LdapServer {
 /// LDAP settings, from `<aaa>/<ldap>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Ldap {
-    /// `basic`, `user` or `group`: where a user's permissions come from.
+    /// `basic`, `user` or `group`.
     pub mode: Option<String>,
-    /// DN the device binds as to search the directory.
+    /// Bind DN.
     pub search_dn: Option<String>,
-    /// That DN's password. Stored on the device in the clear and handed back
-    /// on every fetch.
+    /// Stored and returned in the clear.
     pub search_password: Option<String>,
     pub search_base: Option<String>,
     /// Attribute holding the login name, e.g. `cn` or `sAMAccountName`.
     pub user_attribute: Option<String>,
-    /// Attribute holding the device permissions, in `user` and `group` mode.
+    /// Permissions attribute (`user` and `group` modes).
     pub acl_attribute: Option<String>,
     pub servers: Vec<LdapServer>,
 }
@@ -249,7 +239,7 @@ pub struct RadiusServer {
     pub host: String,
     pub port: Option<u16>,
     pub accounting_port: Option<u16>,
-    /// The shared secret, in the clear, as the device hands it back.
+    /// Returned in the clear.
     pub secret: Option<String>,
 }
 
@@ -261,10 +251,7 @@ pub struct Radius {
     pub servers: Vec<RadiusServer>,
 }
 
-/// External authentication, from `<aaa>`.
-///
-/// The firmware omits this element entirely on a device that has never had it
-/// configured; both halves are then empty.
+/// External authentication, from `<aaa>` (absent until configured).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Aaa {
     pub ldap: Ldap,
@@ -286,7 +273,7 @@ pub struct DeviceTime {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KvmManager {
     pub enabled: bool,
-    /// Whether `ip` is used rather than discovery.
+    /// Use `ip` instead of discovery.
     pub fixed_ip: bool,
     pub ip: Option<String>,
 }
@@ -296,14 +283,13 @@ pub struct KvmManager {
 pub struct SerialDevice {
     pub port: u32,
     pub name: String,
-    /// Whether the port is offered to users.
     pub active: bool,
     pub baud_rate: Option<String>,
     pub data_bits: Option<String>,
     pub stop_bits: Option<String>,
-    /// Parity as the single letter the wire uses (`N`, `O`, `E`, `M`, `S`).
+    /// `N`, `O`, `E`, `M` or `S`.
     pub parity: Option<String>,
-    /// What the port is wired to: a console, or a power strip.
+    /// Console or power strip.
     pub assign: Option<SerialAssign>,
     pub charset: Option<String>,
 }
@@ -312,28 +298,27 @@ pub struct SerialDevice {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Snmp {
     pub traps_enabled: bool,
-    /// Where traps are sent. Empty means traps are off whatever the flag says.
+    /// Trap destination; empty disables traps regardless of the flag.
     pub manager_ip: Option<String>,
     pub community: Option<String>,
 }
 
-/// A PDU model the firmware knows how to drive, from `<power>/<pdu_types>/<entry>`.
+/// A supported PDU model, from `<power>/<pdu_types>/<entry>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PduType {
     pub manufacturer: String,
-    /// The exact string a `<pdu>`'s `model` has to carry.
+    /// Value for `<pdu model>`.
     pub model: String,
     pub outlets: Option<u32>,
-    /// How the device talks to it; every entry in current firmware is `snmp`.
+    /// Always `snmp` in current firmware.
     pub mode: Option<String>,
 }
 
 /// One outlet's mapping, from `<pdu>/<outlet>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outlet {
-    /// Outlet number on the PDU.
     pub outlet: u32,
-    /// KVM port it powers.
+    /// KVM port powered.
     pub target_port: u32,
 }
 
@@ -341,7 +326,7 @@ pub struct Outlet {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Pdu {
     pub name: String,
-    /// One of the [`PduType::model`] strings.
+    /// A [`PduType::model`].
     pub model: Option<String>,
     pub outlets: Option<u32>,
     pub ip: Option<String>,
@@ -351,29 +336,25 @@ pub struct Pdu {
 /// Power configuration, from `<power>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Power {
-    /// The models this firmware supports. Read-only.
+    /// Supported models (read-only).
     pub types: Vec<PduType>,
     pub pdus: Vec<Pdu>,
 }
 
-/// The device configuration, from a `value="config"` request (`PV_CONFIG`).
-///
-/// This is the read-only view, parsed leniently: unknown elements and
-/// attributes are dropped, so it must never be used to build a save. Writing
-/// goes through [`crate::config::ConfigDoc`], which keeps the document whole.
+/// Read-only device config (`PV_CONFIG`). Lossy; save via
+/// [`crate::config::ConfigDoc`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeviceConfig {
-    /// The device's own stamp on this document.
     pub config_id: Option<String>,
-    /// Device name, e.g. the serial `D1214403`.
+    /// e.g. `D1214403`.
     pub name: Option<String>,
     /// Hardware family code, e.g. `108`.
     pub hardware_type: Option<String>,
     pub switch_ports: Option<u32>,
-    /// Model of cascaded analog switch, when one is configured.
+    /// Cascaded analog switch model, if any.
     pub cascade: Option<String>,
     pub idle_time_minutes: Option<u32>,
-    /// Raw `ip_port` from `<connection>` (session port list).
+    /// Raw `<connection ip_port>`.
     pub session_ports: Vec<u16>,
     pub ssh_enabled: bool,
     pub ssh_ports: Vec<u16>,
@@ -397,11 +378,10 @@ pub struct User {
     pub active: bool,
     pub admin: bool,
     pub user_level: Option<u32>,
-    /// Ports this user may reach, e.g. `"1,2,3,4,5,6,7,8"`.
+    /// e.g. `"1,2,3,4,5,6,7,8"`.
     pub target_ports: Option<String>,
-    /// Ports this user may mount virtual media on.
+    /// Virtual media ports.
     pub vm_target_ports: Option<String>,
-    /// Serial ports this user may reach.
     pub serial_target_ports: Option<String>,
 }
 
@@ -434,7 +414,7 @@ pub fn parse_config(xml: &str) -> Result<DeviceConfig, Error> {
             port1: e.attr_parsed("port1"),
             port2: e.attr_parsed("port2"),
         };
-        // Kept flat as well: these two predate the `ssh` field.
+        // Predate the `ssh` field.
         c.ssh_enabled = c.ssh.enabled;
         c.ssh_ports = [c.ssh.port1, c.ssh.port2].into_iter().flatten().collect();
     }
@@ -488,7 +468,6 @@ pub fn parse_config(xml: &str) -> Result<DeviceConfig, Error> {
     }
 
     if let Some(e) = pv.child("system_time") {
-        // The device blanks these on a save; a fetch always fills them.
         if let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
             e.attr_parsed("year"),
             e.attr_parsed("month"),
@@ -628,8 +607,7 @@ pub fn parse_config(xml: &str) -> Result<DeviceConfig, Error> {
     Ok(c)
 }
 
-/// `Some(owned)` unless the attribute was absent. Empty strings are kept:
-/// `mngr_ip=""` means "no trap destination", which is worth showing.
+/// `None` only if absent; empty is meaningful (`mngr_ip=""`).
 fn opt(v: Option<&str>) -> Option<String> {
     v.map(str::to_owned)
 }
@@ -647,8 +625,7 @@ pub struct PortStatus {
     pub kind: String,
     /// e.g. `"Available"`, `"Off"`, `"Busy"`.
     pub status: String,
-    /// Server Interface Unit type: `"VMROCC"` when an SIU with virtual media is
-    /// attached, `"none"` when the port is empty.
+    /// SIU type: `"VMROCC"` (with virtual media) or `"none"`.
     pub rocc_type: String,
     pub user: String,
     pub power: bool,
@@ -656,7 +633,6 @@ pub struct PortStatus {
 }
 
 impl PortStatus {
-    /// Whether a Server Interface Unit is attached to this port.
     pub fn has_siu(&self) -> bool {
         !self.rocc_type.eq_ignore_ascii_case("none")
             && !self.rocc_type.eq_ignore_ascii_case("NotScanned")
@@ -691,15 +667,15 @@ pub fn parse_status(xml: &str) -> Result<Status, Error> {
         Ok(())
     })?;
     on_first(xml, "version", |a| {
-        // The firmware string has an embedded newline; collapse whitespace.
+        // Collapse embedded newlines.
         s.firmware_version =
             get(a, "firmware").map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "));
         s.hardware = get(a, "hardware").map(str::to_owned);
         Ok(())
     })?;
 
-    // <status_list> and <telnet_status> both contain <port> elements; take them
-    // all and let the `kind` attribute distinguish.
+    // Both <status_list> and <telnet_status> have <port>s; `kind` tells them
+    // apart.
     on_each(xml, "port", |a| {
         if let Some(number) = get(a, "number").and_then(|v| v.parse().ok()) {
             s.ports.push(PortStatus {
@@ -719,7 +695,7 @@ pub fn parse_status(xml: &str) -> Result<Status, Error> {
     Ok(s)
 }
 
-/// Whether a `CMA_CONFIG` reply says the device is rebooting to apply the save.
+/// Whether a `CMA_CONFIG` reply says the device is rebooting.
 pub fn reboot_in_progress(xml: &str) -> bool {
     matches!(
         crate::xml::find_element(xml, "PV_reply"),
@@ -727,13 +703,13 @@ pub fn reboot_in_progress(xml: &str) -> bool {
     )
 }
 
-/// The payload of a `<reply_data>` element (a configuration backup).
+/// `<reply_data>` payload (a backup).
 pub fn reply_data(xml: &str) -> Option<String> {
     let e = crate::xml::find_element(xml, "reply_data").ok()??;
     Some(e.text())
 }
 
-/// Parse a device firmware upgrade's progress from a `status` request.
+/// Firmware upgrade progress from a `status` reply.
 pub fn parse_upgrade_status(xml: &str) -> Result<UpgradeStatus, Error> {
     let e = crate::xml::find_element(xml, "device_upgrade")?
         .ok_or_else(|| Error::Device("no upgrade in progress".into()))?;
@@ -743,7 +719,6 @@ pub fn parse_upgrade_status(xml: &str) -> Result<UpgradeStatus, Error> {
     })
 }
 
-/// Parse per-port SIU upgrade progress.
 pub fn parse_siu_upgrade_status(xml: &str) -> Result<Vec<SiuUpgradeStatus>, Error> {
     let Some(data) = crate::xml::find_element(xml, "config_data")? else {
         return Ok(Vec::new());
@@ -760,8 +735,7 @@ pub fn parse_siu_upgrade_status(xml: &str) -> Result<Vec<SiuUpgradeStatus>, Erro
         .collect())
 }
 
-/// Parse the SIU version reply. The `roc_hw`/`roc_fw` attribute names are the
-/// firmware's own; the vendor's client renames them only to please XStream.
+/// Parse the SIU version reply (`roc_hw`/`roc_fw`).
 pub fn parse_siu_versions(xml: &str) -> Result<Vec<SiuVersion>, Error> {
     let Some(status) = crate::xml::find_element(xml, "PV_status")? else {
         return Ok(Vec::new());
@@ -779,8 +753,7 @@ pub fn parse_siu_versions(xml: &str) -> Result<Vec<SiuVersion>, Error> {
         .collect())
 }
 
-/// A SIU version field. The device writes `"Not responding"` into both when the
-/// port has no unit attached, which is an absence rather than a version.
+/// `"Not responding"` means no SIU.
 fn siu_field(v: Option<&str>) -> Option<String> {
     match v {
         Some(v) if !v.is_empty() && !v.eq_ignore_ascii_case("Not responding") => Some(v.to_owned()),
@@ -788,8 +761,7 @@ fn siu_field(v: Option<&str>) -> Option<String> {
     }
 }
 
-/// Pull the `reply_error` description out of any PV document, if it signals an
-/// error (used to surface "Invalid session" and friends).
+/// The `reply_error` description, if any (e.g. "Invalid session").
 pub fn error_in(xml: &str) -> Option<String> {
     let mut found = None;
     let _ = on_first(xml, "reply_error", |a| {
@@ -839,7 +811,7 @@ mod tests {
     #[test]
     fn parses_live_config() {
         let c = parse_config(CONFIG).unwrap();
-        // The firmware embeds a trailing newline in the name; must be trimmed.
+        // Trailing newline must be trimmed.
         assert_eq!(c.name.as_deref(), Some("D1214403"));
         assert_eq!(c.hardware_type.as_deref(), Some("108"));
         assert_eq!(c.switch_ports, Some(8));
@@ -922,7 +894,6 @@ mod tests {
         assert_eq!(s.name.as_deref(), Some("D1214403"));
         assert_eq!(s.description.as_deref(), Some("Operational, no faults"));
         assert_eq!(s.severity.as_deref(), Some("OK"));
-        // Embedded newline in the firmware version must be collapsed.
         assert_eq!(
             s.firmware_version.as_deref(),
             Some("Version 2.1.1184.1.0 .0 Build()")
@@ -941,7 +912,7 @@ mod tests {
 
     #[test]
     fn parses_a_live_siu_version_reply() {
-        // Captured from the device: one port per reply, whatever was asked.
+        // One port per reply, whatever was asked.
         let xml = r#"<PV_Message name="PV_STATUS"><PV_status SESSIONID="x"><status_list>
             <port number="1" roc_hw="20373 0.2 20372 2.0 ID00080207"
                   roc_fw="RoC II USB En v4.0 C8 B225 12/03/2013"/>

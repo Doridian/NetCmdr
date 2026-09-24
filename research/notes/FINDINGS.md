@@ -1,9 +1,9 @@
 # B070-008-19-IP — Reverse Engineering Findings
 
-Status: **pre-hardware**. Everything below was derived from public firmware, the
-official Windows/Java client, and vendor documentation. Nothing has been
-verified against a live device yet — items marked **[ASSUMED]** need
-confirmation once the KVM arrives.
+Status: **hardware-verified** on a B070-008-19-IP, firmware 2.2.1258.1.0
+(2026-09-18 onward). Sections 1–4 and parts of 5 predate the hardware and were
+derived from public firmware, the vendor clients and documentation; §5.0
+summarises what was confirmed. Items still marked **[ASSUMED]** are unverified.
 
 ---
 
