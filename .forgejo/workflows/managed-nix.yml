@@ -23,6 +23,6 @@ jobs:
             substituters = http://host.docker.internal:1111?trusted=true https://cache.nixos-cuda.org https://cache.nixos.org/
       - run: nix registry add nixpkgs github:NixOS/nixpkgs/nixos-26.05
       - name: Lint nix
-        run: nix run 'nixpkgs#nixfmt-tree' -- --ci --excludes 'gen-*.nix'
+        run: nix run --inputs-from . 'nixpkgs#nixfmt-tree' -- --ci --excludes 'gen-*.nix'
       - name: Build nix
         run: nix build '${{ vars.NIX_PACKAGE || '.' }}'
