@@ -8,6 +8,7 @@ members = [
     "crates/netcmdr-web",
     "crates/netcmdr-cli",
     "crates/netcmdr-view",
+    "tools/wasm-bindgen-cli",
 ]
 
 [workspace.package]

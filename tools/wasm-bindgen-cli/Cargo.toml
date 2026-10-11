@@ -1,0 +1,10 @@
+# Pins wasm-bindgen-cli in Cargo.lock so flake.nix can fetch it by the
+# lockfile's checksum. It has no library, so Cargo only resolves it.
+[package]
+name = "wasm-bindgen-cli-pin"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wasm-bindgen-cli = "=0.2.128"

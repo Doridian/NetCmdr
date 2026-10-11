@@ -25,6 +25,7 @@
             ./Cargo.toml
             ./Cargo.lock
             ./crates
+            ./tools/wasm-bindgen-cli
             # The live captures netcmdr-mgmt's tests parse.
             ./research/notes/analysis/live-fixtures
           ];
@@ -42,12 +43,11 @@
           ];
         };
 
-        # A crate's version from Cargo.lock (wasm-bindgen's CLI must match it).
-        lockedVersion =
+        # A crate's Cargo.lock entry (wasm-bindgen's CLI must match it).
+        lockedPackage =
           name:
-          (lib.findFirst (p: p.name == name) (throw "${name} is not in Cargo.lock")
-            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package
-          ).version;
+          lib.findFirst (p: p.name == name) (throw "${name} is not in Cargo.lock")
+            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package;
 
         # The viewer dlopens GL, xkbcommon, Wayland and X11, so they go on its
         # RPATH. Not needed on macOS.
@@ -109,17 +109,27 @@
         };
 
         # wasm-bindgen CLI at the exact Cargo.lock version (unstable ABI).
-        wasmBindgenVersion = lockedVersion "wasm-bindgen";
+        # tools/wasm-bindgen-cli pins it into Cargo.lock, which also holds
+        # the library to the same version, so its checksum is the hash.
+        wasmBindgenVersion = (lockedPackage "wasm-bindgen").version;
+        wasmBindgenCliCrate = lockedPackage "wasm-bindgen-cli";
         wasm-bindgen-cli = pkgs.buildWasmBindgenCli rec {
-          src = pkgs.fetchCrate {
-            pname = "wasm-bindgen-cli";
-            version = wasmBindgenVersion;
-            hash = "sha256-a7lcXJnnZkYReja+iUO7NqqrWyv3toxnUgQb8s4IS5s=";
-          };
-          cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
-            inherit src;
-            inherit (src) pname version;
-            hash = "sha256-R1Tas33Ursy8kqsxguAkG0ZhNed2n5uFTAhw1l2qlLY=";
+          inherit (wasmBindgenCliCrate) version;
+          src =
+            pkgs.runCommand "wasm-bindgen-cli-${version}-source"
+              {
+                crate = pkgs.fetchurl {
+                  name = "wasm-bindgen-cli-${version}.tar.gz";
+                  url = "https://static.crates.io/crates/wasm-bindgen-cli/wasm-bindgen-cli-${version}.crate";
+                  sha256 = wasmBindgenCliCrate.checksum;
+                };
+              }
+              ''
+                mkdir $out
+                tar -xzf $crate -C $out --strip-components=1
+              '';
+          cargoDeps = pkgs.rustPlatform.importCargoLock {
+            lockFile = "${src}/Cargo.lock";
           };
         };
 
@@ -148,7 +158,7 @@
             have=$(wasm-bindgen --version | cut -d' ' -f2)
             if [ "$locked" != "$have" ]; then
               echo "wasm-bindgen CLI is $have but Cargo.lock pins $locked;" >&2
-              echo "update wasmBindgenVersion's hashes in flake.nix." >&2
+              echo "bump tools/wasm-bindgen-cli's pin to match." >&2
               exit 1
             fi
 
