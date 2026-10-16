@@ -131,16 +131,16 @@ pub fn parse_servers(xml: &str) -> Vec<Server> {
     loop {
         match reader.read_event() {
             Ok(XmlEvent::Start(e)) | Ok(XmlEvent::Empty(e)) => {
-                if e.name().as_ref() != b"server" {
+                if e.name().as_ref() != "server" {
                     continue;
                 }
                 let (mut port, mut name, mut active) = (None, String::new(), false);
                 for attr in e.attributes().flatten() {
-                    let value = String::from_utf8_lossy(&attr.value).trim().to_string();
+                    let value = attr.value.trim().to_string();
                     match attr.key.as_ref() {
-                        b"port" => port = value.parse().ok(),
-                        b"servername" => name = value,
-                        b"active" => active = value.eq_ignore_ascii_case("true"),
+                        "port" => port = value.parse().ok(),
+                        "servername" => name = value,
+                        "active" => active = value.eq_ignore_ascii_case("true"),
                         _ => {}
                     }
                 }
@@ -243,22 +243,15 @@ pub fn parse_video_settings(xml: &str) -> Option<VideoSettings> {
             Ok(XmlEvent::Eof) | Err(_) => return None,
             _ => continue,
         };
-        if e.name().as_ref() != b"video_settings" {
+        if e.name().as_ref() != "video_settings" {
             continue;
         }
 
-        let mut a: Vec<(Vec<u8>, String)> = Vec::new();
+        let mut a: Vec<(String, String)> = Vec::new();
         for attr in e.attributes().flatten() {
-            a.push((
-                attr.key.as_ref().to_vec(),
-                String::from_utf8_lossy(&attr.value).trim().to_string(),
-            ));
+            a.push((attr.key.as_ref().to_owned(), attr.value.trim().to_string()));
         }
-        let get = |name: &str| {
-            a.iter()
-                .find(|(k, _)| k == name.as_bytes())
-                .map(|(_, v)| v.as_str())
-        };
+        let get = |name: &str| a.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
         let num = |name: &str| get(name).and_then(|v| v.parse::<i32>().ok());
         // No range reported: use a window around the current value.
         let ranged = |name: &str, fallback: i32| {
@@ -294,12 +287,12 @@ pub fn find_user_level(xml: &str) -> Option<i32> {
     loop {
         match reader.read_event() {
             Ok(XmlEvent::Start(e)) | Ok(XmlEvent::Empty(e)) => {
-                if e.name().as_ref() != b"connection" {
+                if e.name().as_ref() != "connection" {
                     continue;
                 }
                 for attr in e.attributes().flatten() {
-                    if attr.key.as_ref() == b"userlevel" {
-                        return String::from_utf8_lossy(&attr.value).trim().parse().ok();
+                    if attr.key.as_ref() == "userlevel" {
+                        return attr.value.trim().parse().ok();
                     }
                 }
             }

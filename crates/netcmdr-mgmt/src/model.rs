@@ -15,8 +15,8 @@ use crate::config::{AuthMethod, SerialAssign};
 use crate::Error;
 use crate::{SiuUpgradeStatus, SiuVersion, UpgradeStatus};
 
-fn local_name(name: &[u8]) -> &[u8] {
-    match name.iter().rposition(|&b| b == b':') {
+fn local_name(name: &str) -> &str {
+    match name.rfind(':') {
         Some(i) => &name[i + 1..],
         None => name,
     }
@@ -28,8 +28,10 @@ fn attrs_of(e: &quick_xml::events::BytesStart<'_>) -> Result<Vec<(String, String
     for a in e.attributes().with_checks(false) {
         let a = a?;
         out.push((
-            String::from_utf8_lossy(local_name(a.key.as_ref())).to_ascii_lowercase(),
-            a.unescape_value()?.trim().to_string(),
+            local_name(a.key.as_ref()).to_ascii_lowercase(),
+            a.normalized_value(quick_xml::XmlVersion::Implicit1_0)?
+                .trim()
+                .to_string(),
         ));
     }
     Ok(out)
@@ -58,9 +60,7 @@ where
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Eof => break,
-            Event::Start(ref e) | Event::Empty(ref e)
-                if local_name(e.name().as_ref()) == want.as_bytes() =>
-            {
+            Event::Start(ref e) | Event::Empty(ref e) if local_name(e.name().as_ref()) == want => {
                 f(&attrs_of(e)?)?;
                 break;
             }
@@ -82,9 +82,7 @@ where
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Eof => break,
-            Event::Start(ref e) | Event::Empty(ref e)
-                if local_name(e.name().as_ref()) == want.as_bytes() =>
-            {
+            Event::Start(ref e) | Event::Empty(ref e) if local_name(e.name().as_ref()) == want => {
                 f(&attrs_of(e)?)?;
             }
             _ => {}

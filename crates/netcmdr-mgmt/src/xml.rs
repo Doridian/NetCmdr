@@ -206,7 +206,7 @@ pub fn find_element(xml: &str, want: &str) -> Result<Option<Element>, Error> {
             Event::Eof => break,
 
             Event::Start(ref e) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                let name = e.name().as_ref().to_owned();
                 if stack.is_empty() && name != want {
                     continue;
                 }
@@ -229,7 +229,9 @@ pub fn find_element(xml: &str, want: &str) -> Result<Option<Element>, Error> {
 
             Event::Text(ref t) => {
                 if let Some(open) = stack.last_mut() {
-                    let text = t.unescape()?.into_owned();
+                    let text = quick_xml::escape::unescape(t)
+                        .map_err(quick_xml::Error::from)?
+                        .into_owned();
                     if !text.trim().is_empty() {
                         open.children.push(Node::Text(text));
                     }
@@ -239,7 +241,7 @@ pub fn find_element(xml: &str, want: &str) -> Result<Option<Element>, Error> {
             // Backups and certificates arrive as CDATA; kept as text.
             Event::CData(ref t) => {
                 if let Some(open) = stack.last_mut() {
-                    let text = String::from_utf8_lossy(t.as_ref()).into_owned();
+                    let text = (**t).to_owned();
                     if !text.trim().is_empty() {
                         open.children.push(Node::Text(text));
                     }
@@ -259,8 +261,9 @@ fn attrs_of(e: &BytesStart<'_>) -> Result<Vec<(String, String)>, Error> {
     for a in e.attributes().with_checks(false) {
         let a = a?;
         out.push((
-            String::from_utf8_lossy(a.key.as_ref()).into_owned(),
-            a.unescape_value()?.into_owned(),
+            a.key.as_ref().to_owned(),
+            a.normalized_value(quick_xml::XmlVersion::Implicit1_0)?
+                .into_owned(),
         ));
     }
     Ok(out)

@@ -21,7 +21,7 @@ repository = "https://git.foxden.network/FoxDen/NetCmdr"
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
-quick-xml = "0.37"
+quick-xml = "0.42"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

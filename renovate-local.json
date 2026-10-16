@@ -6,5 +6,12 @@
       "/repo/tools/auto-nix-hash bridge/vendor-hash.txt .#packages.x86_64-linux.netcmdr-bridge.goModules"
     ],
     "executionMode": "branch"
-  }
+  },
+  "packageRules": [
+    {
+      "description": "egui's crates are released in lockstep and must agree with each other. glow is included because egui_glow's Painter takes a glow::Context, so netcmdr-view's direct glow dependency must be the same glow version egui_glow depends on.",
+      "matchPackageNames": ["egui", "eframe", "egui_glow", "egui-winit", "glow"],
+      "groupName": "egui"
+    }
+  ]
 }
