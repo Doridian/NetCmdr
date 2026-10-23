@@ -240,7 +240,7 @@ is optional.
 #### Fonts
 
 egui needs embedded font files, and its stock faces are 1.3 MiB. So
-`default_fonts` is off and `crates/netcmdr-web/fonts` holds three subset faces
+`default_fonts` is off and `crates/netcmdr-ui/fonts` holds three subset faces
 (ASCII, Latin-1, the viewer's punctuation, and egui's icon glyphs): 42 KiB, each
 with its licence. Regenerate after bumping egui:
 

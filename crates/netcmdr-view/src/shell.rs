@@ -56,6 +56,7 @@ pub fn run(session: Session, cfg: Config) -> Result<()> {
         host: None,
         result: Ok(()),
     };
+    netcmdr_ui::fonts::install(&app.egui_ctx);
     event_loop.run_app(&mut app).context("running the viewer")?;
     std::mem::replace(&mut app.result, Ok(()))
 }

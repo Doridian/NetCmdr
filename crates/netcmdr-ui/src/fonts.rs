@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Subset fonts for egui. The stock faces are 1.3 MiB, so `default_fonts` is
 //! off and these are cut down by `tools/subset-fonts.py`.
+//!
+//! Every host has to call [`install`]: without it egui has no fonts and draws
+//! each glyph as a square.
 
 use std::sync::Arc;
 
@@ -59,4 +62,26 @@ pub fn install(ctx: &egui::Context) {
     );
 
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Without the fonts egui draws every glyph as a square, on native and
+    /// web alike. The viewer's own punctuation and icons must be covered.
+    #[test]
+    fn install_covers_the_viewers_glyphs() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let text = "Connecting… — ⏵ ⏷ ⚠ − € ‘’“” é";
+        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {
+            ctx.fonts_mut(|fonts| {
+                assert!(fonts.has_glyphs(&egui::FontId::proportional(14.0), text));
+                assert!(fonts.has_glyphs(&egui::FontId::monospace(14.0), text));
+            });
+        });
+        // epaint panics if the font atlas delta is dropped.
+        out.textures_delta.clear();
+    }
 }

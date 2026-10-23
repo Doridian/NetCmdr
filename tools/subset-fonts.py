@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 Doridian
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regenerate the browser client's subsetted fonts in crates/netcmdr-web/fonts.
+"""Regenerate the viewer's subsetted fonts in crates/netcmdr-ui/fonts.
 
 egui rasterises glyphs itself, so the web client has to carry real font files —
 a browser's installed fonts are not reachable from WebAssembly. Carrying
@@ -28,7 +28,7 @@ except ImportError:
     sys.exit("fontTools not found. Install it with: pip install fonttools")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "crates", "netcmdr-web", "fonts")
+OUT = os.path.join(ROOT, "crates", "netcmdr-ui", "fonts")
 
 # Keep in step with egui, and re-run on bumps.
 EPAINT_FONTS = "epaint_default_fonts-0.36.2"

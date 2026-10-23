@@ -8,7 +8,6 @@
 //! negotiate the device's TLS.
 
 mod connect;
-mod fonts;
 mod keyboard;
 mod link;
 mod net;
@@ -320,8 +319,7 @@ pub async fn start() -> Result<(), JsValue> {
             canvas,
             eframe::WebOptions::default(),
             Box::new(|cc| {
-                // No default fonts; see `fonts`.
-                fonts::install(&cc.egui_ctx);
+                netcmdr_ui::fonts::install(&cc.egui_ctx);
                 Ok(Box::new(app))
             }),
         )

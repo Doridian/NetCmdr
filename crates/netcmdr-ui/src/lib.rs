@@ -6,6 +6,7 @@
 //! behind [`platform`]; each shell supplies only a window, GL context and raw
 //! input.
 
+pub mod fonts;
 pub mod key;
 pub mod macros;
 pub mod menu;
