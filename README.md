@@ -266,7 +266,7 @@ still work.
 netcmdr-bridge --host 192.0.2.10   # serve on 127.0.0.1:8080
 ```
 
-Browsers can't handshake with the device (see [TLS](#tls)), so the bridge
+Browsers can't open the device's TCP session sockets, so the bridge
 terminates its TLS and offers HTTP and WebSockets:
 
 | Route | Purpose |
@@ -330,7 +330,7 @@ from any host (cross-compiling is just `GOARCH`). CI pushes both to
 |---|---|---|
 | Management, reading | `POST /message.pv`, TLS 1.2, `CMA_REQUEST` → `PV_*` XML | **Implemented, verified** |
 | Management, writing | `CMA_PERMISSION` → `CMA_CONFIG` → `CMA_PERMISSION` | **Implemented, verified** |
-| Management, uploads | `CMA_POST`: firmware, SIU firmware, TLS certificate | Implemented, **unexercised** |
+| Management, uploads | `CMA_POST`: firmware, SIU firmware, TLS certificate | Implemented; certificate **verified**, firmware **unexercised** |
 | Session framing (`KVMMsg`) | per-channel TCP 900, plaintext handshake ± TLS | **Implemented, verified** |
 | Video codec | LZW / zlib + tile bitfield, RGB555 or YCbCr | **Implemented**; RGB555 verified, YCbCr unexercised |
 | Keyboard and mouse | 16-byte records on the kbmouse channel | **Implemented, verified** |

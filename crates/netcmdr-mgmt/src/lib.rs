@@ -437,26 +437,26 @@ impl Client {
     }
 
     /// Install a PEM certificate and key. `key_password` is `""` if the key is
-    /// unencrypted.
+    /// unencrypted. The device reboots.
     ///
     /// The vendor puts the certificate in `<private>` and the key in `<public>`
-    /// (`InstallSslHttpCmd`); we match it.
+    /// (`InstallSslHttpCmd`); we match it. Without config permission the device
+    /// answers "INVALID XML, cmd not supported".
     pub fn install_certificate(
         &self,
         certificate: &str,
         private_key: &str,
         key_password: &str,
     ) -> Result<(), Error> {
-        self.message(
-            "CMA_POST",
-            &format!(
-                "<post_data value=\"ssl_certificate\"><private password=\"{}\"><![CDATA[{}]]></private><public><![CDATA[{}]]></public></post_data>",
-                attr(key_password),
-                cdata_safe(certificate)?,
-                cdata_safe(private_key)?,
-            ),
-            Some(Duration::from_secs(60)),
-        )?;
+        let body = format!(
+            "<post_data value=\"ssl_certificate\"><private password=\"{}\"><![CDATA[{}]]></private><public><![CDATA[{}]]></public></post_data>",
+            attr(key_password),
+            cdata_safe(certificate)?,
+            cdata_safe(private_key)?,
+        );
+        self.holding_config_permission(false, || {
+            self.message("CMA_POST", &body, Some(Duration::from_secs(60)))
+        })?;
         Ok(())
     }
 
