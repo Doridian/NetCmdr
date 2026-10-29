@@ -49,6 +49,7 @@ impl Session {
             &cfg.session_id,
             SocketType::Cmd,
             cfg.connect_timeout,
+            &cfg.tls,
         )?;
         cmd.set_read_timeout(Some(LOGIN_POLL))?;
 
@@ -70,6 +71,7 @@ impl Session {
             &cfg.session_id,
             SocketType::Video,
             cfg.connect_timeout,
+            &cfg.tls,
         )?;
         let km = TcpChannel::connect(
             &cfg.host,
@@ -77,6 +79,7 @@ impl Session {
             &cfg.session_id,
             SocketType::KeyboardMouse,
             cfg.connect_timeout,
+            &cfg.tls,
         )?;
 
         // Non-blocking from here, so a quiet channel can't stall the others.

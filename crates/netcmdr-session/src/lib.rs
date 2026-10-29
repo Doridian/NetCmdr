@@ -11,7 +11,7 @@
 //! use netcmdr_session::{Session, SessionConfig, Event, Input};
 //!
 //! // Log in over HTTPS first (netcmdr-mgmt) to get a SESSIONID, then:
-//! let cfg = SessionConfig::new("192.0.2.10", 900, "SESSIONID", "admin", 1);
+//! let cfg = SessionConfig::new("kvm.example.net", 900, "SESSIONID", "admin", 1);
 //! let session = Session::connect(cfg)?;
 //!
 //! session.send_input(Input::MouseMove { x: 100, y: 100 })?;

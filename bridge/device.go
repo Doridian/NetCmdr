@@ -5,6 +5,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -47,26 +48,14 @@ func socketTypeByName(name string) (SocketType, bool) {
 	return 0, false
 }
 
-// deviceTLS is the TLS config for this device.
-//
-// The device offers only DHE and static RSA, and Go has no DHE, so static RSA
-// suites must be listed explicitly (Go 1.22 removed them from the defaults).
-// This loses forward secrecy on /message.pv, matching the session sockets.
-// See README.md#tls.
-//
-// The certificate is self-signed and not verified, as in the vendor client.
-func deviceTLS() *tls.Config {
-	return &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS12,
-		CipherSuites: []uint16{
-			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-		},
-	}
-}
+// The device has no ECDHE, and Go has no DHE, so only static RSA is left: no
+// forward secrecy. Go 1.22 dropped those suites from the defaults, so they are
+// listed. Each list is what that port accepts (firmware 2.2.1258.1.0); see
+// README.md#tls.
+var (
+	httpsSuites   = []uint16{tls.TLS_RSA_WITH_AES_256_CBC_SHA}
+	sessionSuites = []uint16{tls.TLS_RSA_WITH_AES_256_GCM_SHA384, tls.TLS_RSA_WITH_AES_128_GCM_SHA256}
+)
 
 // Device is the bridge's fixed target.
 type Device struct {
@@ -74,6 +63,22 @@ type Device struct {
 	HTTPSPort   uint16
 	SessionPort uint16
 	Timeout     time.Duration
+	// RootCAs are trusted for the device's certificate; nil means the
+	// system's.
+	RootCAs *x509.CertPool
+	// Insecure accepts any certificate, such as the factory self-signed one.
+	Insecure bool
+}
+
+// tlsConfig is the TLS config for this device with the given suites.
+func (d *Device) tlsConfig(suites []uint16) *tls.Config {
+	return &tls.Config{
+		ServerName:         d.Host,
+		RootCAs:            d.RootCAs,
+		InsecureSkipVerify: d.Insecure,
+		MinVersion:         tls.VersionTLS12,
+		CipherSuites:       suites,
+	}
 }
 
 // dialTLS opens a TCP connection to addr and completes the device's handshake.
@@ -90,7 +95,7 @@ func (d *Device) dialTLS(addr string) (*tls.Conn, error) {
 		_ = raw.Close()
 		return nil, err
 	}
-	conn := tls.Client(raw, deviceTLS())
+	conn := tls.Client(raw, d.tlsConfig(httpsSuites))
 	if err := conn.Handshake(); err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("tls: %w", err)
@@ -201,7 +206,7 @@ func (d *Device) DialSession(sessionID string, socket SocketType) (net.Conn, err
 		return raw, nil
 	}
 
-	conn := tls.Client(raw, deviceTLS())
+	conn := tls.Client(raw, d.tlsConfig(sessionSuites))
 	if err := conn.Handshake(); err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("tls: %w", err)

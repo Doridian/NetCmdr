@@ -196,27 +196,17 @@ pub struct Client {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Client {
-    /// Connect and log in.
+    /// Connect and log in, verifying the certificate against the system's
+    /// trusted roots.
     pub fn connect(host: &str, username: &str, password: &str) -> Result<Self, Error> {
         Client::connect_with(
-            host,
-            netcmdr_proto::DEFAULT_HTTPS_PORT,
+            Endpoint::new(host, netcmdr_proto::DEFAULT_HTTPS_PORT),
             username,
             password,
-            Duration::from_secs(20),
         )
     }
 
-    pub fn connect_with(
-        host: &str,
-        port: u16,
-        username: &str,
-        password: &str,
-        timeout: Duration,
-    ) -> Result<Self, Error> {
-        let mut endpoint = Endpoint::new(host, port);
-        endpoint.timeout = timeout;
-
+    pub fn connect_with(endpoint: Endpoint, username: &str, password: &str) -> Result<Self, Error> {
         let xml = transport::post_message_pv(&endpoint, &request::authorize(username, password))?;
         let reply = parse_auth_reply(&xml)?;
 

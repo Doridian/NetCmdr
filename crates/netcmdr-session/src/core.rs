@@ -29,6 +29,7 @@ use std::collections::VecDeque;
 
 use netcmdr_proto::command::{VideoFilter, VideoSetting};
 use netcmdr_proto::kvmmsg::{Cmd, CmdFlag, Header, MagicNumber, Message};
+use netcmdr_proto::tls::TlsOptions;
 
 use crate::channel::{Channel, Transport};
 use crate::input::{self, Input};
@@ -58,6 +59,8 @@ pub struct SessionConfig {
     pub target_port: u32,
     pub exclusive: bool,
     pub connect_timeout: Duration,
+    /// For the command and keyboard/mouse channels.
+    pub tls: TlsOptions,
 }
 
 impl SessionConfig {
@@ -76,6 +79,7 @@ impl SessionConfig {
             target_port,
             exclusive: true,
             connect_timeout: Duration::from_secs(20),
+            tls: TlsOptions::default(),
         }
     }
 }

@@ -40,8 +40,11 @@ netcmdr --host 192.0.2.10 users      # local accounts
 
 Credentials default to `admin` / `access`; override with `--user` / `--password`
 or `NETCMDR_USER` / `NETCMDR_PASSWORD`. `--host` can come from `NETCMDR_HOST`.
-The device's self-signed certificate is not verified, so treat the network as
-trusted or tunnel it. See [TLS](#tls).
+
+The device's certificate is verified, so connect by a name it lists. The
+factory certificate is self-signed: pass `--insecure` (`-k`, or
+`NETCMDR_INSECURE=1`) to skip the check, or `--ca-file` to trust it. See
+[TLS](#tls).
 
 #### Changing settings
 
@@ -303,7 +306,8 @@ Tested against a live device: management login, TLS command channel and video.
 #### Container
 
 `nix build .#netcmdr-bridge` produces a static binary (Go, `CGO_ENABLED=0`) that
-reads nothing at runtime except `/etc/resolv.conf` if `--host` is a name.
+reads nothing at runtime except `/etc/resolv.conf` if `--host` is a name, and
+the system CA bundle (plus `--ca-file`) unless `--insecure`.
 `nix build .#netcmdr-bridge-image` wraps it in a single-layer image with no base
 or shell.
 
@@ -311,6 +315,9 @@ or shell.
 docker load < $(nix build --no-link --print-out-paths .#netcmdr-bridge-image)
 docker run -d -e NETCMDR_HOST=192.0.2.10 -p 8080:8080 netcmdr-bridge:0.1.0
 ```
+
+Add `-e NETCMDR_INSECURE=1` for a self-signed certificate, or mount a PEM file
+and set `NETCMDR_CA_FILE`. The image carries the Mozilla CA bundle.
 
 - The device is set via the environment so extra arguments don't replace it.
 - The image listens on `0.0.0.0:8080`; the same warning about reachability
@@ -340,23 +347,47 @@ from any host (cross-compiling is just `GOARCH`). CI pushes both to
 
 ## TLS
 
-The device supports TLS 1.0–1.2 with a self-signed RSA-2048 certificate, but
-offers **no ECDHE** (only DHE and static RSA) and no TLS 1.3, so rustls can't
-connect. The Rust crates use OpenSSL with:
+The device speaks TLS 1.2 only, with **no ECDHE**, so rustls can't connect and
+the Rust crates use OpenSSL. Firmware before 2.2.1258.1.0 (TLS 1.0 only) is
+unsupported. What it accepts differs by port:
 
-- `SECLEVEL=1`, for the 1024-bit DHE group (keeps forward secrecy).
-- TLS 1.2 minimum. Firmware before 2.2.1258.1.0 (TLS 1.0 only) is unsupported.
+| Port | Accepts | netcmdr uses |
+|---|---|---|
+| HTTPS (443) | DHE (1024-bit group) with AES-GCM; static RSA as `AES256-SHA` only | `DHE+AESGCM` at OpenSSL security level 1 |
+| Session (900) | static RSA only, with AES-GCM | `kRSA+AESGCM` at the default level 2 |
 
-The certificate is not verified, as in the vendor client.
+Level 1 is needed on 443 only because the device's DHE group is 1024-bit.
+Excluding DHE would allow level 2, but only by falling back to `AES256-SHA`:
+CBC with a SHA-1 MAC and no forward secrecy. The session port has no forward
+secrecy to offer.
+
+### Certificates
+
+Every client checks that the certificate chains to a trusted one and names the
+host you connected to:
+
+- `--insecure` / `-k` (`NETCMDR_INSECURE`) skips the check, as the vendor
+  client always does. Needed for the factory self-signed certificate, unless
+  you trust it with `--ca-file` and connect by the name in it.
+- `--ca-file` (`NETCMDR_CA_FILE`) trusts the PEM certificates in a file on top
+  of the system's. Any of them can anchor the chain: a private CA, an
+  intermediate, or the device's own certificate.
+
+**The device sends no chain**, only its own certificate. For a certificate from
+a public CA, `--ca-file` needs the issuing intermediate (for Let's Encrypt, the
+one at the leaf's *CA Issuers* URL).
+
+Both ports serve the same certificate, installed with `netcmdr certificate`.
 
 ### The bridge is Go
 
 Go has no DHE, so the bridge uses static RSA suites, listed explicitly since
 Go 1.22 dropped them from the defaults. **This loses forward secrecy on
-`/message.pv`**: someone who records traffic and later obtains the device's RSA
-key can decrypt it. The session sockets on port 900 already use static RSA
-(`AES256-GCM-SHA384`) with either client. Treat the network as trusted or
-tunnel it.
+`/message.pv`** and means `AES256-SHA` there: someone who records traffic and
+later obtains the device's RSA key can decrypt it. The session sockets on port
+900 already use static RSA (`AES256-GCM-SHA384`) with either client. Treat the
+network as trusted or tunnel it. The bridge takes the same `-insecure` and
+`-ca-file` options.
 
 In return, the bridge cross-compiles with just `GOARCH`: no libc, OpenSSL or
 extra toolchain. `flake.nix` exports `GOARCH` in `postConfigure` (so the module

@@ -10,9 +10,12 @@
 //!
 //! [`command`] builds the app-level `<commands>` documents, which the client
 //! re-encodes as [`kvmmsg`] messages.
+//!
+//! [`tls`] is how the native clients reach the device over TLS.
 
 pub mod command;
 pub mod kvmmsg;
+pub mod tls;
 
 /// Default session port (configurable). 901/902 from older firmware were
 /// closed on the live device.

@@ -94,23 +94,39 @@ func selfSigned(t *testing.T) tls.Certificate {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
-// deviceLikeTLS offers what the device offers Go: TLS 1.2, static RSA.
-func deviceLikeTLS(t *testing.T) *tls.Config {
+// deviceLikeTLS offers what the device offers Go on one port: TLS 1.2,
+// static RSA.
+func deviceLikeTLS(cert tls.Certificate, suites []uint16) *tls.Config {
 	return &tls.Config{
-		Certificates: []tls.Certificate{selfSigned(t)},
+		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 		MaxVersion:   tls.VersionTLS12,
-		CipherSuites: []uint16{tls.TLS_RSA_WITH_AES_256_GCM_SHA384},
+		CipherSuites: suites,
 	}
 }
 
-// Would fail first if Go dropped RSA key exchange.
-func TestPostMessagePVAgainstADeviceLikeServer(t *testing.T) {
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", deviceLikeTLS(t))
+// trusting is a pool holding just cert.
+func trusting(t *testing.T, cert tls.Certificate) *x509.CertPool {
+	t.Helper()
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = ln.Close() }()
+	pool := x509.NewCertPool()
+	pool.AddCert(parsed)
+	return pool
+}
+
+// fakeHTTPS answers one POST /message.pv like the device's HTTPS port.
+func fakeHTTPS(t *testing.T, cert tls.Certificate) uint16 {
+	t.Helper()
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", deviceLikeTLS(cert, []uint16{
+		tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
 
 	go func() {
 		conn, err := ln.Accept()
@@ -124,15 +140,36 @@ func TestPostMessagePVAgainstADeviceLikeServer(t *testing.T) {
 		}
 		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n<PV_AUTH/>")
 	}()
+	return uint16(ln.Addr().(*net.TCPAddr).Port)
+}
 
-	addr := ln.Addr().(*net.TCPAddr)
-	device := &Device{Host: "127.0.0.1", HTTPSPort: uint16(addr.Port), Timeout: 5 * time.Second}
+// Would fail first if Go dropped RSA key exchange.
+func TestPostMessagePVAgainstADeviceLikeServer(t *testing.T) {
+	cert := selfSigned(t)
+	port := fakeHTTPS(t, cert)
+	device := &Device{Host: "127.0.0.1", HTTPSPort: port, Timeout: 5 * time.Second, RootCAs: trusting(t, cert)}
 	body, err := device.PostMessagePV("<CMA_Message/>")
 	if err != nil {
 		t.Fatalf("the device's TLS profile must be reachable: %v", err)
 	}
 	if body != "<PV_AUTH/>" {
 		t.Fatalf("got %q; want the device's answer", body)
+	}
+}
+
+func TestAnUntrustedCertificateIsRefused(t *testing.T) {
+	port := fakeHTTPS(t, selfSigned(t))
+	device := &Device{Host: "127.0.0.1", HTTPSPort: port, Timeout: 5 * time.Second, RootCAs: x509.NewCertPool()}
+	if _, err := device.PostMessagePV("<CMA_Message/>"); err == nil {
+		t.Fatal("an untrusted certificate must fail the handshake")
+	}
+}
+
+func TestInsecureAcceptsAnyCertificate(t *testing.T) {
+	port := fakeHTTPS(t, selfSigned(t))
+	device := &Device{Host: "127.0.0.1", HTTPSPort: port, Timeout: 5 * time.Second, RootCAs: x509.NewCertPool(), Insecure: true}
+	if _, err := device.PostMessagePV("<CMA_Message/>"); err != nil {
+		t.Fatalf("--insecure must accept an untrusted certificate: %v", err)
 	}
 }
 
@@ -220,11 +257,13 @@ func TestDialSessionCompletesThePlaintextHandshake(t *testing.T) {
 
 // The command channel upgrades to TLS after the same plaintext handshake.
 func TestDialSessionUpgradesTheCommandChannelToTLS(t *testing.T) {
-	port := fakeDevice(t, SocketCmd, deviceLikeTLS(t), func(conn net.Conn, _ *bufio.Reader) {
+	cert := selfSigned(t)
+	serverTLS := deviceLikeTLS(cert, []uint16{tls.TLS_RSA_WITH_AES_256_GCM_SHA384})
+	port := fakeDevice(t, SocketCmd, serverTLS, func(conn net.Conn, _ *bufio.Reader) {
 		_, _ = conn.Write([]byte("secret"))
 	})
 
-	device := &Device{Host: "127.0.0.1", SessionPort: port, Timeout: 5 * time.Second}
+	device := &Device{Host: "127.0.0.1", SessionPort: port, Timeout: 5 * time.Second, RootCAs: trusting(t, cert)}
 	conn, err := device.DialSession("testsession", SocketCmd)
 	if err != nil {
 		t.Fatal(err)

@@ -1853,6 +1853,7 @@ dependencies = [
 name = "netcmdr-proto"
 version = "0.1.0"
 dependencies = [
+ "openssl",
  "thiserror 2.0.21",
 ]
 

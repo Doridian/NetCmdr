@@ -18,7 +18,8 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use netcmdr_proto::kvmmsg::SocketType;
-use openssl::ssl::{SslConnector, SslMethod, SslStream, SslVerifyMode, SslVersion};
+use netcmdr_proto::tls::{self, TlsOptions};
+use openssl::ssl::SslStream;
 
 use crate::channel::{Channel, Transport};
 use crate::Error;
@@ -104,6 +105,7 @@ pub fn connect_stream(
     session_id: &str,
     socket_type: SocketType,
     timeout: Duration,
+    tls: &TlsOptions,
 ) -> Result<Stream, Error> {
     let tcp = TcpStream::connect((host, port))?;
     tcp.set_nodelay(true).ok();
@@ -127,31 +129,15 @@ pub fn connect_stream(
     }
 
     let stream = if socket_type.uses_tls() {
-        Stream::Tls(Box::new(start_tls(host, plain)?))
+        Stream::Tls(Box::new(
+            tls::connect(tls, tls::SESSION_CIPHERS, host, plain).map_err(Error::Tls)?,
+        ))
     } else {
         Stream::Plain(plain)
     };
 
     tracing::debug!(?socket_type, tls = socket_type.uses_tls(), "channel open");
     Ok(stream)
-}
-
-/// Start TLS (1.2, `AES256-GCM-SHA384`). Security level 1 because port 443's
-/// DHE group is 1024-bit and the connector is shared.
-///
-/// The certificate is self-signed and not verified, as in the vendor client.
-fn start_tls(host: &str, tcp: TcpStream) -> Result<SslStream<TcpStream>, Error> {
-    let mut builder = SslConnector::builder(SslMethod::tls_client())?;
-    builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
-    builder.set_cipher_list("DEFAULT@SECLEVEL=1")?;
-    builder.set_verify(SslVerifyMode::NONE);
-    let connector = builder.build();
-
-    let mut cfg = connector.configure()?;
-    cfg.set_verify_hostname(false);
-    cfg.set_use_server_name_indication(false);
-    cfg.connect(host, tcp)
-        .map_err(|e| Error::Tls(e.to_string()))
 }
 
 /// `KVMMsg` framing over a TCP session socket.
@@ -164,8 +150,9 @@ impl Channel<Stream> {
         session_id: &str,
         socket_type: SocketType,
         timeout: Duration,
+        tls: &TlsOptions,
     ) -> Result<Self, Error> {
-        let stream = connect_stream(host, port, session_id, socket_type, timeout)?;
+        let stream = connect_stream(host, port, session_id, socket_type, timeout, tls)?;
         Ok(Channel::new(stream, socket_type))
     }
 
@@ -236,6 +223,7 @@ mod tests {
             "sess",
             SocketType::Video,
             Duration::from_secs(5),
+            &TlsOptions::default(),
         )
         .unwrap();
         assert_eq!(ch.recv().unwrap(), msg);
@@ -257,6 +245,7 @@ mod tests {
             "sess",
             SocketType::Video,
             Duration::from_secs(5),
+            &TlsOptions::default(),
         );
         assert!(matches!(result, Err(Error::Handshake { got: 99, .. })));
     }
@@ -287,6 +276,7 @@ mod tests {
             "sess",
             SocketType::Video,
             Duration::from_millis(30),
+            &TlsOptions::default(),
         )
         .unwrap();
         // Early polls time out.
@@ -317,6 +307,7 @@ mod tests {
             "sess",
             SocketType::Video,
             Duration::from_secs(5),
+            &TlsOptions::default(),
         )
         .unwrap();
         assert!(matches!(ch.recv(), Err(Error::OversizedMessage(_))));

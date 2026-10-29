@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use netcmdr_proto::tls::TlsOptions;
 use netcmdr_session::align::{self, Aligner, Step as AlignStep};
 use netcmdr_session::{Event, Session, SessionConfig, VideoSettings};
 
@@ -46,6 +47,16 @@ struct Args {
     /// Password.
     #[arg(long, short, env = "NETCMDR_PASSWORD", default_value = "access")]
     password: String,
+
+    /// Skip checking the device's TLS certificate, e.g. for the factory
+    /// self-signed one.
+    #[arg(long, short = 'k', env = "NETCMDR_INSECURE", value_parser = clap::builder::BoolishValueParser::new())]
+    insecure: bool,
+
+    /// Also trust the certificates in this PEM file: a private CA, the
+    /// intermediate the device doesn't send, or the device's own certificate.
+    #[arg(long, value_name = "FILE", env = "NETCMDR_CA_FILE")]
+    ca_file: Option<PathBuf>,
 
     /// Target switch port to view, 1-based.
     #[arg(long, short, default_value_t = 1)]
@@ -100,9 +111,16 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    let tls = TlsOptions {
+        verify: !args.insecure,
+        ca_file: args.ca_file.clone(),
+    };
+    let mut endpoint = netcmdr_mgmt::Endpoint::new(&args.host, netcmdr_proto::DEFAULT_HTTPS_PORT);
+    endpoint.tls = tls.clone();
+
     // Keep the client alive; logging out invalidates the session token.
     let client = Arc::new(
-        netcmdr_mgmt::Client::connect(&args.host, &args.user, &args.password)
+        netcmdr_mgmt::Client::connect_with(endpoint, &args.user, &args.password)
             .with_context(|| format!("logging in to {}", args.host))?,
     );
 
@@ -126,6 +144,7 @@ fn main() -> Result<()> {
         args.target,
     );
     cfg.exclusive = !args.shared;
+    cfg.tls = tls;
 
     tracing::info!(host = %args.host, port, target = args.target, "opening session");
     let session = Session::connect(cfg).context("opening the KVM session")?;

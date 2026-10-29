@@ -2,12 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! HTTPS transport for the device's `/message.pv` endpoint.
 //!
-//! The device (Appweb 2.4.x on Windows CE) speaks TLS 1.2 with a self-signed
-//! RSA-2048 cert, but:
-//!
-//! - **No ECDHE and no TLS 1.3**, so rustls can't connect. Hence OpenSSL.
-//! - A 1024-bit DHE group, rejected at OpenSSL's default level 2. Level 1
-//!   keeps forward secrecy (unlike falling back to static RSA).
+//! The device (Appweb 2.4.x on Windows CE) has no ECDHE and no TLS 1.3, so
+//! rustls can't connect. Hence OpenSSL; see [`netcmdr_proto::tls`].
 //!
 //! HTTP is hand-rolled: one POST with `Connection: close`, read to EOF.
 
@@ -15,7 +11,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
+use netcmdr_proto::tls::{self, TlsOptions};
 
 use crate::Error;
 
@@ -24,6 +20,7 @@ pub struct Endpoint {
     pub host: String,
     pub port: u16,
     pub timeout: Duration,
+    pub tls: TlsOptions,
 }
 
 impl Endpoint {
@@ -32,6 +29,7 @@ impl Endpoint {
             host: host.into(),
             port,
             timeout: Duration::from_secs(20),
+            tls: TlsOptions::default(),
         }
     }
 }
@@ -39,25 +37,12 @@ impl Endpoint {
 /// POST `body` to `/message.pv` over a fresh connection (session state lives
 /// in the XML) and return the response body.
 pub fn post_message_pv(ep: &Endpoint, body: &str) -> Result<String, Error> {
-    let mut builder = SslConnector::builder(SslMethod::tls_client())?;
-    builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
-    // For the 1024-bit DHE group.
-    builder.set_cipher_list("DEFAULT@SECLEVEL=1")?;
-    // Self-signed; treat the network as trusted or tunnel it.
-    builder.set_verify(SslVerifyMode::NONE);
-    let connector = builder.build();
-
     let tcp = TcpStream::connect((ep.host.as_str(), ep.port))?;
     tcp.set_read_timeout(Some(ep.timeout))?;
     tcp.set_write_timeout(Some(ep.timeout))?;
     tcp.set_nodelay(true).ok();
 
-    let mut cfg = connector.configure()?;
-    cfg.set_verify_hostname(false);
-    cfg.set_use_server_name_indication(false);
-    let mut tls = cfg
-        .connect(&ep.host, tcp)
-        .map_err(|e| Error::Tls(e.to_string()))?;
+    let mut tls = tls::connect(&ep.tls, tls::HTTPS_CIPHERS, &ep.host, tcp).map_err(Error::Tls)?;
 
     let request = format!(
         "POST /message.pv HTTP/1.1\r\n\

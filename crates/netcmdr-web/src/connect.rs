@@ -53,6 +53,7 @@ pub async fn connect(
         target_port,
         exclusive,
         connect_timeout: LOGIN_TIMEOUT,
+        tls: Default::default(), // the bridge does the TLS
     };
     let mut login = Login::begin(cmd, &cfg).map_err(|e| format!("sending the login: {e}"))?;
 

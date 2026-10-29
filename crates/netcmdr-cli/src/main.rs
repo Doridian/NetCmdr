@@ -16,7 +16,8 @@ mod show;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use netcmdr_mgmt::{Client, PowerCommand};
+use netcmdr_mgmt::{Client, Endpoint, PowerCommand};
+use netcmdr_proto::tls::TlsOptions;
 
 const CONNECTION: &str = "Connection";
 
@@ -59,6 +60,16 @@ struct Cli {
         help_heading = CONNECTION
     )]
     password: String,
+
+    /// Skip checking the device's TLS certificate, e.g. for the factory
+    /// self-signed one.
+    #[arg(long, short = 'k', env = "NETCMDR_INSECURE", value_parser = clap::builder::BoolishValueParser::new(), global = true, help_heading = CONNECTION)]
+    insecure: bool,
+
+    /// Also trust the certificates in this PEM file: a private CA, the
+    /// intermediate the device doesn't send, or the device's own certificate.
+    #[arg(long, value_name = "FILE", env = "NETCMDR_CA_FILE", global = true, help_heading = CONNECTION)]
+    ca_file: Option<std::path::PathBuf>,
 
     /// Print the stored LDAP password, RADIUS secrets and SNMP community
     /// instead of masking them.
@@ -383,14 +394,13 @@ fn main() -> Result<()> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("no device given; pass --host or set NETCMDR_HOST"))?;
 
-    let client = Client::connect_with(
-        host,
-        cli.port,
-        &cli.user,
-        &cli.password,
-        std::time::Duration::from_secs(20),
-    )
-    .with_context(|| format!("connecting to {host}"))?;
+    let mut endpoint = Endpoint::new(host, cli.port);
+    endpoint.tls = TlsOptions {
+        verify: !cli.insecure,
+        ca_file: cli.ca_file.clone(),
+    };
+    let client = Client::connect_with(endpoint, &cli.user, &cli.password)
+        .with_context(|| format!("connecting to {host}"))?;
 
     run(&client, &cli)
 }

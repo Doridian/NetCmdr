@@ -314,7 +314,8 @@
 
             # Copied (a store symlink would dangle), then scrubbed of the store
             # paths nixpkgs patches into Go's stdlib (iana-etc, mailcap,
-            # tzdata), none of which are used.
+            # tzdata), none of which are used. The CA bundle is where Go looks
+            # first, for verifying the device's certificate.
             copyToRoot =
               pkgs.runCommand "netcmdr-bridge-root-${goarch}" { nativeBuildInputs = [ pkgs.nukeReferences ]; }
                 ''
@@ -325,6 +326,7 @@
                     }
                   }/bin/netcmdr-bridge $out/bin/netcmdr-bridge
                   nuke-refs $out/bin/netcmdr-bridge
+                  install -Dm644 ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/ssl/certs/ca-certificates.crt
                 '';
 
             config = {

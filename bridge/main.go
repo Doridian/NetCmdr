@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -44,6 +46,8 @@ func run() error {
 		sessionPort = flag.Uint("session-port", 900, "Device session port. The login reply advertises this; override it if the device has been moved off the default.")
 		listen      = flag.String("listen", "127.0.0.1:8080", "Address to listen on.")
 		timeout     = flag.Uint("timeout", 20, "How long to wait on the device, in `SECONDS`.")
+		insecure    = flag.Bool("insecure", envBool("NETCMDR_INSECURE"), "Skip checking the device's TLS certificate, e.g. for the factory self-signed one. [$NETCMDR_INSECURE]")
+		caFile      = flag.String("ca-file", os.Getenv("NETCMDR_CA_FILE"), "Also trust the certificates in this PEM `FILE`: a private CA, the intermediate the device doesn't send, or the device's own certificate. [$NETCMDR_CA_FILE]")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -54,6 +58,11 @@ func run() error {
 	}
 	if *httpsPort > 65535 || *sessionPort > 65535 {
 		return errors.New("port numbers must be below 65536")
+	}
+
+	rootCAs, err := loadRootCAs(*caFile)
+	if err != nil {
+		return err
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()}))
@@ -70,6 +79,8 @@ func run() error {
 			HTTPSPort:   uint16(*httpsPort),
 			SessionPort: uint16(*sessionPort),
 			Timeout:     time.Duration(*timeout) * time.Second,
+			RootCAs:     rootCAs,
+			Insecure:    *insecure,
 		},
 		Assets: assets,
 		Log:    log,
@@ -116,6 +127,36 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+// loadRootCAs is the system's roots plus those in path, or nil (the system's)
+// if path is empty.
+func loadRootCAs(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// Without system roots, the file alone is trusted.
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%s has no PEM certificates", path)
+	}
+	return pool, nil
+}
+
+// envBool reads a yes/no environment variable; unset or unparsable is false.
+func envBool(name string) bool {
+	switch strings.ToLower(os.Getenv(name)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // logLevel reads NETCMDR_LOG.
