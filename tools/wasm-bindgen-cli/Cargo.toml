@@ -7,4 +7,4 @@ edition = "2021"
 publish = false
 
 [dependencies]
-wasm-bindgen-cli = "=0.2.129"
+wasm-bindgen-cli = "=0.2.130"
