@@ -99,6 +99,7 @@ func relay(ctx context.Context, conn *websocket.Conn, device net.Conn) error {
 	// Unblock the other copy.
 	_ = device.Close()
 	_ = browser.Close()
+	//nolint:errcheck
 	<-done
 
 	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
