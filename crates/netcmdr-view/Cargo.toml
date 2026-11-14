@@ -24,7 +24,7 @@ winit = "0.30"
 egui = "0.37"
 egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 egui_glow = "0.37"
-glow = "0.17"
+glow = "0.18"
 glutin = "0.32"
 glutin-winit = "0.5"
 raw-window-handle = "0.6"
