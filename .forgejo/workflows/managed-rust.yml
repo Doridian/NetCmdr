@@ -1,0 +1,33 @@
+name: Rust check
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  check-rust:
+    runs-on: ${{ vars.MANAGED_RUNNER_TAG || 'ubuntu-26.04' }}
+    env:
+      # Warnings fail build and test too, Cargo's own lints included
+      CARGO_BUILD_WARNINGS: deny
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+      # rustup and stable (with clippy and rustfmt) come pre-installed in the runner image.
+      # This installs the toolchain from rust-toolchain.toml instead, if the repo pins one.
+      - name: Set up Rust toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy rustfmt
+      # Caches ~/.cargo and target/ via the runner's cache server
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - name: Rust format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust build
+        run: cargo build --workspace
+      - name: Rust test
+        run: cargo test --workspace
