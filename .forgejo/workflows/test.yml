@@ -1,5 +1,5 @@
-# Lint, then test, Rust and Go, using the flake's dev shell so CI matches
-# `nix develop`. One job, so nothing is tested until everything lints.
+# Lint, then test, the Go bridge, using the flake's dev shell so CI matches
+# `nix develop`. The Rust workspace is checked by the shared managed-rust.yml.
 name: Test
 
 concurrency:
@@ -25,20 +25,12 @@ jobs:
       - name: Build the dev shell
         run: nix develop --command true
 
-      - name: Check the Rust formatting
-        run: nix develop --command cargo fmt --all --check
-      # netcmdr-web is empty off wasm32; bridge-image.yml builds it.
-      - name: Clippy
-        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
-
       # golangci-lint includes govet. See bridge/.golangci.yml.
       - name: Check the bridge's formatting
         run: nix develop --command sh -c 'cd bridge && golangci-lint fmt --diff'
       - name: Lint the bridge
         run: nix develop --command sh -c 'cd bridge && golangci-lint run ./...'
 
-      - name: Test the workspace
-        run: nix develop --command cargo test --workspace
       # Without a packed client, as the asset tests expect.
       - name: Test the bridge
         run: nix develop --command sh -c 'cd bridge && go test ./...'

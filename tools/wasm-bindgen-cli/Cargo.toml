@@ -8,3 +8,7 @@ publish = false
 
 [dependencies]
 wasm-bindgen-cli = "=0.2.130"
+
+# The dependency is only there to be resolved, never used.
+[lints.cargo]
+unused_dependencies = "allow"
